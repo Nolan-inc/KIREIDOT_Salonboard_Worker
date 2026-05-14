@@ -1,0 +1,21 @@
+{
+  "name": "kireidot-salonboard-worker",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Salonboard sync worker for KIREIDOT (local dev skeleton)",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx worker.ts",
+    "once": "tsx worker.ts --once",
+    "dry-run": "DRY_RUN=1 tsx worker.ts",
+    "inspect": "tsx inspect.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
