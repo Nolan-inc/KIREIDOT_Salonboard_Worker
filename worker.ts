@@ -84,12 +84,38 @@ type Job = {
   };
 };
 
+/**
+ * Worker → Admin callback の payload。
+ * bookings[] の各要素は KIREIDOT_Admin/src/app/api/salonboard/callback/route.ts
+ * のドキュメントコメントと完全一致させること (RPC salonboard_bulk_upsert_bookings
+ * が期待するキー)。
+ */
+type ScrapedBooking = {
+  external_id: string;
+  scheduled_at: string;            // ISO 8601 (JST → UTC 変換済み)
+  duration_min?: number | null;
+  customer_name?: string | null;
+  customer_code?: string | null;    // SB 顧客コード "YG12345678" など
+  customer_phone?: string | null;
+  customer_email?: string | null;
+  customer_birthday?: string | null; // YYYY-MM-DD
+  menu_name?: string | null;
+  amount?: number | null;
+  status?: "confirmed" | "cancelled" | "completed" | "no_show" | "pending";
+  staff_name?: string | null;       // 表示名 (例: "(指)Hina")
+  staff_external_id?: string | null;
+  reservation_route?: string | null;
+  payment_method_label?: string | null;
+  coupon_name?: string | null;
+  notes?: string | null;
+};
+
 type CallbackBody = {
   job_id: string;
   status: "succeeded" | "failed" | "retry";
   error?: string;
   summary?: string;
-  bookings?: unknown[];
+  bookings?: ScrapedBooking[];
   sales?: unknown;
   external_id?: string;
   block?: { until: string; reason: string };
@@ -206,6 +232,11 @@ async function handleJob(job: Job): Promise<void> {
 
     // TODO: ここから各ジョブタイプごとの処理を実装する
     //  - fetch_bookings: 予約一覧ページへ遷移して scrape -> bookings[]
+    //      → ScrapedBooking 型のキーを全て埋める。最低限:
+    //          external_id / scheduled_at / customer_name / customer_code /
+    //          staff_name / amount / status / reservation_route / coupon_name
+    //        が揃うと顧客名寄せ (customers_resolve_or_upsert) と
+    //        スタッフ自動マッチ (resolve_salonboard_staff_id) が機能する。
     //  - fetch_sales:    売上ページへ遷移して scrape -> sales
     //  - push_booking:   payload.booking_id から予約を取り出して登録
     //  - cancel_booking: payload.booking_id の予約をサロンボード上で取消

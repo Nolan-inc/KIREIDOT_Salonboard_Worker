@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-brand: #f19894;
+  --color-brand-strong: #e27874;
+  --color-brand-light: #fcedeb;
+  --color-bg: #fffaf9;
+  --color-bg-top: #fff4f1;
+  --color-bg-bottom: #fffbf9;
+  --color-card: #ffffff;
+  --color-ink: #2a1f1f;
+  --color-ink-soft: #574747;
+  --color-muted: #8e8484;
+  --color-hairline: #f0dfdd;
+  --radius-card: 16px;
+  --radius-input: 14px;
+  --shadow-card: 0 2px 8px rgb(0 0 0 / 6%);
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-image: linear-gradient(
+    180deg,
+    var(--color-bg-top) 0%,
+    var(--color-bg-bottom) 50%,
+    var(--color-bg) 100%
+  );
+  background-attachment: fixed;
+}
+
+/* タップハイライト抑制 */
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* タイトルバーをドラッグ可能にする (macOS hiddenInset 風) */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* LP 由来のハイライト下線 */
+.text-highlight {
+  background: linear-gradient(transparent 62%, rgba(248, 210, 206, 0.85) 62%);
+  padding: 0 0.15em;
+}
+
+/* glass-card */
+.glass-card {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: saturate(1.4) blur(18px);
+  -webkit-backdrop-filter: saturate(1.4) blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 24px 48px -24px rgba(122, 77, 73, 0.25),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+/* eyebrow */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-brand-strong);
+  background: var(--color-brand-light);
+  padding: 6px 12px;
+  border-radius: 9999px;
+}
+
+/* スクロールバー (macOS でも見えるように細く整形) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(240, 223, 221, 0.8);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(226, 120, 116, 0.5);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

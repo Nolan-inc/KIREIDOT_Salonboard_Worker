@@ -1,4 +1,53 @@
-# KIREIDOT Salonboard Worker (local skeleton)
+# KIREIDOT サロンデスク (KIREIDOT_Salonboard_Worker)
+
+サロンの「予約・スタッフ・シフト・ブログ」を 1 つの画面から確認・操作するための
+**Electron デスクトップアプリ** + **サロンボード連携ワーカー**。
+
+## 概要
+
+- **デスクトップアプリ (Electron + React + Vite + Tailwind)**
+  - UI 骨組み + LP デザインシステム適用済み (Phase 1 完了)
+  - 6 画面: ダッシュボード / 予約 / スタッフ / シフト / ブログ / 設定
+- **サロンボードワーカー (Playwright)**
+  - 既存の `worker.ts` (CLI) として残置。今後 Electron 内のサービスとして統合予定
+
+## デスクトップアプリの起動
+
+```bash
+npm install
+npm run dev     # Vite と Electron が並行起動 (HMR 有効)
+```
+
+ビルド:
+```bash
+npm run build   # vite build → dist/ に成果物
+```
+
+型チェック:
+```bash
+npm run type-check
+```
+
+## ディレクトリ構成
+
+```
+electron/           Electron main + preload (CJS)
+renderer/           Vite + React UI
+  ├ index.html
+  └ src/
+     ├ main.tsx          エントリ
+     ├ App.tsx           ルーター (state ベース)
+     ├ components/       AppShell / Sidebar / Topbar / Card
+     ├ pages/            Dashboard, Bookings, Staff, Shifts, Blog, Settings
+     ├ lib/              nav 定義 / cn / mockData
+     └ styles/globals.css
+worker.ts           Playwright サロンボードワーカー (既存、温存)
+inspect.ts          DOM 調査用スクリプト (既存、温存)
+```
+
+---
+
+# 旧ドキュメント: サロンボードワーカー (CLI)
 
 KIREIDOT Admin が積んだ `salonboard_sync_jobs` を取り出して処理するワーカーの
 ローカル開発用スケルトン。本番では Fly.io に載せる前提。
