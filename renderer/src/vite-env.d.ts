@@ -4,6 +4,7 @@ interface ImportMetaEnv {
   readonly VITE_SUPABASE_URL: string;
   readonly VITE_SUPABASE_ANON_KEY: string;
   readonly VITE_APP_NAME?: string;
+  readonly VITE_KIREIDOT_API_URL?: string;
 }
 
 interface ImportMeta {
@@ -19,10 +20,44 @@ type UpdaterStatus =
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string };
 
+type SalonboardSyncTargets = {
+  bookings: boolean;
+  staff: boolean;
+  shifts: boolean;
+  blogs: boolean;
+};
+
+type SalonboardSyncResult = {
+  ok: boolean;
+  shopId: string;
+  syncedAt: string;
+  results: Partial<
+    Record<
+      keyof SalonboardSyncTargets,
+      {
+        scraped: number;
+        received?: number;
+        inserted: number;
+        updated: number;
+        errors?: string[];
+        error?: string;
+      }
+    >
+  >;
+  logs: string[];
+};
+
 interface Window {
   salondesk?: {
     version: string;
     platform: NodeJS.Platform;
+    syncSalonboard?: (payload: {
+      apiUrl: string;
+      accessToken: string;
+      shopId: string;
+      targets: SalonboardSyncTargets;
+      showBrowser: boolean;
+    }) => Promise<SalonboardSyncResult>;
   };
   kireidotApp?: {
     /** 外部 URL (http/https) をシステムブラウザで開く。 */

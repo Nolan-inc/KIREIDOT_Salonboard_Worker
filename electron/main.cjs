@@ -8,6 +8,7 @@
 const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const path = require('node:path');
 const { initAutoUpdater, quitAndInstall } = require('./updater.cjs');
+const { runSalonboardSync } = require('./salonboard-sync.cjs');
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL || process.env.NODE_ENV === 'development';
 
@@ -65,6 +66,10 @@ if (process.defaultApp) {
 } else {
   app.setAsDefaultProtocolClient(PROTOCOL_SCHEME);
 }
+
+ipcMain.handle('salonboard:sync', async (_event, payload) => {
+  return await runSalonboardSync(payload);
+});
 
 async function createWindow() {
   mainWindow = new BrowserWindow({

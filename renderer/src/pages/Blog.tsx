@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Send, Eye, Calendar, Loader2 } from 'lucide-react';
 import { Card, CardBody } from '../components/Card';
+import { SalonboardSyncButton } from '../components/SalonboardSyncButton';
 import { useAuth } from '../lib/auth-context';
 import { fetchPosts, type PostRow } from '../lib/data';
 import { postStatusJp } from '../lib/format';
@@ -10,6 +11,7 @@ export function Blog() {
   const auth = useAuth();
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<PostRow[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (auth.status !== 'signed-in') return;
@@ -22,7 +24,7 @@ export function Blog() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null, reloadKey]);
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -31,9 +33,13 @@ export function Blog() {
           {loading ? '読み込み中…' : `全 ${posts.length} 件`}
         </p>
         <div className="flex items-center gap-2">
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
-            <Send className="h-3.5 w-3.5" /> サロンボードへ同期
-          </button>
+          <SalonboardSyncButton
+            targets={{ blogs: true }}
+            onDone={() => setReloadKey((v) => v + 1)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Send className="h-3.5 w-3.5" /> サロンボードから取得
+          </SalonboardSyncButton>
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
             <Plus className="h-3.5 w-3.5" /> 記事を書く
           </button>
@@ -67,9 +73,16 @@ export function Blog() {
                 </div>
                 <CardBody className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-bold', cfg.cls)}>
-                      {cfg.label}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-bold', cfg.cls)}>
+                        {cfg.label}
+                      </span>
+                      {p.source === 'salonboard' && (
+                        <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-700">
+                          SB取込
+                        </span>
+                      )}
+                    </div>
                     <span className="inline-flex items-center gap-1 text-[10px] text-muted">
                       <Eye className="h-3 w-3" />
                       {(p.view_count ?? 0).toLocaleString()}
@@ -78,8 +91,9 @@ export function Blog() {
                   <h3 className="font-serif text-[15px] font-bold leading-snug text-ink">
                     {p.title ?? '(無題)'}
                   </h3>
+                  {p.body && <p className="line-clamp-2 text-[11px] leading-relaxed text-ink-soft">{p.body}</p>}
                   <div className="flex items-center justify-between text-[10px] text-ink-soft">
-                    <span>{p.author_id ? '担当スタッフ' : '-'}</span>
+                    <span>{p.author_name ?? (p.author_id ? '担当スタッフ' : '-')}</span>
                     <span className="inline-flex items-center gap-1">
                       <Calendar className="h-3 w-3" />
                       {p.published_at
@@ -91,8 +105,12 @@ export function Blog() {
                     <button type="button" className="flex-1 rounded-[10px] border border-hairline bg-white py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/40">
                       編集
                     </button>
-                    <button type="button" className="flex-1 rounded-[10px] bg-brand-light py-1.5 text-[11px] font-semibold text-brand-700 hover:bg-brand-200">
-                      プレビュー
+                    <button
+                      type="button"
+                      onClick={() => p.url && window.open(p.url, '_blank')}
+                      className="flex-1 rounded-[10px] bg-brand-light py-1.5 text-[11px] font-semibold text-brand-700 hover:bg-brand-200"
+                    >
+                      {p.url ? 'SBで確認' : 'プレビュー'}
                     </button>
                   </div>
                 </CardBody>

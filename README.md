@@ -8,15 +8,30 @@
 - **デスクトップアプリ (Electron + React + Vite + Tailwind)**
   - UI 骨組み + LP デザインシステム適用済み (Phase 1 完了)
   - 6 画面: ダッシュボード / 予約 / スタッフ / シフト / ブログ / 設定
+  - 設定画面から会社/店舗を選択し、SalonBoard の予約・スタッフ・シフト・ブログを取得して Admin API へ送信
 - **サロンボードワーカー (Playwright)**
-  - 既存の `worker.ts` (CLI) として残置。今後 Electron 内のサービスとして統合予定
+  - Electron main process から Playwright を起動して、アプリ操作でスクレイピングを実行
+  - 既存の `worker.ts` (CLI) はジョブポーリング用として残置
 
 ## デスクトップアプリの起動
 
 ```bash
 npm install
+npx playwright install chromium
 npm run dev     # Vite と Electron が並行起動 (HMR 有効)
 ```
+
+`.env.local` には少なくとも次を設定する:
+
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
+VITE_KIREIDOT_API_URL=http://localhost:3000
+```
+
+サロンボード同期はログイン中スタッフの Supabase access token で
+`/api/salonboard/organizations`, `/credentials`, `/ingest`, `/staff-ingest`,
+`/shift-ingest`, `/blog-ingest` を呼び出す。super_owner / admin は複数会社を選択できる。
 
 ビルド:
 ```bash

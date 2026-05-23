@@ -105,6 +105,13 @@ export type StaffRow = {
   shop_id: string | null;
   tenure_years: number | null;
   organization_id: string | null;
+  source?: 'kireidot' | 'salonboard';
+  external_id?: string | null;
+  position?: string | null;
+  catch_phrase?: string | null;
+  is_published?: boolean | null;
+  matched_staff_id?: string | null;
+  last_synced_at?: string | null;
 };
 
 export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
@@ -120,9 +127,43 @@ export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
   const { data, error } = await q;
   if (error) {
     console.warn('[data] fetchStaffList error:', error.message);
-    return [];
   }
-  return (data ?? []) as StaffRow[];
+  const kireidotRows = ((data ?? []) as StaffRow[]).map((s) => ({ ...s, source: 'kireidot' as const }));
+
+  let importQ: any = supabase
+    .from('salonboard_staff_imports')
+    .select('id, shop_id, external_id, name, position, catch_phrase, photo_url, is_published, matched_staff_id, last_synced_at')
+    .order('last_synced_at', { ascending: false })
+    .limit(300);
+  if (scope.shopId && (scope.role === 'staff' || scope.role === 'shop_manager')) {
+    importQ = importQ.eq('shop_id', scope.shopId);
+  }
+  const { data: imported, error: importError } = await importQ;
+  if (importError) {
+    console.warn('[data] fetchSalonboardStaffImports error:', importError.message);
+    return kireidotRows;
+  }
+
+  const importedRows = ((imported ?? []) as any[]).map(
+    (s): StaffRow => ({
+      id: `salonboard:${s.id}`,
+      full_name: s.name,
+      role: null,
+      icon_url: s.photo_url ?? null,
+      shop_id: s.shop_id ?? null,
+      tenure_years: null,
+      organization_id: null,
+      source: 'salonboard',
+      external_id: s.external_id ?? null,
+      position: s.position ?? null,
+      catch_phrase: s.catch_phrase ?? null,
+      is_published: s.is_published ?? null,
+      matched_staff_id: s.matched_staff_id ?? null,
+      last_synced_at: s.last_synced_at ?? null,
+    }),
+  );
+
+  return [...kireidotRows, ...importedRows];
 }
 
 // =========================
@@ -136,6 +177,16 @@ export type ShiftRow = {
   end_at: string;
   is_requested_off: boolean | null;
   is_confirmed: boolean | null;
+  source?: 'kireidot' | 'salonboard';
+  staff_external_id?: string | null;
+  staff_name?: string | null;
+  shift_date?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  is_off?: boolean | null;
+  note?: string | null;
+  matched_staff_id?: string | null;
+  last_synced_at?: string | null;
 };
 
 export async function fetchShiftsForWeek(scope: StaffScope): Promise<ShiftRow[]> {
@@ -157,9 +208,51 @@ export async function fetchShiftsForWeek(scope: StaffScope): Promise<ShiftRow[]>
   const { data, error } = await q;
   if (error) {
     console.warn('[data] fetchShiftsForWeek error:', error.message);
-    return [];
   }
-  return (data ?? []) as ShiftRow[];
+  const kireidotRows = ((data ?? []) as ShiftRow[]).map((s) => ({ ...s, source: 'kireidot' as const }));
+
+  const startDate = toDateKey(start);
+  const endDate = toDateKey(end);
+  let importQ: any = supabase
+    .from('salonboard_shift_imports')
+    .select(
+      'id, shop_id, staff_external_id, staff_name, shift_date, start_time, end_time, is_off, note, matched_staff_id, last_synced_at',
+    )
+    .gte('shift_date', startDate)
+    .lt('shift_date', endDate)
+    .order('shift_date');
+  importQ = applyShop(importQ, scope);
+  const { data: imported, error: importError } = await importQ;
+  if (importError) {
+    console.warn('[data] fetchSalonboardShiftImports error:', importError.message);
+    return kireidotRows;
+  }
+
+  const importedRows = ((imported ?? []) as any[]).map((s): ShiftRow => {
+    const startTime = normalizeTimeString(s.start_time) ?? '10:00';
+    const endTime = normalizeTimeString(s.end_time) ?? addHoursTime(startTime, 1);
+    return {
+      id: `salonboard:${s.id}`,
+      staff_id: s.matched_staff_id ?? `salonboard:${s.staff_external_id}`,
+      shop_id: s.shop_id,
+      start_at: jstDateTimeToIso(s.shift_date, startTime),
+      end_at: jstDateTimeToIso(s.shift_date, endTime),
+      is_requested_off: !!s.is_off,
+      is_confirmed: true,
+      source: 'salonboard',
+      staff_external_id: s.staff_external_id ?? null,
+      staff_name: s.staff_name ?? null,
+      shift_date: s.shift_date ?? null,
+      start_time: startTime,
+      end_time: endTime,
+      is_off: !!s.is_off,
+      note: s.note ?? null,
+      matched_staff_id: s.matched_staff_id ?? null,
+      last_synced_at: s.last_synced_at ?? null,
+    };
+  });
+
+  return [...kireidotRows, ...importedRows];
 }
 
 // =========================
@@ -171,12 +264,18 @@ export type PostRow = {
   body: string | null;
   status: string | null;
   author_id: string | null;
+  author_name?: string | null;
   shop_id: string | null;
   organization_id: string | null;
   cover_image_url: string | null;
   published_at: string | null;
   created_at: string | null;
   view_count: number | null;
+  source?: 'kireidot' | 'salonboard';
+  external_id?: string | null;
+  category?: string | null;
+  url?: string | null;
+  last_synced_at?: string | null;
 };
 
 export async function fetchPosts(scope: StaffScope): Promise<PostRow[]> {
@@ -195,9 +294,73 @@ export async function fetchPosts(scope: StaffScope): Promise<PostRow[]> {
   const { data, error } = await q;
   if (error) {
     console.warn('[data] fetchPosts error:', error.message, '— content_posts テーブルが無い可能性');
-    return [];
   }
-  return (data ?? []) as PostRow[];
+  const contentRows = ((data ?? []) as PostRow[]).map((p) => ({ ...p, source: 'kireidot' as const }));
+
+  let importQ: any = supabase
+    .from('salonboard_blog_imports')
+    .select(
+      'id, shop_id, external_id, title, body_excerpt, body_html, cover_image_url, category, author_name, posted_at, is_published, view_count, url, last_synced_at',
+    )
+    .order('posted_at', { ascending: false, nullsFirst: false })
+    .limit(100);
+  if (scope.shopId && (scope.role === 'staff' || scope.role === 'shop_manager')) {
+    importQ = importQ.eq('shop_id', scope.shopId);
+  }
+  const { data: imported, error: importError } = await importQ;
+  if (importError) {
+    console.warn('[data] fetchSalonboardBlogImports error:', importError.message);
+    return contentRows;
+  }
+
+  const importedRows = ((imported ?? []) as any[]).map(
+    (p): PostRow => ({
+      id: `salonboard:${p.id}`,
+      title: p.title ?? null,
+      body: p.body_excerpt ?? p.body_html ?? null,
+      status: p.is_published === false ? 'draft' : 'published',
+      author_id: null,
+      author_name: p.author_name ?? null,
+      shop_id: p.shop_id ?? null,
+      organization_id: null,
+      cover_image_url: p.cover_image_url ?? null,
+      published_at: p.posted_at ?? null,
+      created_at: p.last_synced_at ?? null,
+      view_count: p.view_count ?? null,
+      source: 'salonboard',
+      external_id: p.external_id ?? null,
+      category: p.category ?? null,
+      url: p.url ?? null,
+      last_synced_at: p.last_synced_at ?? null,
+    }),
+  );
+
+  return [...importedRows, ...contentRows];
+}
+
+function toDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function normalizeTimeString(value: unknown): string | null {
+  const m = String(value ?? '').match(/(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = Math.max(0, Math.min(23, Number(m[1])));
+  const min = Math.max(0, Math.min(59, Number(m[2])));
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+function addHoursTime(time: string, hours: number): string {
+  const [hRaw, mRaw] = time.split(':');
+  const h = (Number(hRaw) + hours + 24) % 24;
+  const m = Number(mRaw) || 0;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function jstDateTimeToIso(dateKey: string, time: string): string {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, hour - 9, minute || 0, 0, 0)).toISOString();
 }
 
 // =========================

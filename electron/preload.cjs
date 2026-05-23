@@ -6,6 +6,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('salondesk', {
   version: '0.1.0',
   platform: process.platform,
+  syncSalonboard: (payload) => ipcRenderer.invoke('salonboard:sync', payload),
 });
 
 // Google OAuth (Deep Link) 用の最小 API

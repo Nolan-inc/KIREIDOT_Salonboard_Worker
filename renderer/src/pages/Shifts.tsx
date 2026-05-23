@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, Send, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../components/Card';
+import { SalonboardSyncButton } from '../components/SalonboardSyncButton';
 import { useAuth } from '../lib/auth-context';
 import { fetchShiftsForWeek, fetchStaffList, type ShiftRow, type StaffRow } from '../lib/data';
 
@@ -19,6 +20,7 @@ export function Shifts() {
   const [loading, setLoading] = useState(true);
   const [shifts, setShifts] = useState<ShiftRow[]>([]);
   const [staff, setStaff] = useState<StaffRow[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (auth.status !== 'signed-in') return;
@@ -35,7 +37,7 @@ export function Shifts() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null, reloadKey]);
 
   const week = useMemo(() => {
     const start = startOfWeek();
@@ -79,9 +81,13 @@ export function Shifts() {
           </button>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
-            <Send className="h-3.5 w-3.5" /> サロンボードへ送信
-          </button>
+          <SalonboardSyncButton
+            targets={{ staff: true, shifts: true }}
+            onDone={() => setReloadKey((v) => v + 1)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Send className="h-3.5 w-3.5" /> サロンボードから取得
+          </SalonboardSyncButton>
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
             <Plus className="h-3.5 w-3.5" /> シフト追加
           </button>
@@ -136,18 +142,21 @@ export function Shifts() {
                             <td key={h} className="relative h-14 border-b border-l border-hairline/40 align-top">
                               {within.slice(0, 2).map((s, idx) => {
                                 const stf = staffMap.get(s.staff_id);
-                                const off = !!s.is_requested_off;
+                                const off = !!s.is_requested_off || !!s.is_off;
+                                const label = s.staff_name ?? stf?.full_name ?? '?';
                                 return (
                                   <div
                                     key={s.id}
                                     className={
                                       off
                                         ? 'absolute inset-x-1 rounded-[6px] bg-amber-200 px-1 py-0.5 text-[9px] font-semibold text-amber-900'
-                                        : 'absolute inset-x-1 rounded-[6px] bg-brand-gradient px-1 py-0.5 text-[9px] font-semibold text-white shadow-brand-sm'
+                                        : s.source === 'salonboard'
+                                          ? 'absolute inset-x-1 rounded-[6px] bg-sky-500 px-1 py-0.5 text-[9px] font-semibold text-white shadow-brand-sm'
+                                          : 'absolute inset-x-1 rounded-[6px] bg-brand-gradient px-1 py-0.5 text-[9px] font-semibold text-white shadow-brand-sm'
                                     }
                                     style={{ top: 4 + idx * 22 }}
                                   >
-                                    {stf?.full_name?.slice(0, 4) ?? '?'}
+                                    {label.slice(0, 4)}
                                   </div>
                                 );
                               })}
@@ -173,6 +182,10 @@ export function Shifts() {
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block h-3 w-6 rounded-[3px] bg-amber-300" />
             希望休
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block h-3 w-6 rounded-[3px] bg-sky-500" />
+            SalonBoard取込
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block h-3 w-6 rounded-[3px] bg-hairline" />

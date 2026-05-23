@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2 } from 'lucide-react';
 import { Card } from '../components/Card';
+import { SalonboardSyncButton } from '../components/SalonboardSyncButton';
 import { useAuth } from '../lib/auth-context';
 import { fetchRecentBookings, type BookingRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
@@ -20,6 +21,7 @@ export function Bookings() {
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [search, setSearch] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (auth.status !== 'signed-in') return;
@@ -35,7 +37,7 @@ export function Bookings() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null, reloadKey]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -81,6 +83,13 @@ export function Bookings() {
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-3 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
             <Filter className="h-3.5 w-3.5" /> 絞り込み
           </button>
+          <SalonboardSyncButton
+            targets={{ bookings: true }}
+            onDone={() => setReloadKey((v) => v + 1)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-3 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            SBから取得
+          </SalonboardSyncButton>
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
             <Plus className="h-3.5 w-3.5" /> 新規予約
           </button>
