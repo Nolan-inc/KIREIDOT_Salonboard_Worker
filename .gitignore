@@ -1,7 +1,45 @@
+# Node / Vite
 node_modules/
-.env
-.env.local
+dist/
 *.log
 .DS_Store
+
+# Env / シークレット (絶対に commit しない)
+.env
+.env.local
+.env.*.local
+
+# 証明書類 / 秘密鍵 (絶対に commit しない)
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+AuthKey_*.p8
+
+# Apple Notarization 関連の一時ログ
+.notarize-log
+notarize-*.log
+notarytool-*.log
+
+# Playwright
 playwright-report/
 test-results/
+
+# electron-builder 出力 (バイナリは Git に乗せず Releases / 配布側に置く)
+release/
+release/*.dmg
+release/*.zip
+release/*.blockmap
+release/*.yml
+release/*.yaml
+release/builder-debug.yml
+release/builder-effective-config.yaml
+release/mac-arm64/
+release/mac/
+release/mac-universal/
+release/win-unpacked/
+release/linux-unpacked/
+
+# IDE
+.vscode/
+.idea/

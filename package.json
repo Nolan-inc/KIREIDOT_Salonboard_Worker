@@ -15,7 +15,12 @@
     "worker:dev": "tsx worker.ts",
     "worker:once": "tsx worker.ts --once",
     "worker:dry-run": "DRY_RUN=1 tsx worker.ts",
-    "worker:inspect": "tsx inspect.ts"
+    "worker:inspect": "tsx inspect.ts",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish never",
+    "dist:mac:nosign": "SKIP_NOTARIZE=1 npm run dist:mac:arm64",
+    "verify:mac": "bash build-resources/verify-mac.sh"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
@@ -25,6 +30,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
@@ -33,11 +39,54 @@
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "tsx": "^4.19.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "jp.kireidot.salondesk",
+    "productName": "予約同期くん",
+    "artifactName": "salonboard-sync-${os}-${arch}.${ext}",
+    "afterSign": "build-resources/notarize.cjs",
+    "directories": {
+      "buildResources": "build-resources",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": "HIKARU UEDA (7FMVQPBJKA)",
+      "gatekeeperAssess": false,
+      "hardenedRuntime": true,
+      "entitlements": "build-resources/entitlements.mac.plist",
+      "entitlementsInherit": "build-resources/entitlements.mac.plist",
+      "type": "distribution"
+    },
+    "dmg": {
+      "writeUpdateInfo": false,
+      "sign": false
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }
