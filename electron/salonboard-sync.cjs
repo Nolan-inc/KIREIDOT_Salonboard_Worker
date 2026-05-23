@@ -1,7 +1,7 @@
 const { chromium } = require('playwright');
 const { createHash } = require('node:crypto');
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 
 const URLS = {
   bookings: 'https://salonboard.com/KLP/reserve/reserveList/init',

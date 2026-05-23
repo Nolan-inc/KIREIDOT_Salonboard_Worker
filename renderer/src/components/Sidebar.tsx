@@ -92,7 +92,7 @@ function Footer() {
         </div>
       )}
       <div className="flex items-center justify-between">
-        <span>v 0.1.0</span>
+        <span>v 0.1.1</span>
         <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100/70 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
           接続済み

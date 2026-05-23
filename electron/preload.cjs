@@ -4,7 +4,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('salondesk', {
-  version: '0.1.0',
+  version: '0.1.1',
   platform: process.platform,
   syncSalonboard: (payload) => ipcRenderer.invoke('salonboard:sync', payload),
 });
