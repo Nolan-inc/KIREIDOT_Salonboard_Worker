@@ -17,9 +17,17 @@ type AuthState =
 
 type AuthContextValue = AuthState & {
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
+  signInWithGoogle: () => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   reloadScope: () => Promise<void>;
 };
+
+/**
+ * Google OAuth で使う Deep Link コールバック先。
+ * Supabase Dashboard → Auth → URL Configuration → Redirect URLs に
+ * 同じ値を 1 行登録すること: kireidot-salondesk://auth/callback
+ */
+const OAUTH_REDIRECT_URL = 'kireidot-salondesk://auth/callback';
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -107,9 +115,75 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [applySession]);
 
+  // Electron main 経由で Deep Link (kireidot-salondesk://auth/callback?code=...) を受け取り、
+  // PKCE フローを完了させてセッションを確立する。
+  useEffect(() => {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge) return;
+    const unsubscribe = bridge.onOAuthCallback(async (rawUrl) => {
+      try {
+        // url の query は protocol が独自スキームでも URLSearchParams で読める。
+        const url = new URL(rawUrl);
+        const code = url.searchParams.get('code');
+        const errParam = url.searchParams.get('error');
+        const errDesc = url.searchParams.get('error_description');
+        if (errParam) {
+          console.error('[auth] OAuth error from provider:', errParam, errDesc);
+          setState({ status: 'signed-out' });
+          return;
+        }
+        if (!code) return;
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) {
+          console.error('[auth] exchangeCodeForSession failed:', error);
+          setState({ status: 'signed-out' });
+        }
+        // セッション成立は onAuthStateChange 経由で applySession に流れる
+      } catch (err) {
+        console.error('[auth] OAuth callback handling failed:', err);
+      }
+    });
+    return () => {
+      try {
+        unsubscribe();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, []);
+
   const signIn = useCallback<AuthContextValue['signIn']>(async (email, password) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) return { error: error.message };
+    return { error: null };
+  }, []);
+
+  const signInWithGoogle = useCallback<AuthContextValue['signInWithGoogle']>(async () => {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge) {
+      return {
+        error: 'Electron 環境で起動してください (Google ログインは Web 版では使えません)。',
+      };
+    }
+    // PKCE フロー: Supabase が生成した認可 URL をシステムブラウザで開き、
+    // 認可完了後に kireidot-salondesk://auth/callback?code=... が
+    // 当アプリに deep link で返る。
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: OAUTH_REDIRECT_URL,
+        skipBrowserRedirect: true,
+      },
+    });
+    if (error) return { error: error.message };
+    if (!data?.url) return { error: 'Google 認可 URL の取得に失敗しました。' };
+
+    const res = await bridge.openExternal(data.url);
+    if (!res?.ok) {
+      return { error: `ブラウザを開けませんでした: ${res?.error ?? 'unknown'}` };
+    }
+    // 以降は preload 経由の 'oauth:callback' リスナー (useEffect 内) が
+    // code を受け取って exchangeCodeForSession を呼ぶ。
     return { error: null };
   }, []);
 
@@ -123,8 +197,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [applySession]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ ...state, signIn, signOut, reloadScope }),
-    [state, signIn, signOut, reloadScope],
+    () => ({ ...state, signIn, signInWithGoogle, signOut, reloadScope }),
+    [state, signIn, signInWithGoogle, signOut, reloadScope],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

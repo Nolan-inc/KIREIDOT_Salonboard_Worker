@@ -1,6 +1,6 @@
 {
   "name": "kireidot-salondesk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "KIREIDOT サロンデスク — サロン業務 (予約・スタッフ・シフト・ブログ) を一元管理する Electron デスクトップアプリ",
   "type": "module",
@@ -20,10 +20,13 @@
     "dist:mac": "npm run build && electron-builder --mac --publish never",
     "dist:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish never",
     "dist:mac:nosign": "SKIP_NOTARIZE=1 npm run dist:mac:arm64",
+    "publish:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish always",
     "verify:mac": "bash build-resources/verify-mac.sh"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
+    "electron-log": "^5.2.0",
+    "electron-updater": "^6.3.9",
     "lucide-react": "^0.451.0",
     "playwright": "^1.49.0",
     "react": "^18.3.1",
@@ -78,8 +81,16 @@
       "entitlementsInherit": "build-resources/entitlements.mac.plist",
       "type": "distribution"
     },
+    "protocols": [
+      {
+        "name": "KIREIDOT サロンデスク",
+        "schemes": [
+          "kireidot-salondesk"
+        ]
+      }
+    ],
     "dmg": {
-      "writeUpdateInfo": false,
+      "writeUpdateInfo": true,
       "sign": false
     },
     "win": {
@@ -87,6 +98,15 @@
     },
     "linux": {
       "target": "AppImage"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Nolan-inc",
+        "repo": "kireidot-salondesk-releases",
+        "releaseType": "release",
+        "publishAutoUpdate": true
+      }
+    ]
   }
 }

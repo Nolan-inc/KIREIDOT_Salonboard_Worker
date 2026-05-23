@@ -12,7 +12,12 @@ export const supabase = createClient(url ?? '', anonKey ?? '', {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
+    // Electron 上では window.location ベースの自動セッション復元は使わない。
+    // OAuth コールバックは Deep Link (kireidot-salondesk://...) → IPC で受け取り、
+    // 明示的に exchangeCodeForSession() を呼ぶ。
     detectSessionInUrl: false,
+    // Google OAuth を Deep Link で受け取るために PKCE フローを使う。
+    flowType: 'pkce',
   },
 });
 

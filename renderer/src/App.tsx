@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AppShell } from './components/AppShell';
+import { UpdaterToast } from './components/UpdaterToast';
 import { Dashboard } from './pages/Dashboard';
 import { Bookings } from './pages/Bookings';
 import { Staff } from './pages/Staff';
@@ -43,6 +44,8 @@ export function App() {
   return (
     <AuthProvider>
       <Routes />
+      {/* 自動アップデート完了の通知トースト (Electron 起動時のみ動作) */}
+      <UpdaterToast />
     </AuthProvider>
   );
 }
