@@ -4,11 +4,19 @@ import {
   Users,
   CalendarClock,
   Newspaper,
+  Link2,
   Settings as SettingsIcon,
   type LucideIcon,
 } from 'lucide-react';
 
-export type NavKey = 'dashboard' | 'bookings' | 'staff' | 'shifts' | 'blog' | 'settings';
+export type NavKey =
+  | 'dashboard'
+  | 'bookings'
+  | 'staff'
+  | 'shifts'
+  | 'blog'
+  | 'salonboard'
+  | 'settings';
 
 export type NavItem = {
   key: NavKey;
@@ -49,9 +57,15 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Newspaper,
   },
   {
+    key: 'salonboard',
+    label: 'サロンボード連携',
+    description: '会社×店舗ごとの認証情報を管理・同期',
+    icon: Link2,
+  },
+  {
     key: 'settings',
     label: '設定',
-    description: 'サロンボード連携・各種設定',
+    description: 'アカウント・各種設定',
     icon: SettingsIcon,
   },
 ];

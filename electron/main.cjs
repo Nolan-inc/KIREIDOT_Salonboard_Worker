@@ -5,9 +5,52 @@
 // Google OAuth 用 Deep Link (kireidot-salondesk://...) を受信し、
 // renderer の AuthContext に IPC で配送する。
 
-const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, utilityProcess } = require('electron');
 const path = require('node:path');
 const { initAutoUpdater, quitAndInstall } = require('./updater.cjs');
+
+// ---------------------------------------------------------------------
+// Worker (utilityProcess) — マルチ店舗スクレイピングのバックグラウンド実行
+// ---------------------------------------------------------------------
+let workerChild = null;
+
+function ensureWorker() {
+  if (workerChild) return workerChild;
+  const scriptPath = path.join(__dirname, 'worker-process.cjs');
+  workerChild = utilityProcess.fork(scriptPath, [], {
+    serviceName: 'salonboard-worker',
+    stdio: 'pipe',
+  });
+  workerChild.stdout?.on('data', (d) => process.stdout.write(`[worker] ${d}`));
+  workerChild.stderr?.on('data', (d) => process.stderr.write(`[worker:err] ${d}`));
+  workerChild.on('message', (msg) => {
+    // renderer に転送
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('worker:event', msg);
+    }
+  });
+  workerChild.on('exit', (code) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('worker:event', {
+        type: 'exited',
+        payload: { code },
+      });
+    }
+    workerChild = null;
+  });
+  return workerChild;
+}
+
+function postToWorker(msg) {
+  const w = ensureWorker();
+  try {
+    w.postMessage(msg);
+    return true;
+  } catch (e) {
+    console.error('[main] postToWorker failed', e);
+    return false;
+  }
+}
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL || process.env.NODE_ENV === 'development';
 
@@ -127,6 +170,22 @@ ipcMain.handle('app:open-external', async (_event, url) => {
 ipcMain.handle('updater:quit-and-install', async () => {
   quitAndInstall();
   return { ok: true };
+});
+
+// ---------------------------------------------------------------------
+// Worker 操作系 IPC (renderer → main → utilityProcess)
+// ---------------------------------------------------------------------
+ipcMain.handle('worker:init', async (_event, payload) => {
+  const ok = postToWorker({ type: 'init', payload });
+  return { ok };
+});
+ipcMain.handle('worker:sync', async (_event, payload) => {
+  const ok = postToWorker({ type: 'sync', payload });
+  return { ok };
+});
+ipcMain.handle('worker:abort', async () => {
+  const ok = postToWorker({ type: 'abort' });
+  return { ok };
 });
 
 app.whenReady().then(async () => {

@@ -1,0 +1,672 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Building2,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Loader2,
+  Lock,
+  Pause,
+  Pencil,
+  PlayCircle,
+  PlugZap,
+  RefreshCcw,
+  ShieldCheck,
+  ShieldOff,
+  Store,
+  TriangleAlert,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { Card, CardBody, CardHeader } from '../components/Card';
+import { useAuth } from '../lib/auth-context';
+import { useSyncController } from '../lib/sync-controller';
+import {
+  deleteSalonboardCredentials,
+  fetchCredentialOverview,
+  fetchRecentSyncRuns,
+  setSalonboardCredentialEnabled,
+  upsertSalonboardCredentials,
+  type CredentialOverviewRow,
+  type SyncRunRow,
+} from '../lib/salonboard';
+
+/**
+ * 会社×店舗のサロンボード認証情報を一覧・編集するページ。
+ *
+ * - super_owner / admin: 全社・全店舗を編集できる
+ * - それ以外: 自組織のみ閲覧 (RLS により書き込みは拒否される)
+ */
+export function SalonboardPage() {
+  const auth = useAuth();
+  const canEdit =
+    auth.status === 'signed-in'
+    && (auth.scope.role === 'super_owner' || auth.scope.role === 'admin');
+
+  const sync = useSyncController();
+  const [rows, setRows] = useState<CredentialOverviewRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [openOrg, setOpenOrg] = useState<Record<string, boolean>>({});
+  const [editing, setEditing] = useState<CredentialOverviewRow | null>(null);
+  const [history, setHistory] = useState<SyncRunRow[]>([]);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [list, runs] = await Promise.all([
+        fetchCredentialOverview(),
+        fetchRecentSyncRuns(20),
+      ]);
+      setRows(list);
+      setHistory(runs);
+      // 初回は全社を開いておく
+      const initial: Record<string, boolean> = {};
+      for (const r of list) initial[r.organization_id] = true;
+      setOpenOrg((cur) => (Object.keys(cur).length === 0 ? initial : cur));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'データ取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  // 同期完了時に履歴を自動更新
+  useEffect(() => {
+    if (sync.lastRun?.done) {
+      void (async () => {
+        const runs = await fetchRecentSyncRuns(20);
+        setHistory(runs);
+      })();
+    }
+  }, [sync.lastRun?.done]);
+
+  // 会社単位でグルーピング
+  const grouped = useMemo(() => {
+    const m = new Map<string, { name: string; shops: CredentialOverviewRow[] }>();
+    for (const r of rows) {
+      const e = m.get(r.organization_id);
+      if (e) e.shops.push(r);
+      else m.set(r.organization_id, { name: r.organization_name, shops: [r] });
+    }
+    return Array.from(m.entries()).map(([orgId, v]) => ({
+      orgId,
+      orgName: v.name,
+      shops: v.shops,
+    }));
+  }, [rows]);
+
+  const totalShops = rows.length;
+  const linkedShops = rows.filter((r) => r.has_credential).length;
+  const errorShops = rows.filter((r) => (r.consecutive_failures ?? 0) > 0).length;
+
+  return (
+    <div className="flex flex-col gap-5 pt-4">
+      {/* ヘッダー */}
+      <Card>
+        <CardHeader
+          title="サロンボード連携"
+          subtitle="会社ごとに、各店舗のサロンボード ID / パスワードを登録・管理します。"
+        />
+        <CardBody>
+          <div className="flex flex-wrap items-center gap-3">
+            <Stat label="登録店舗" value={`${linkedShops} / ${totalShops}`} icon={<PlugZap className="h-3.5 w-3.5" />} />
+            <Stat label="エラー中" value={String(errorShops)} icon={<TriangleAlert className="h-3.5 w-3.5" />} accent="amber" />
+            {sync.lastRun && sync.lastRun.done && (
+              <Stat
+                label="最終同期"
+                value={`成功 ${sync.lastRun.ok} / 失敗 ${sync.lastRun.ng}`}
+                icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+              />
+            )}
+            <button
+              type="button"
+              onClick={() => void reload()}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-[10px] border border-hairline bg-white px-3 py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/40"
+            >
+              <RefreshCcw className="h-3.5 w-3.5" /> 再読込
+            </button>
+            {sync.isRunning ? (
+              <button
+                type="button"
+                onClick={() => void sync.abort()}
+                className="inline-flex items-center gap-1.5 rounded-[10px] border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100"
+              >
+                <Pause className="h-3.5 w-3.5" /> 中断
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!sync.ready || linkedShops === 0}
+                onClick={() => void sync.syncAll()}
+                className="inline-flex items-center gap-1.5 rounded-[10px] bg-brand-gradient px-3 py-1.5 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+              >
+                <PlayCircle className="h-3.5 w-3.5" /> 全店舗を同期
+              </button>
+            )}
+            <label
+              className="inline-flex cursor-pointer items-center gap-2 rounded-[10px] border border-hairline bg-white px-3 py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/20"
+              title={
+                sync.autoSyncEnabled
+                  ? '自動同期 ON: 設定された間隔で自動で実行されます'
+                  : '自動同期 OFF: 手動で実行する必要があります'
+              }
+            >
+              <input
+                type="checkbox"
+                checked={sync.autoSyncEnabled}
+                onChange={(e) => sync.setAutoSyncEnabled(e.target.checked)}
+                className="h-3 w-3 accent-brand"
+                disabled={!sync.ready}
+              />
+              <RefreshCcw className="h-3.5 w-3.5" />
+              自動同期
+            </label>
+          </div>
+          {sync.isRunning && sync.lastRun && (
+            <div className="mt-3 rounded-[10px] bg-brand-light/40 px-3 py-2 text-[11px] text-brand-700">
+              <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />
+              同期中… 成功 {sync.lastRun.ok} / 失敗 {sync.lastRun.ng} / 全{' '}
+              {sync.lastRun.total} 店舗
+            </div>
+          )}
+          {!canEdit && auth.status === 'signed-in' && (
+            <div className="mt-3 flex items-start gap-2 rounded-[10px] bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+              <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                認証情報の編集は <strong>super_owner / admin</strong> ロールのみ可能です。閲覧モードで表示しています。
+              </span>
+            </div>
+          )}
+          {error && (
+            <div className="mt-3 rounded-[10px] bg-red-50 px-3 py-2 text-[11px] text-red-700">
+              {error}
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {/* 会社×店舗グリッド */}
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-10 text-[12px] text-ink-soft">
+          <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
+        </div>
+      ) : grouped.length === 0 ? (
+        <Card>
+          <CardBody>
+            <p className="text-[12px] text-ink-soft">
+              閲覧可能な組織がありません。super_owner ロールでログインしてください。
+            </p>
+          </CardBody>
+        </Card>
+      ) : (
+        grouped.map((g) => {
+          const open = openOrg[g.orgId] !== false;
+          const linked = g.shops.filter((s) => s.has_credential).length;
+          return (
+            <Card key={g.orgId}>
+              <button
+                type="button"
+                onClick={() => setOpenOrg((c) => ({ ...c, [g.orgId]: !open }))}
+                className="flex w-full items-center gap-3 px-5 py-4 text-left hover:bg-brand-light/20"
+              >
+                <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-brand-light text-brand-700">
+                  <Building2 className="h-4 w-4" />
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-semibold text-ink">{g.orgName}</div>
+                  <div className="text-[11px] text-ink-soft">
+                    店舗 {g.shops.length} 件 ・ 連携済み {linked} 件
+                  </div>
+                </div>
+                {open ? (
+                  <ChevronDown className="h-4 w-4 text-ink-soft" />
+                ) : (
+                  <ChevronRight className="h-4 w-4 text-ink-soft" />
+                )}
+              </button>
+              {open && (
+                <CardBody className="border-t border-hairline pt-3">
+                  <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+                    {g.shops.map((s) => (
+                      <ShopCredentialCard
+                        key={s.shop_id}
+                        row={s}
+                        canEdit={canEdit}
+                        onEdit={() => setEditing(s)}
+                        onReload={reload}
+                        syncStatus={sync.shopStatuses[s.shop_id]}
+                        isRunning={sync.isRunning}
+                        ready={sync.ready}
+                        onSync={() => void sync.syncShops([s.shop_id])}
+                      />
+                    ))}
+                  </div>
+                </CardBody>
+              )}
+            </Card>
+          );
+        })
+      )}
+
+      {/* 同期実行履歴 */}
+      <Card>
+        <CardHeader title="同期実行履歴" subtitle="最近の「同期」実行の結果。失敗があれば各店舗の last_error も合わせて確認できます。" />
+        <CardBody>
+          {history.length === 0 ? (
+            <p className="text-[12px] text-ink-soft">まだ同期実行履歴がありません。</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead>
+                  <tr className="border-b border-hairline text-left text-[10px] uppercase text-muted">
+                    <th className="py-2 pr-3">開始</th>
+                    <th className="py-2 pr-3">完了</th>
+                    <th className="py-2 pr-3">店舗</th>
+                    <th className="py-2 pr-3">予約</th>
+                    <th className="py-2 pr-3">スタッフ</th>
+                    <th className="py-2 pr-3">ブログ</th>
+                    <th className="py-2 pr-3">顧客</th>
+                    <th className="py-2 pr-3">チャネル</th>
+                    <th className="py-2">ソース</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((r) => (
+                    <tr key={r.id} className="border-b border-hairline/60">
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        {new Date(r.started_at).toLocaleString('ja-JP')}
+                      </td>
+                      <td className="py-2 pr-3 whitespace-nowrap">
+                        {r.finished_at ? (
+                          <span className="text-emerald-700">
+                            {new Date(r.finished_at).toLocaleTimeString('ja-JP')}
+                          </span>
+                        ) : (
+                          <span className="text-amber-700">実行中</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <span className="font-semibold text-emerald-700">{r.ok_shops}</span>
+                        <span className="text-ink-soft"> / </span>
+                        <span className={r.ng_shops > 0 ? 'font-semibold text-red-700' : 'text-ink-soft'}>
+                          {r.ng_shops}
+                        </span>
+                        <span className="text-ink-soft"> ({r.total_shops})</span>
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums">{r.total_bookings}</td>
+                      <td className="py-2 pr-3 tabular-nums">{r.total_staff}</td>
+                      <td className="py-2 pr-3 tabular-nums">{r.total_blogs}</td>
+                      <td className="py-2 pr-3 tabular-nums">{r.total_customers}</td>
+                      <td className="py-2 pr-3 text-[10px] text-ink-soft">
+                        {(r.channels ?? []).join(', ')}
+                      </td>
+                      <td className="py-2 text-[10px] text-ink-soft">
+                        {r.aborted ? <span className="text-red-700">中断</span> : r.source ?? 'desktop'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {editing && (
+        <EditModal
+          row={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            await reload();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  icon,
+  accent,
+}: {
+  label: string;
+  value: string;
+  icon?: React.ReactNode;
+  accent?: 'amber';
+}) {
+  const tone =
+    accent === 'amber' ? 'bg-amber-50 text-amber-700' : 'bg-brand-light text-brand-700';
+  return (
+    <div className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold ${tone}`}>
+      {icon}
+      <span className="opacity-70">{label}</span>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function ShopCredentialCard({
+  row,
+  canEdit,
+  onEdit,
+  onReload,
+  syncStatus,
+  isRunning,
+  ready,
+  onSync,
+}: {
+  row: CredentialOverviewRow;
+  canEdit: boolean;
+  onEdit: () => void;
+  onReload: () => Promise<void>;
+  syncStatus?: import('../lib/sync-controller').ShopSyncStatus;
+  isRunning: boolean;
+  ready: boolean;
+  onSync: () => void;
+}) {
+  const linked = row.has_credential;
+  const [busy, setBusy] = useState<'enable' | 'delete' | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+
+  async function toggle() {
+    if (!canEdit) return;
+    setBusy('enable');
+    setActionErr(null);
+    const r = await setSalonboardCredentialEnabled(row.shop_id, !row.enabled);
+    setBusy(null);
+    if (!r.ok) setActionErr(r.error ?? '更新に失敗しました');
+    else await onReload();
+  }
+
+  async function remove() {
+    if (!canEdit) return;
+    if (!confirm(`「${row.shop_name}」のサロンボード認証情報を削除します。よろしいですか?`)) return;
+    setBusy('delete');
+    setActionErr(null);
+    const r = await deleteSalonboardCredentials(row.shop_id);
+    setBusy(null);
+    if (!r.ok) setActionErr(r.error ?? '削除に失敗しました');
+    else await onReload();
+  }
+
+  return (
+    <div className="rounded-[12px] border border-hairline bg-white/90 p-3">
+      <div className="flex items-start gap-2">
+        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-light/60 text-brand-700">
+          <Store className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-[13px] font-semibold text-ink">{row.shop_name}</span>
+            {linked ? (
+              row.enabled ? (
+                <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">
+                  <ShieldCheck className="h-2.5 w-2.5" /> 連携中
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-0.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+                  <ShieldOff className="h-2.5 w-2.5" /> 停止中
+                </span>
+              )
+            ) : (
+              <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700">
+                <TriangleAlert className="h-2.5 w-2.5" /> 未設定
+              </span>
+            )}
+          </div>
+          {linked && (
+            <div className="mt-1 text-[11px] text-ink-soft">
+              ログイン ID: <code className="font-mono">{row.login_id ?? '—'}</code>
+            </div>
+          )}
+          {linked && row.last_success_at && (
+            <div className="mt-0.5 text-[10px] text-emerald-700">
+              <CheckCircle2 className="mr-0.5 inline h-2.5 w-2.5" /> 最終成功:{' '}
+              {new Date(row.last_success_at).toLocaleString('ja-JP')}
+            </div>
+          )}
+          {(row.consecutive_failures ?? 0) > 0 && (
+            <div className="mt-0.5 text-[10px] text-amber-700">
+              <TriangleAlert className="mr-0.5 inline h-2.5 w-2.5" /> 連続失敗{' '}
+              {row.consecutive_failures} 回 {row.last_error && `: ${row.last_error}`}
+            </div>
+          )}
+          {row.blocked_until && new Date(row.blocked_until).getTime() > Date.now() && (
+            <div className="mt-0.5 text-[10px] text-red-700">
+              ブロック中: {new Date(row.blocked_until).toLocaleString('ja-JP')} まで
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 同期ステータスバー */}
+      {syncStatus && syncStatus.state !== 'idle' && (
+        <div
+          className={
+            'mt-2 rounded-[8px] px-2 py-1.5 text-[10px] ' +
+            (syncStatus.state === 'running'
+              ? 'bg-brand-light/60 text-brand-700'
+              : syncStatus.state === 'success'
+                ? 'bg-emerald-50 text-emerald-700'
+                : 'bg-red-50 text-red-700')
+          }
+        >
+          {syncStatus.state === 'running' && (
+            <span className="inline-flex items-center gap-1">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" /> 同期中: {syncStatus.msg}
+            </span>
+          )}
+          {syncStatus.state === 'success' && (
+            <span className="inline-flex items-center gap-1">
+              <CheckCircle2 className="h-2.5 w-2.5" /> 同期完了
+              {syncStatus.summary ? ` (${syncStatus.summary})` : ''}
+            </span>
+          )}
+          {syncStatus.state === 'failed' && (
+            <span className="inline-flex items-center gap-1">
+              <TriangleAlert className="h-2.5 w-2.5" /> 失敗: {syncStatus.error}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center gap-1.5">
+        {canEdit && (
+          <>
+            <button
+              type="button"
+              onClick={onEdit}
+              className="inline-flex items-center gap-1 rounded-[8px] border border-hairline bg-white px-2.5 py-1 text-[11px] font-semibold text-brand-700 hover:bg-brand-light/40"
+            >
+              <Pencil className="h-3 w-3" />
+              {linked ? '編集' : '設定'}
+            </button>
+            {linked && (
+              <button
+                type="button"
+                disabled={!ready || isRunning || !row.enabled}
+                onClick={onSync}
+                className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+                title={!row.enabled ? '停止中の店舗は同期できません' : '今すぐ同期'}
+              >
+                <PlayCircle className="h-3 w-3" /> 同期
+              </button>
+            )}
+            {linked && (
+              <button
+                type="button"
+                disabled={busy === 'enable'}
+                onClick={() => void toggle()}
+                className="inline-flex items-center gap-1 rounded-[8px] border border-hairline bg-white px-2.5 py-1 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:opacity-50"
+              >
+                {row.enabled ? '停止' : '再開'}
+              </button>
+            )}
+            {linked && (
+              <button
+                type="button"
+                disabled={busy === 'delete'}
+                onClick={() => void remove()}
+                className="inline-flex items-center gap-1 rounded-[8px] border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+              >
+                <Trash2 className="h-3 w-3" /> 削除
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      {actionErr && <p className="mt-2 text-[11px] text-red-700">{actionErr}</p>}
+    </div>
+  );
+}
+
+function EditModal({
+  row,
+  onClose,
+  onSaved,
+}: {
+  row: CredentialOverviewRow;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [loginId, setLoginId] = useState(row.login_id ?? '');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [baseUrl, setBaseUrl] = useState(row.base_url ?? 'https://salonboard.com/login/');
+  const [pending, setPending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save() {
+    setErr(null);
+    if (!loginId.trim()) {
+      setErr('ログイン ID を入力してください');
+      return;
+    }
+    if (!password.trim()) {
+      setErr('パスワードを入力してください (再保存する場合も必須)');
+      return;
+    }
+    setPending(true);
+    const r = await upsertSalonboardCredentials({
+      shopId: row.shop_id,
+      organizationId: row.organization_id,
+      loginId: loginId.trim(),
+      password,
+      baseUrl: baseUrl.trim() || null,
+    });
+    setPending(false);
+    if (!r.ok) {
+      setErr(r.error);
+      return;
+    }
+    await onSaved();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        className="w-full max-w-md rounded-2xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-hairline px-5 py-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-muted">{row.organization_name}</div>
+            <div className="text-[14px] font-bold text-ink">{row.shop_name}</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-soft hover:text-ink">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-3.5 px-5 py-4">
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold text-ink-soft">サロンボード ログイン ID</label>
+            <input
+              type="text"
+              autoComplete="off"
+              value={loginId}
+              onChange={(e) => setLoginId(e.target.value)}
+              placeholder="例: CD12345"
+              className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 text-[13px] outline-none focus:border-brand"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold text-ink-soft">パスワード</label>
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={row.has_credential ? '変更する場合のみ入力' : 'サロンボードのパスワード'}
+                className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 pr-10 text-[13px] outline-none focus:border-brand"
+              />
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-soft hover:text-ink"
+              >
+                {showPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+            <p className="mt-1 text-[10px] text-ink-soft">
+              ※ パスワードは Supabase 側で pgsodium により暗号化されます。
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold text-ink-soft">ログイン URL (任意)</label>
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://salonboard.com/login/"
+              className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 text-[13px] outline-none focus:border-brand"
+            />
+            <p className="mt-1 text-[10px] text-ink-soft">
+              通常はデフォルトのままで OK。ステージング環境がある場合のみ変更してください。
+            </p>
+          </div>
+          {err && (
+            <div className="rounded-[10px] bg-red-50 px-3 py-2 text-[11px] text-red-700">{err}</div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-hairline px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={pending}
+            className="rounded-[10px] px-4 py-2 text-[12px] font-semibold text-ink-soft hover:text-ink disabled:opacity-50"
+          >
+            キャンセル
+          </button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={pending}
+            className="inline-flex items-center gap-2 rounded-[10px] bg-brand-gradient px-4 py-2 text-[12px] font-semibold text-white shadow-brand-sm disabled:opacity-60"
+          >
+            {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+            {pending ? '保存中…' : row.has_credential ? '更新' : '登録'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

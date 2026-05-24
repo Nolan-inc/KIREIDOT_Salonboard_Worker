@@ -7,8 +7,10 @@ import { Staff } from './pages/Staff';
 import { Shifts } from './pages/Shifts';
 import { Blog } from './pages/Blog';
 import { Settings } from './pages/Settings';
+import { SalonboardPage } from './pages/Salonboard';
 import { Login } from './pages/Login';
 import { AuthProvider, useAuth } from './lib/auth-context';
+import { SyncControllerProvider } from './lib/sync-controller';
 import type { NavKey } from './lib/nav';
 import { Loader2 } from 'lucide-react';
 
@@ -35,6 +37,7 @@ function Routes() {
       {active === 'staff' && <Staff />}
       {active === 'shifts' && <Shifts />}
       {active === 'blog' && <Blog />}
+      {active === 'salonboard' && <SalonboardPage />}
       {active === 'settings' && <Settings />}
     </AppShell>
   );
@@ -43,9 +46,11 @@ function Routes() {
 export function App() {
   return (
     <AuthProvider>
-      <Routes />
-      {/* 自動アップデート完了の通知トースト (Electron 起動時のみ動作) */}
-      <UpdaterToast />
+      <SyncControllerProvider>
+        <Routes />
+        {/* 自動アップデート完了の通知トースト (Electron 起動時のみ動作) */}
+        <UpdaterToast />
+      </SyncControllerProvider>
     </AuthProvider>
   );
 }

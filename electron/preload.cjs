@@ -28,4 +28,18 @@ contextBridge.exposeInMainWorld('kireidotApp', {
     return () => ipcRenderer.removeListener('updater:status', listener);
   },
   quitAndInstallUpdate: () => ipcRenderer.invoke('updater:quit-and-install'),
+
+  // ---- Worker (utilityProcess) 操作 ----
+  // init: Supabase URL/anonKey/session を渡して worker を初期化
+  // sync: 同期実行 (shopIds 指定で個別店舗、未指定で全店舗)
+  // abort: 進行中の同期を中断
+  // onWorkerEvent: worker からのイベント (boot/ready/log/run:*/shop:*/error) を購読
+  workerInit: (payload) => ipcRenderer.invoke('worker:init', payload),
+  workerSync: (payload) => ipcRenderer.invoke('worker:sync', payload),
+  workerAbort: () => ipcRenderer.invoke('worker:abort'),
+  onWorkerEvent: (handler) => {
+    const listener = (_event, msg) => handler(msg);
+    ipcRenderer.on('worker:event', listener);
+    return () => ipcRenderer.removeListener('worker:event', listener);
+  },
 });
