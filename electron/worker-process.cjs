@@ -169,25 +169,116 @@ async function ensureReady() {
 }
 
 /**
+ * device 認証ヘッダを生成する (Admin API 全部で使う)。
+ * deviceAuth が未設定なら null を返し、呼び出し側に「device 未設定」を分からせる。
+ */
+function buildDeviceHeaders(extra) {
+  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+    return null;
+  }
+  return {
+    Authorization: `Bearer ${deviceAuth.deviceToken}`,
+    'X-Device-Id': deviceAuth.deviceId,
+    'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
+    ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
+    'X-Platform': deviceAuth.platform ?? process.platform,
+    ...(extra ?? {}),
+  };
+}
+
+/**
+ * Admin API: GET /api/salonboard/device/overview
+ * device に紐付いた shop の同期状態を返す。Electron が salonboard_credentials_overview を
+ * Supabase から直接読むのを止めるためのエンドポイント。
+ *
+ * 戻り値 (null は呼び出し失敗を示す):
+ *   { device: {...}, shops: [{shop_id, shop_name, organization_id,
+ *     credential_status, consent_status, sync_status, enabled, blocked_until,
+ *     last_success_at, last_error_at, last_error_code, last_error_message,
+ *     consecutive_failures, base_url, login_id_masked}] }
+ */
+async function fetchDeviceOverview() {
+  const headers = buildDeviceHeaders();
+  if (!headers) return { ok: false, code: 'device_auth_missing', shops: [], device: null };
+  try {
+    const res = await fetch(
+      `${deviceAuth.apiBaseUrl}/api/salonboard/device/overview`,
+      { method: 'GET', headers }
+    );
+    if (!res.ok) {
+      let body = null;
+      try {
+        body = await res.json();
+      } catch (_e) {
+        /* ignore */
+      }
+      return {
+        ok: false,
+        code: (body && body.error) || `http_${res.status}`,
+        status: res.status,
+        shops: [],
+        device: null,
+      };
+    }
+    const json = await res.json();
+    return {
+      ok: true,
+      device: json.device ?? null,
+      shops: Array.isArray(json.shops) ? json.shops : [],
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      code: 'network_error',
+      error: e?.message ?? String(e),
+      shops: [],
+      device: null,
+    };
+  }
+}
+
+/**
  * 同期対象の店舗一覧を取得 (enabled かつ未ブロック)。
  *  - shopIds が指定されている場合はその店舗だけ
+ *
+ * v0.2.3: salonboard_credentials_overview の Supabase 直読みを廃止し、
+ * Admin API (/api/salonboard/device/overview) 経由に変更。Electron 側に
+ * super_owner/admin 相当の権限を要求しないよう、device token 認証で済む形に揃える。
+ *
+ * 戻り値は従来の形 ({shop_id, shop_name, organization_name, organization_id,
+ * enabled, blocked_until, has_credential}) を維持。
  */
 async function fetchTargets(shopIds) {
-  let q = supabase
-    .from('salonboard_credentials_overview')
-    .select('organization_id, organization_name, shop_id, shop_name, has_credential, enabled, blocked_until');
-  q = q.eq('has_credential', true);
-  if (Array.isArray(shopIds) && shopIds.length > 0) {
-    q = q.in('shop_id', shopIds);
+  const overview = await fetchDeviceOverview();
+  if (!overview.ok) {
+    throw new Error(
+      `fetchTargets via /overview API failed: ${overview.code}${
+        overview.error ? ` (${overview.error})` : ''
+      }`
+    );
   }
-  const { data, error } = await q;
-  if (error) throw new Error(`fetchTargets: ${error.message}`);
+  const orgName = overview.device?.organization_id ?? null;
   const now = Date.now();
-  return (data ?? []).filter((r) => {
-    if (!r.enabled) return false;
-    if (r.blocked_until && new Date(r.blocked_until).getTime() > now) return false;
+  // overview の shop は credential が無い shop も含むので、ここで絞り込み:
+  //   credential_status === 'active' AND enabled === true AND blocked_until が未来でない
+  const rows = (overview.shops ?? []).filter((s) => {
+    if (s.credential_status === 'missing') return false;
+    if (s.enabled === false) return false;
+    if (s.blocked_until && new Date(s.blocked_until).getTime() > now) return false;
     return true;
   });
+  const filtered = Array.isArray(shopIds) && shopIds.length > 0
+    ? rows.filter((r) => shopIds.includes(r.shop_id))
+    : rows;
+  return filtered.map((s) => ({
+    shop_id: s.shop_id,
+    shop_name: s.shop_name,
+    organization_id: s.organization_id,
+    organization_name: orgName, // overview API は org name を持っていないので null 許容
+    has_credential: true,
+    enabled: !!s.enabled,
+    blocked_until: s.blocked_until ?? null,
+  }));
 }
 
 /**
@@ -216,7 +307,8 @@ async function fetchTargets(shopIds) {
  * これらは processShop 側で error_code として分類される。
  */
 async function revealCredentials(shopId) {
-  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+  const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
+  if (!headers) {
     const e = new Error('device_auth_missing');
     e.code = 'device_auth_missing';
     throw e;
@@ -227,14 +319,7 @@ async function revealCredentials(shopId) {
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${deviceAuth.deviceToken}`,
-        'X-Device-Id': deviceAuth.deviceId,
-        'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
-        ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
-        'X-Platform': deviceAuth.platform ?? process.platform,
-      },
+      headers,
       body: JSON.stringify({ shop_id: shopId }),
     });
   } catch (e) {
@@ -1124,17 +1209,55 @@ async function markCredentialSuccess(shopId) {
   }
 }
 
+/**
+ * 同期エラーを Admin に通知する (v0.2.3 で Admin API 化)。
+ *
+ * 旧実装は Electron から直接 salonboard_credentials を UPDATE していたが、
+ * v0.2.3 では POST /api/salonboard/device/report-error に寄せる。
+ * これにより Electron 側に salonboard_credentials の UPDATE 権限が不要になる。
+ *
+ * device 認証が未設定 / API 疎通失敗のときは旧フォールバック (Supabase 直書き) を
+ * 試みる。完全失敗時は致命的でないので silent 扱い。
+ */
 async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
+  const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
+  if (headers) {
+    try {
+      const res = await fetch(
+        `${deviceAuth.apiBaseUrl}/api/salonboard/device/report-error`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            shop_id: shopId,
+            error_code: errorCode ?? 'retryable_failed',
+            reason: String(reason ?? '').slice(0, 500),
+            blocked_until: blockedUntil ?? null,
+          }),
+        }
+      );
+      if (res.ok) return;
+      // API 側 401/403/404 のとき fallback には進まない (権限上書きを試みても無駄)
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        const t = await res.text().catch(() => '');
+        log(`report-error API rejected (${res.status}): ${t.slice(0, 200)}`, 'warn');
+        return;
+      }
+      // 5xx 等は下の Supabase fallback に進む
+    } catch (e) {
+      log(`report-error API network error: ${e?.message ?? e}`, 'warn');
+      /* fallback へ */
+    }
+  }
+
+  // フォールバック: 旧 Supabase 直書き (device 未設定 or 5xx のとき)
   try {
-    // consecutive_failures はインクリメントしたいので、いったん最新値を取得して +1
     const { data: cur } = await supabase
       .from('salonboard_credentials')
       .select('consecutive_failures')
       .eq('shop_id', shopId)
       .maybeSingle();
     const next = (cur?.consecutive_failures ?? 0) + 1;
-    // DB スキーマには last_error_code 列がまだ無いので、prefix で残す。
-    // 例: "[captcha_detected] reCAPTCHA encountered during login"
     const prefixed = errorCode ? `[${errorCode}] ${String(reason)}` : String(reason);
     const update = {
       last_error: prefixed.slice(0, 500),

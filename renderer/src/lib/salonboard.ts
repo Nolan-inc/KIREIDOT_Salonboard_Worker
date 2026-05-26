@@ -35,6 +35,13 @@ export type CredentialOverviewRow = {
 /**
  * 会社×店舗グリッドを描画するためのフラットな一覧。
  * UI 側で organization_id でグルーピングする。
+ *
+ * これは「認証情報の設定画面」で使う読み取りなので、Supabase 直読みを維持する。
+ * (super_owner / admin / owner / shop_manager で signed-in しているユーザーが
+ * RLS 越しに自分の権限内の店舗を見るのが目的)
+ *
+ * 一方、Electron 同期ループ用 (= device 認証で済む短い view) は
+ * fetchDeviceOverview() を使うこと。
  */
 export async function fetchCredentialOverview(): Promise<CredentialOverviewRow[]> {
   const { data, error } = await supabase
@@ -45,6 +52,122 @@ export async function fetchCredentialOverview(): Promise<CredentialOverviewRow[]
     return [];
   }
   return (data ?? []) as CredentialOverviewRow[];
+}
+
+// ---------------------------------------------------------------------------
+// device 認証経由の overview (Electron アプリの同期ループ用)
+//
+// 旧: supabase.from('salonboard_credentials_overview') を直叩き
+// 新: GET /api/salonboard/device/overview (device token 認証)
+//
+// これにより Electron 側の Supabase セッションに「組織全体の credentials を見る」
+// 強い権限が無くても自分の shop の sync 状態が取れるようになる。
+// ---------------------------------------------------------------------------
+
+export type DeviceOverviewShop = {
+  shop_id: string;
+  shop_name: string;
+  organization_id: string;
+  credential_status: 'active' | 'missing' | 'disabled' | 'blocked';
+  consent_status: 'valid' | 'missing';
+  sync_status:
+    | 'normal'
+    | 'blocked'
+    | 'rate_limited'
+    | 'login_required'
+    | 'captcha_detected'
+    | 'warning'
+    | 'consent_required'
+    | 'credentials_missing';
+  enabled: boolean;
+  blocked_until: string | null;
+  last_success_at: string | null;
+  last_error_at: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+  consecutive_failures: number;
+  base_url: string | null;
+  login_id_masked: string | null;
+};
+
+export type DeviceOverviewResult = {
+  ok: boolean;
+  code?: string;
+  device: {
+    id: string | null;
+    organization_id: string | null;
+    status: string | null;
+    device_name: string | null;
+    device_platform: string | null;
+    app_version: string | null;
+    last_seen_at: string | null;
+  } | null;
+  shops: DeviceOverviewShop[];
+};
+
+function deviceAuthHeaders(): Record<string, string> | null {
+  const token = import.meta.env.VITE_SALONBOARD_DEVICE_TOKEN as string | undefined;
+  const id = import.meta.env.VITE_SALONBOARD_DEVICE_ID as string | undefined;
+  if (!token || !id) return null;
+  return {
+    Authorization: `Bearer ${token}`,
+    'X-Device-Id': id,
+    'X-Worker-Id':
+      (import.meta.env.VITE_WORKER_ID as string | undefined) ?? 'electron-worker',
+    ...(import.meta.env.VITE_APP_VERSION
+      ? { 'X-App-Version': String(import.meta.env.VITE_APP_VERSION) }
+      : {}),
+    'X-Platform':
+      typeof window !== 'undefined' && window.salondesk?.platform
+        ? String(window.salondesk.platform)
+        : 'unknown',
+  };
+}
+
+function adminApiBase(): string | null {
+  const v =
+    (import.meta.env.VITE_KIREIDOT_API_URL as string | undefined) ??
+    (import.meta.env.VITE_ADMIN_API_URL as string | undefined) ??
+    '';
+  if (!v) return null;
+  return v.replace(/\/+$/, '');
+}
+
+export async function fetchDeviceOverview(): Promise<DeviceOverviewResult> {
+  const base = adminApiBase();
+  const headers = deviceAuthHeaders();
+  if (!base || !headers) {
+    return { ok: false, code: 'device_auth_missing', device: null, shops: [] };
+  }
+  try {
+    const res = await fetch(`${base}/api/salonboard/device/overview`, {
+      method: 'GET',
+      headers,
+    });
+    if (!res.ok) {
+      let body: any = null;
+      try {
+        body = await res.json();
+      } catch {
+        /* ignore */
+      }
+      return {
+        ok: false,
+        code: (body && body.error) || `http_${res.status}`,
+        device: null,
+        shops: [],
+      };
+    }
+    const json = (await res.json()) as DeviceOverviewResult;
+    return { ok: true, device: json.device ?? null, shops: json.shops ?? [] };
+  } catch (e: any) {
+    return {
+      ok: false,
+      code: 'network_error',
+      device: null,
+      shops: [],
+    };
+  }
 }
 
 /**

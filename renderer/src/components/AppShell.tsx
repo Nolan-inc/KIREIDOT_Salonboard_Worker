@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
+import { SetupStatusBanner } from './SetupStatusBanner';
 import type { NavKey } from '../lib/nav';
 import { NAV_ITEMS } from '../lib/nav';
 
@@ -27,6 +28,8 @@ export function AppShell({
           title={current?.label ?? ''}
           description={current?.description ?? ''}
         />
+        {/* device 設定不備など重要な状態は最上部のバナーで案内する (sync-controller の preflight 結果) */}
+        <SetupStatusBanner />
         <div className="flex-1 overflow-y-auto px-8 pb-12 pt-2">{children}</div>
       </main>
     </div>

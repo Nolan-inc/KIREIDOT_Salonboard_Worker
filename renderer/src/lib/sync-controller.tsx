@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { supabase } from './supabase';
 import { useAuth } from './auth-context';
+import { fetchDeviceOverview } from './salonboard';
 
 /**
  * 予約同期くん: utilityProcess (electron/worker-process.cjs) を制御する Context。
@@ -36,6 +37,40 @@ export type SyncRunSummary = {
 
 export type ChannelKey = 'bookings' | 'staff' | 'shifts' | 'blog' | 'customers';
 
+/**
+ * 店舗 PC 自体の設定状態 (preflight 結果)。
+ *
+ *   code: 'ok'                  → device + credentials + consent すべて揃って同期可能
+ *   code: 'device_unconfigured' → SALONBOARD_DEVICE_ID/TOKEN 未設定 (ローカル設定)
+ *   code: 'device_unauthorized' → token 不一致 / revoked / paused (Admin で無効化)
+ *   code: 'no_shops_assigned'   → device に shop が紐付いていない
+ *   code: 'all_shops_blocked'   → 全 shop が blocked_until 中
+ *   code: 'missing_consent'     → consent 未取得の shop あり (一部のみ動作)
+ *   code: 'missing_credentials' → credentials 未設定の shop あり
+ *   code: 'network_error'       → API 疎通失敗 (Admin が落ちている / オフライン)
+ *   code: 'unknown'             → preflight 未実行 or 例外
+ */
+export type SyncSetupStatus = {
+  code:
+    | 'ok'
+    | 'device_unconfigured'
+    | 'device_unauthorized'
+    | 'no_shops_assigned'
+    | 'all_shops_blocked'
+    | 'missing_consent'
+    | 'missing_credentials'
+    | 'network_error'
+    | 'unknown';
+  message: string;
+  /** UI で詳しく見たい場合の補助情報 */
+  detail?: {
+    deviceStatus?: string | null;
+    shopsTotal?: number;
+    shopsReady?: number;
+    blockedShops?: number;
+  };
+};
+
 type SyncContextValue = {
   ready: boolean;
   isRunning: boolean;
@@ -44,6 +79,10 @@ type SyncContextValue = {
   lastRun: SyncRunSummary | null;
   // worker のログ (リング 200 件)
   logs: { at: string; level: 'info' | 'warn' | 'error'; msg: string }[];
+  /** 店舗PC自体の設定状態 (preflight)。起動直後は code: 'unknown' */
+  setupStatus: SyncSetupStatus;
+  /** preflight を即時再実行する */
+  refreshSetupStatus: () => Promise<void>;
   /** 自動同期が有効か (sync_interval_minutes に従って全チャネルを定期実行) */
   autoSyncEnabled: boolean;
   setAutoSyncEnabled: (v: boolean) => void;
@@ -88,6 +127,10 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
   const [shopStatuses, setShopStatuses] = useState<Record<string, ShopSyncStatus>>({});
   const [lastRun, setLastRun] = useState<SyncRunSummary | null>(null);
   const [logs, setLogs] = useState<SyncContextValue['logs']>([]);
+  const [setupStatus, setSetupStatus] = useState<SyncSetupStatus>({
+    code: 'unknown',
+    message: '設定状態を確認中…',
+  });
   const runningRef = useRef(false);
   const [autoSyncEnabled, setAutoSyncEnabledState] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -319,6 +362,125 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  /**
+   * device 設定の self-check を実行する (preflight)。
+   *
+   * 起動直後と「同期ボタン押下前」に呼ぶ想定。Admin の /overview API を 1 回叩き、
+   * 失敗種別ごとに setupStatus にユーザー向けメッセージを入れる。
+   */
+  const refreshSetupStatus = useCallback(async () => {
+    const overview = await fetchDeviceOverview();
+    if (!overview.ok) {
+      switch (overview.code) {
+        case 'device_auth_missing':
+          setSetupStatus({
+            code: 'device_unconfigured',
+            message:
+              'デバイス設定が未完了です。.env.local の VITE_SALONBOARD_DEVICE_ID / VITE_SALONBOARD_DEVICE_TOKEN を設定してください。',
+          });
+          return;
+        case 'unauthorized':
+        case 'device token rejected':
+        case 'http_401':
+          setSetupStatus({
+            code: 'device_unauthorized',
+            message:
+              'この店舗PCは管理画面で無効化されているか、デバイストークンが一致しません。Admin の /admin/salonboard/devices で確認してください。',
+          });
+          return;
+        case 'network_error':
+          setSetupStatus({
+            code: 'network_error',
+            message:
+              'KIREIDOT Admin との通信に失敗しました。インターネット接続と VITE_KIREIDOT_API_URL を確認してください。',
+          });
+          return;
+        default:
+          setSetupStatus({
+            code: 'unknown',
+            message: `設定確認に失敗しました (${overview.code ?? 'unknown'})`,
+          });
+          return;
+      }
+    }
+
+    const shops = overview.shops ?? [];
+    if (shops.length === 0) {
+      setSetupStatus({
+        code: 'no_shops_assigned',
+        message:
+          'この店舗PCに紐付いた店舗がありません。管理画面で device に shop を紐付けてください。',
+      });
+      return;
+    }
+    const now = Date.now();
+    const blocked = shops.filter(
+      (s) => s.blocked_until && new Date(s.blocked_until).getTime() > now,
+    );
+    const missingCred = shops.filter((s) => s.credential_status === 'missing');
+    const missingConsent = shops.filter((s) => s.consent_status === 'missing');
+    const ready = shops.filter(
+      (s) =>
+        s.credential_status === 'active' &&
+        s.enabled &&
+        s.consent_status === 'valid' &&
+        !(s.blocked_until && new Date(s.blocked_until).getTime() > now),
+    );
+
+    const detail = {
+      shopsTotal: shops.length,
+      shopsReady: ready.length,
+      blockedShops: blocked.length,
+      deviceStatus: overview.device?.status ?? null,
+    };
+
+    if (ready.length === 0 && blocked.length === shops.length) {
+      setSetupStatus({
+        code: 'all_shops_blocked',
+        message: 'すべての店舗が一時ブロック中です。時間を空けて再試行してください。',
+        detail,
+      });
+      return;
+    }
+    if (missingCred.length > 0 && ready.length === 0) {
+      setSetupStatus({
+        code: 'missing_credentials',
+        message:
+          'SalonBoard 認証情報が未設定の店舗があります (' +
+          missingCred.length +
+          '件)。Admin で設定してください。',
+        detail,
+      });
+      return;
+    }
+    if (missingConsent.length > 0 && ready.length === 0) {
+      setSetupStatus({
+        code: 'missing_consent',
+        message:
+          'SalonBoard 連携の同意が未取得の店舗があります (' +
+          missingConsent.length +
+          '件)。Admin で同意を取得してください。',
+        detail,
+      });
+      return;
+    }
+
+    setSetupStatus({
+      code: 'ok',
+      message:
+        ready.length === shops.length
+          ? `${ready.length} 店舗とも同期可能です。`
+          : `${ready.length}/${shops.length} 店舗が同期可能です (残りは設定不備またはブロック中)。`,
+      detail,
+    });
+  }, []);
+
+  // ready が true になったら 1 回 preflight を走らせる
+  useEffect(() => {
+    if (!ready) return;
+    void refreshSetupStatus();
+  }, [ready, refreshSetupStatus]);
+
   const syncAll = useCallback<SyncContextValue['syncAll']>(
     async (channels = DEFAULT_CHANNELS, opts) => {
       const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
@@ -371,15 +533,30 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     const tick = async () => {
       if (cancelled) return;
       if (runningRef.current) return; // 既に走っているならスキップ
-      // 最短間隔を取得
-      const { data } = await supabase
-        .from('salonboard_credentials_overview')
-        .select('sync_interval_minutes, has_credential, enabled')
-        .eq('has_credential', true)
-        .eq('enabled', true);
-      const intervals = (data ?? [])
-        .map((r) => Number((r as any).sync_interval_minutes))
-        .filter((n) => Number.isFinite(n) && n > 0);
+
+      // v0.2.3: device API があればそれを使う。無ければ従来 (Supabase 直読み) に fallback。
+      // overview API は sync_interval_minutes を返さないので、フォールバック側は従来通り。
+      const overview = await fetchDeviceOverview();
+      let intervals: number[] = [];
+      if (overview.ok) {
+        // overview に sync_interval_minutes は含まれないので、active な店舗が
+        // ある場合は固定で 12 分 (salonboard_credentials のデフォルト値) を使う。
+        // 個別の sync_interval_minutes を反映したい場合は Settings 画面側で
+        // 直接管理する想定 (このループは「動いていれば走る」ガード用)。
+        const activeShops = overview.shops.filter(
+          (s) => s.credential_status === 'active' && s.enabled,
+        );
+        if (activeShops.length > 0) intervals = [12];
+      } else {
+        const { data } = await supabase
+          .from('salonboard_credentials_overview')
+          .select('sync_interval_minutes, has_credential, enabled')
+          .eq('has_credential', true)
+          .eq('enabled', true);
+        intervals = (data ?? [])
+          .map((r) => Number((r as any).sync_interval_minutes))
+          .filter((n) => Number.isFinite(n) && n > 0);
+      }
       if (intervals.length === 0) return;
       const minInterval = Math.min(...intervals);
       const elapsed = Date.now() - lastAutoSyncAtRef.current;
@@ -416,19 +593,34 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (elapsed < BOOKINGS_AUTO_SYNC_INTERVAL_MS) return;
 
       // 対象店舗: 認証情報があり enabled な店舗の shop_id 一覧
-      const { data } = await supabase
-        .from('salonboard_credentials_overview')
-        .select('shop_id, has_credential, enabled, blocked_until')
-        .eq('has_credential', true)
-        .eq('enabled', true);
+      // v0.2.3: device API 優先、無理なら Supabase 直読みに fallback
       const now = Date.now();
-      const shopIds = (data ?? [])
-        .filter((r: any) => {
-          if (!r.blocked_until) return true;
-          return new Date(r.blocked_until).getTime() <= now;
-        })
-        .map((r: any) => r.shop_id as string)
-        .filter(Boolean);
+      let shopIds: string[] = [];
+      const overview = await fetchDeviceOverview();
+      if (overview.ok) {
+        shopIds = overview.shops
+          .filter((s) => {
+            if (s.credential_status !== 'active') return false;
+            if (!s.enabled) return false;
+            if (s.blocked_until && new Date(s.blocked_until).getTime() > now)
+              return false;
+            return true;
+          })
+          .map((s) => s.shop_id);
+      } else {
+        const { data } = await supabase
+          .from('salonboard_credentials_overview')
+          .select('shop_id, has_credential, enabled, blocked_until')
+          .eq('has_credential', true)
+          .eq('enabled', true);
+        shopIds = (data ?? [])
+          .filter((r: any) => {
+            if (!r.blocked_until) return true;
+            return new Date(r.blocked_until).getTime() <= now;
+          })
+          .map((r: any) => r.shop_id as string)
+          .filter(Boolean);
+      }
       if (shopIds.length === 0) return;
 
       const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
@@ -456,6 +648,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       shopStatuses,
       lastRun,
       logs,
+      setupStatus,
+      refreshSetupStatus,
       autoSyncEnabled,
       setAutoSyncEnabled,
       bookingsAutoSyncEnabled,
@@ -471,6 +665,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       shopStatuses,
       lastRun,
       logs,
+      setupStatus,
+      refreshSetupStatus,
       autoSyncEnabled,
       setAutoSyncEnabled,
       bookingsAutoSyncEnabled,

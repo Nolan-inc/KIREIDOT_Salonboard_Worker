@@ -361,3 +361,72 @@ tail -f "~/Library/Application Support/予約同期くん/logs/main.log"
   拒否され、アップデートも失敗する (`autoUpdater.on('error')`)。
 - **PAT を Git に絶対コミットしない**。`GH_TOKEN` は shell の一時 env で
   渡す or `~/.zshrc` などに置く (リポジトリ外)。
+
+---
+
+## SalonBoard Device 設定手順 (v0.2.2 以降)
+
+v0.2.2 から、店舗 PC ごとに **device token** を発行して SalonBoard 認証情報を取得する仕組みに切り替えました (それ以前の global token は本番では使えません)。
+
+### 1. Admin で device を発行する
+
+1. `https://admin.kireidot.jp/admin/salonboard/devices` を開く
+2. 「**デバイスを追加**」をクリック
+3. デバイス名 (例: 銀座本店-mac-01) と 管理スタッフを入力 → 発行
+4. ⚠️ **`SALONBOARD_DEVICE_ID` と `SALONBOARD_DEVICE_TOKEN` がモーダルに 1 回だけ平文表示** されます。閉じると二度と取れないので、必ずその場で保存してください
+5. 同じ画面で **「店舗を選択して追加」** から、この device に紐付ける店舗を選ぶ
+
+### 2. 店舗 PC の .env.local に設定する
+
+予約同期くん .app の中身ではなく、開発・運用用の `.env.local` (Worker root) に以下を追記:
+
+```env
+# Admin URL
+VITE_KIREIDOT_API_URL=https://admin.kireidot.jp
+
+# Admin で発行された device 情報
+VITE_SALONBOARD_DEVICE_ID=<モーダルに表示された uuid>
+VITE_SALONBOARD_DEVICE_TOKEN=<モーダルに表示された 43文字のトークン>
+
+# 任意の識別子 (Admin の同期履歴に出る)
+VITE_WORKER_ID=銀座本店-mac-01
+```
+
+> 注: VITE_* プレフィックスは Vite のビルド時に renderer (Electron 内ブラウザ側) に
+> 焼き込まれます。Worker (Electron 主プロセス) も同じ値を使うので、両方を兼ねます。
+
+### 3. アプリ再起動 → 設定 self-check
+
+予約同期くん .app を起動すると、画面上部に以下のいずれかが出ます:
+
+| 表示 | 意味 | 対処 |
+|---|---|---|
+| (バナーなし) | 正常 | そのまま使用可 |
+| デバイス設定が未完了 | `.env.local` 未設定 | 上記 step 2 を再確認 |
+| デバイス認証に失敗 | token 不一致 / Admin で revoked | Admin で device 状態を確認、または token 再発行 |
+| 担当店舗が未割当 | shop 紐付けがない | Admin の device 画面で紐付け追加 |
+| SalonBoard認証情報が未設定 | credentials を Admin で未登録 | `/admin/salonboard` で店舗の login/password を登録 |
+| SalonBoard連携の同意未取得 | consent レコードなし | オーナーが Admin で同意を取得 |
+| 全店舗が一時ブロック中 | reCAPTCHA / 403 等で 6h ブロック | 時間を空けて自動解除待ち |
+
+### 4. device token を再発行する (紛失/漏洩時)
+
+1. Admin の device 画面で対象 device の **「token再発行」** ボタンを押す
+2. 旧 token は即座に無効化される (DB 内の `device_token_hash` を上書き)
+3. 新 token を控えて、店舗 PC の `.env.local` を更新 → アプリ再起動
+
+### 5. device を完全に廃止する (PC 入れ替え時)
+
+1. 「revoke」を押す → status=revoked、device_token_hash=NULL
+2. 旧 token は二度と通らない
+3. 再利用したい場合は「再発行して再有効化」ボタン (revoke 中の device に表示) で `status=active` + 新 token を発行
+
+### 仕組み (概要)
+
+- token は **平文では DB に保存しない**。`HMAC-SHA256(token, SALONBOARD_DEVICE_SECRET)` の hash だけが `salonboard_sync_devices.device_token_hash` に保存される
+- credentials 取得は `POST /api/salonboard/device/credentials` 経由で、Admin が以下を全部検証してから返す:
+  - device の status=active, revoked_at IS NULL
+  - device が shop に紐付き、`salonboard_sync_device_shops.enabled = true`
+  - `salonboard_credentials.enabled = true`, `blocked_until` が過去
+  - `salonboard_consents.revoked_at IS NULL` (有効な同意あり)
+- credentials が満たされない場合は **何が原因か** が個別エラーコードで返る (`credentials_not_set` / `credentials_disabled` / `blocked` / `consent_missing` / `shop_not_allowed`)
