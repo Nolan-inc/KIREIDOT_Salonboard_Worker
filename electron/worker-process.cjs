@@ -16,6 +16,9 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { chromium } = require('playwright');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
 // Electron utilityProcess は Node 20 で動作するが、組み込み WebSocket が無いため
 // Supabase の createClient が RealtimeClient を生成する際に
 // "Node.js 20 detected without native WebSocket support" 例外を投げる。
@@ -164,8 +167,12 @@ async function processShop(target, channels, runId, opts = {}) {
     ],
   });
   currentBrowser = browser;
+  // shop_id ごとの storageState (ログインセッション) を流用
+  const ssPath = storageStatePathFor(shopId);
+  const initialStorage = readStorageStatePath(ssPath);
   try {
     const ctx = await browser.newContext({
+      ...(initialStorage ? { storageState: initialStorage } : {}),
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
       locale: 'ja-JP',
@@ -212,22 +219,62 @@ async function processShop(target, channels, runId, opts = {}) {
     }
 
     emit('shop:progress', { shopId, step: 'login', msg: `${creds.baseUrl} に接続中` });
-    const r = await tryLogin(page, creds);
-    if (r.status === 'captcha') {
-      // 6 時間ブロック
-      const blockedUntil = new Date(Date.now() + 6 * 3600_000).toISOString();
-      await markCredentialError(shopId, 'captcha_detected', blockedUntil);
-      emit('shop:end', { shopId, ok: false, error: 'reCAPTCHA を検知しました (6 時間ブロック)' });
-      await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
-      return { ok: false };
+
+    // 1) 既存セッションが有効なら tryLogin を完全にスキップ (bot 検知/reCAPTCHA 回避)
+    let needsLogin = true;
+    if (initialStorage) {
+      try {
+        const sessionState = await isLoggedIn(page, creds.baseUrl);
+        if (sessionState === 'logged_in') {
+          needsLogin = false;
+          emit('shop:progress', {
+            shopId,
+            step: 'login',
+            msg: '既存セッションで継続 (ログインスキップ)',
+          });
+        } else if (sessionState === 'captcha') {
+          // captcha 検知 → セッションも怪しいので破棄し、ブロック扱い
+          clearStorageState(ssPath);
+          const blockedUntil = new Date(Date.now() + 6 * 3600_000).toISOString();
+          await markCredentialError(shopId, 'captcha_detected', blockedUntil);
+          emit('shop:end', {
+            shopId,
+            ok: false,
+            error: 'reCAPTCHA を検知しました (6 時間ブロック)',
+          });
+          await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
+          return { ok: false };
+        } else if (sessionState === 'needs_login') {
+          // セッション切れ → 通常ログインに進む
+          clearStorageState(ssPath);
+        }
+      } catch (_e) {
+        // 判定処理自体が転んだら通常ログインにフォールバック
+      }
     }
-    if (r.status === 'failed') {
-      await markCredentialError(shopId, r.reason ?? 'login_failed', null);
-      emit('shop:end', { shopId, ok: false, error: r.reason ?? 'ログイン失敗' });
-      await recordShopRun(runId, shopId, false, null, r.reason ?? 'login_failed', counts);
-      return { ok: false };
+
+    // 2) 必要なときだけログイン
+    if (needsLogin) {
+      const r = await tryLogin(page, creds);
+      if (r.status === 'captcha') {
+        clearStorageState(ssPath);
+        const blockedUntil = new Date(Date.now() + 6 * 3600_000).toISOString();
+        await markCredentialError(shopId, 'captcha_detected', blockedUntil);
+        emit('shop:end', { shopId, ok: false, error: 'reCAPTCHA を検知しました (6 時間ブロック)' });
+        await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
+        return { ok: false };
+      }
+      if (r.status === 'failed') {
+        clearStorageState(ssPath);
+        await markCredentialError(shopId, r.reason ?? 'login_failed', null);
+        emit('shop:end', { shopId, ok: false, error: r.reason ?? 'ログイン失敗' });
+        await recordShopRun(runId, shopId, false, null, r.reason ?? 'login_failed', counts);
+        return { ok: false };
+      }
+      emit('shop:progress', { shopId, step: 'login', msg: 'ログイン成功' });
+      // 成功 → storageState を保存
+      await saveStorageState(ctx, ssPath);
     }
-    emit('shop:progress', { shopId, step: 'login', msg: 'ログイン成功' });
 
     // ---- スクレイピング本体 (channels で選択された分だけ) ----
     const channelSet = new Set(channels);
@@ -373,6 +420,116 @@ async function recordShopRun(runId, shopId, ok, summary, error, counts) {
     });
   } catch (_e) {
     /* 履歴記録失敗は致命的でないので無視 */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// storageState (shop_id ごとのログインセッション)
+//
+// SalonBoard へ毎回ログインすると bot 検知/reCAPTCHA リスクが上がるので、
+// shop_id 単位で Playwright の storageState (cookies + localStorage) をローカル PC に
+// 保存しておく。
+//
+// 保存先: ~/.kireidot/salonboard-auth/{shop_id}.json
+//
+// 重要:
+//   - サーバには絶対送らない
+//   - ファイル単体で SalonBoard にログインできるため 0600 で保存
+//   - reCAPTCHA / login 失敗のときは破棄して次回ログインからやり直す
+// ---------------------------------------------------------------------------
+function storageStatePathFor(shopId) {
+  const dir = path.join(os.homedir(), '.kireidot', 'salonboard-auth');
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } else {
+      try {
+        const st = fs.statSync(dir);
+        if ((st.mode & 0o777) !== 0o700) fs.chmodSync(dir, 0o700);
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+  } catch (_e) {
+    /* CI / sandbox 等で作成不可なら storageState なしで動かす */
+  }
+  return path.join(dir, `${shopId}.json`);
+}
+
+/** ファイルがあればパスを返し、なければ undefined。Playwright は文字列 path を受け取れる */
+function readStorageStatePath(p) {
+  try {
+    return fs.existsSync(p) ? p : undefined;
+  } catch (_e) {
+    return undefined;
+  }
+}
+
+async function saveStorageState(ctx, p) {
+  try {
+    await ctx.storageState({ path: p });
+    try {
+      fs.chmodSync(p, 0o600);
+    } catch (_e) {
+      /* permission 変更不可でも致命的ではない */
+    }
+  } catch (e) {
+    log(`storageState 保存に失敗: ${e?.message ?? e}`, 'warn');
+  }
+}
+
+function clearStorageState(p) {
+  try {
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (_e) {
+    /* ignore */
+  }
+}
+
+/**
+ * 管理画面 (TOP) を開き、ログイン input が無ければ「ログイン済み」と判定する。
+ * captcha を踏んだら captcha を返す。
+ *
+ * SalonBoard は店舗種別で URL が変わるので、base URL の直接アクセスと
+ * 代表的な管理画面パスの両方を試す。
+ */
+async function isLoggedIn(page, baseUrl) {
+  const candidates = [
+    safeUrl('/KLP/', baseUrl),
+    safeUrl('/CNF/', baseUrl),
+    baseUrl,
+  ].filter(Boolean);
+  for (const url of candidates) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    } catch (_e) {
+      continue;
+    }
+    if ((await page.locator('iframe[src*="recaptcha"]').count()) > 0) {
+      return 'captcha';
+    }
+    const loginInputCount = await page
+      .locator(
+        'input[name="userId"], input[name="loginId"], input[name="password"], input[type="password"]'
+      )
+      .count();
+    if (loginInputCount > 0) return 'needs_login';
+    if (/login/i.test(page.url())) return 'needs_login';
+    const expiredCount = await page
+      .locator('text=/再ログイン|セッション|タイムアウト|ログインしてください/')
+      .first()
+      .count();
+    if (expiredCount > 0) return 'needs_login';
+    return 'logged_in';
+  }
+  return 'unknown';
+}
+
+function safeUrl(rel, base) {
+  try {
+    return new URL(rel, base).toString();
+  } catch (_e) {
+    return null;
   }
 }
 
