@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, Send, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../components/Card';
-import { useAuth } from '../lib/auth-context';
+import { useEffectiveScope } from '../lib/selection-context';
 import { fetchShiftsForWeek, fetchStaffList, type ShiftRow, type StaffRow } from '../lib/data';
 
 const HOURS = ['09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20'];
@@ -15,14 +15,13 @@ function startOfWeek(d = new Date()): Date {
 }
 
 export function Shifts() {
-  const auth = useAuth();
+  const scope = useEffectiveScope();
   const [loading, setLoading] = useState(true);
   const [shifts, setShifts] = useState<ShiftRow[]>([]);
   const [staff, setStaff] = useState<StaffRow[]>([]);
 
   useEffect(() => {
-    if (auth.status !== 'signed-in') return;
-    const scope = auth.scope;
+    if (!scope) return;
     let cancelled = false;
     setLoading(true);
     Promise.all([fetchShiftsForWeek(scope), fetchStaffList(scope)])
@@ -35,7 +34,7 @@ export function Shifts() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [scope?.shopId, scope?.organizationId]);
 
   const week = useMemo(() => {
     const start = startOfWeek();
@@ -135,8 +134,12 @@ export function Shifts() {
                           return (
                             <td key={h} className="relative h-14 border-b border-l border-hairline/40 align-top">
                               {within.slice(0, 2).map((s, idx) => {
+                                // 既存スタッフ DB と matched_staff_id 経由でリンクできれば使い、
+                                // 取れなければ salonboard 由来の staff_name を表示。
                                 const stf = staffMap.get(s.staff_id);
-                                const off = !!s.is_requested_off;
+                                const label =
+                                  stf?.full_name ?? s.staff_name ?? '?';
+                                const off = !!s.is_off || !!s.is_requested_off;
                                 return (
                                   <div
                                     key={s.id}
@@ -146,8 +149,9 @@ export function Shifts() {
                                         : 'absolute inset-x-1 rounded-[6px] bg-brand-gradient px-1 py-0.5 text-[9px] font-semibold text-white shadow-brand-sm'
                                     }
                                     style={{ top: 4 + idx * 22 }}
+                                    title={off ? '休み' : `${label} 出勤`}
                                   >
-                                    {stf?.full_name?.slice(0, 4) ?? '?'}
+                                    {(label || '').slice(0, 4)}
                                   </div>
                                 );
                               })}

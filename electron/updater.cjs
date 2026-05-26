@@ -1,6 +1,6 @@
 // 予約同期くん — 自動アップデート機構 (electron-updater)
 //
-// 配信元: github.com/Nolan-inc/kireidot-salondesk-releases (public)
+// 配信元: github.com/Nolan-inc/KIREIDOT_Salonboard_Worker (public)
 // ダウンロード: 起動直後にバックグラウンドで取得
 // 適用       : 次回起動時に自動適用 (autoInstallOnAppQuit)
 //             ユーザーが「今すぐ再起動」を選んだ場合のみ即時適用
@@ -10,7 +10,7 @@
 // ダウンロードし、署名検証も自動で行う。
 
 const path = require('node:path');
-const { app } = require('electron');
+const { app, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 
@@ -82,6 +82,26 @@ function initAutoUpdater(mainWindow) {
   autoUpdater.on('update-downloaded', (info) => {
     log.info('[updater] update downloaded:', info.version);
     send('updater:status', { type: 'downloaded', version: info.version });
+    // ユーザーが renderer のトーストを見逃すケースが多いため、
+    // ネイティブのダイアログでも通知する。「今すぐ再起動」を選んだら即時適用。
+    try {
+      const result = dialog.showMessageBoxSync({
+        type: 'info',
+        title: 'アップデートの準備ができました',
+        message: `予約同期くん v${info.version} の準備ができました`,
+        detail:
+          '新しいバージョンをインストールするにはアプリの再起動が必要です。\n今すぐ再起動するか、次回起動時に自動適用するかを選んでください。',
+        buttons: ['今すぐ再起動して更新', '次回起動時に適用'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (result === 0) {
+        autoUpdater.quitAndInstall(true, true);
+      }
+    } catch (e) {
+      log.warn('[updater] dialog show failed:', e);
+    }
   });
   autoUpdater.on('error', (err) => {
     log.error('[updater] error:', err);
@@ -112,4 +132,22 @@ function quitAndInstall() {
   autoUpdater.quitAndInstall(true, true);
 }
 
-module.exports = { initAutoUpdater, quitAndInstall };
+/**
+ * renderer 側の「アップデートを今すぐ確認」ボタンから呼ばれる。
+ * 結果は通常の `updater:status` IPC イベントで renderer に通知される。
+ */
+async function manualCheck() {
+  if (isDev || SKIP) {
+    log.info('[updater] manualCheck skipped (dev or SKIP_AUTO_UPDATE=1)');
+    return { ok: false, reason: 'updater_disabled_in_dev' };
+  }
+  try {
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
+  } catch (err) {
+    log.error('[updater] manualCheck failed:', err);
+    return { ok: false, reason: String(err?.message ?? err) };
+  }
+}
+
+module.exports = { initAutoUpdater, quitAndInstall, manualCheck };

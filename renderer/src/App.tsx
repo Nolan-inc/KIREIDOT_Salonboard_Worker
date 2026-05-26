@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppShell } from './components/AppShell';
 import { UpdaterToast } from './components/UpdaterToast';
 import { Dashboard } from './pages/Dashboard';
@@ -8,15 +8,26 @@ import { Shifts } from './pages/Shifts';
 import { Blog } from './pages/Blog';
 import { Settings } from './pages/Settings';
 import { SalonboardPage } from './pages/Salonboard';
+import { ShopList } from './pages/ShopList';
 import { Login } from './pages/Login';
 import { AuthProvider, useAuth } from './lib/auth-context';
+import { SelectionProvider, useSelection } from './lib/selection-context';
 import { SyncControllerProvider } from './lib/sync-controller';
-import type { NavKey } from './lib/nav';
+import { isShopScoped, type NavKey } from './lib/nav';
 import { Loader2 } from 'lucide-react';
 
 function Routes() {
   const auth = useAuth();
-  const [active, setActive] = useState<NavKey>('dashboard');
+  const { selectedShopId } = useSelection();
+  const [active, setActive] = useState<NavKey>('shops');
+
+  // 店舗未選択でショップスコープのページに居る場合は強制的に店舗一覧へ戻す。
+  // 店舗の選択解除 (Sidebar の x ボタン) でもこのガードが効く。
+  useEffect(() => {
+    if (!selectedShopId && isShopScoped(active)) {
+      setActive('shops');
+    }
+  }, [selectedShopId, active]);
 
   if (auth.status === 'loading') {
     return (
@@ -32,11 +43,12 @@ function Routes() {
 
   return (
     <AppShell active={active} onChange={setActive}>
-      {active === 'dashboard' && <Dashboard onNavigate={setActive} />}
-      {active === 'bookings' && <Bookings />}
-      {active === 'staff' && <Staff />}
-      {active === 'shifts' && <Shifts />}
-      {active === 'blog' && <Blog />}
+      {active === 'shops' && <ShopList onPickShop={setActive} />}
+      {active === 'dashboard' && selectedShopId && <Dashboard onNavigate={setActive} />}
+      {active === 'bookings' && selectedShopId && <Bookings />}
+      {active === 'staff' && selectedShopId && <Staff />}
+      {active === 'shifts' && selectedShopId && <Shifts />}
+      {active === 'blog' && selectedShopId && <Blog />}
       {active === 'salonboard' && <SalonboardPage />}
       {active === 'settings' && <Settings />}
     </AppShell>
@@ -46,11 +58,13 @@ function Routes() {
 export function App() {
   return (
     <AuthProvider>
-      <SyncControllerProvider>
-        <Routes />
-        {/* 自動アップデート完了の通知トースト (Electron 起動時のみ動作) */}
-        <UpdaterToast />
-      </SyncControllerProvider>
+      <SelectionProvider>
+        <SyncControllerProvider>
+          <Routes />
+          {/* 自動アップデート完了の通知トースト (Electron 起動時のみ動作) */}
+          <UpdaterToast />
+        </SyncControllerProvider>
+      </SelectionProvider>
     </AuthProvider>
   );
 }

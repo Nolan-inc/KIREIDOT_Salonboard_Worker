@@ -6,10 +6,12 @@ import {
   Newspaper,
   Link2,
   Settings as SettingsIcon,
+  Store,
   type LucideIcon,
 } from 'lucide-react';
 
 export type NavKey =
+  | 'shops'
   | 'dashboard'
   | 'bookings'
   | 'staff'
@@ -26,6 +28,18 @@ export type NavItem = {
 };
 
 export const NAV_ITEMS: NavItem[] = [
+  {
+    key: 'shops',
+    label: '店舗一覧',
+    description: '会社内の店舗を選んで操作します',
+    icon: Store,
+  },
+  {
+    key: 'salonboard',
+    label: 'サロンボード連携',
+    description: '会社×店舗ごとの認証情報を管理・同期',
+    icon: Link2,
+  },
   {
     key: 'dashboard',
     label: 'ダッシュボード',
@@ -57,15 +71,37 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Newspaper,
   },
   {
-    key: 'salonboard',
-    label: 'サロンボード連携',
-    description: '会社×店舗ごとの認証情報を管理・同期',
-    icon: Link2,
-  },
-  {
     key: 'settings',
     label: '設定',
     description: 'アカウント・各種設定',
     icon: SettingsIcon,
   },
 ];
+
+/** 店舗スコープを必要とするページ (= 店舗未選択時は隠す)。 */
+const SHOP_SCOPED_KEYS: ReadonlySet<NavKey> = new Set<NavKey>([
+  'dashboard',
+  'bookings',
+  'staff',
+  'shifts',
+  'blog',
+]);
+
+/**
+ * 現在の選択状態 (店舗が選ばれているか) に応じて、サイドバーに表示すべき
+ * NavKey の配列を返す。
+ *  - 店舗未選択: 店舗一覧 / サロンボード連携 / 設定
+ *  - 店舗選択済み: 全項目
+ *
+ * 「店舗一覧」は常に表示 (=店舗を切り替える入口を確保する)。
+ */
+export function getVisibleNavKeys(hasShop: boolean): NavKey[] {
+  return NAV_ITEMS.map((i) => i.key).filter((k) => {
+    if (hasShop) return true;
+    return !SHOP_SCOPED_KEYS.has(k);
+  });
+}
+
+export function isShopScoped(key: NavKey): boolean {
+  return SHOP_SCOPED_KEYS.has(key);
+}

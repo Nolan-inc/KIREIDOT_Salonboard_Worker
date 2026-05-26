@@ -16,14 +16,23 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { chromium } = require('playwright');
+// Electron utilityProcess は Node 20 で動作するが、組み込み WebSocket が無いため
+// Supabase の createClient が RealtimeClient を生成する際に
+// "Node.js 20 detected without native WebSocket support" 例外を投げる。
+// Worker は postgres RPC しか使わないが、internal の RealtimeClient は必ず作られる
+// ので、ws パッケージを transport として注入して例外を回避する。
+const WebSocket = require('ws');
 const {
   scrapeBookings,
   scrapeStaff,
   scrapeBlogs,
+  scrapeShifts,
   scrapeCustomerDetails,
 } = require('./scrapers.cjs');
 
 let supabase = null;
+let initReady = false;
+let initPromise = null;
 let running = false;
 let abortRequested = false;
 let currentBrowser = null;
@@ -43,16 +52,37 @@ function log(msg, level = 'info') {
 }
 
 async function initSupabase({ url, anonKey, accessToken, refreshToken }) {
+  if (!url || !anonKey) {
+    throw new Error('Supabase URL / anon key が空です。.env.local の VITE_SUPABASE_URL を確認してください');
+  }
+  if (!accessToken || !refreshToken) {
+    throw new Error('Supabase セッショントークンが空です。再ログインしてください');
+  }
   supabase = createClient(url, anonKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: true,
       detectSessionInUrl: false,
     },
+    // ws パッケージを RealtimeClient の transport として注入。
+    // これで Node 20 環境でも Supabase の初期化が通る。
+    realtime: { transport: WebSocket },
   });
   // 親プロセス (renderer/main) で取得したセッションをそのまま注入する。
   // これで RLS が super_owner / admin として評価される。
   await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+  initReady = true;
+}
+
+/** Supabase client が確実に使える状態になるまで待つ */
+async function ensureReady() {
+  if (initReady && supabase) return;
+  if (initPromise) {
+    // init 中なら待つ
+    await initPromise;
+    return;
+  }
+  throw new Error('Supabase client がまだ初期化されていません。アプリを再起動してください。');
 }
 
 /**
@@ -84,10 +114,21 @@ async function revealCredentials(shopId) {
   if (error) throw new Error(`reveal: ${error.message}`);
   const row = (data ?? [])[0];
   if (!row) throw new Error('credentials not found');
+  // base_url の正規化: 末尾スラッシュのみだったり login パスが抜けていると
+  // 「https://salonboard.com/」 にアクセスしてしまって遅延・タイムアウトになる。
+  // 既定値 = ログイン画面 URL に揃える。
+  let baseUrl = (row.base_url ?? '').trim();
+  if (!baseUrl || baseUrl === 'https://salonboard.com' || baseUrl === 'https://salonboard.com/') {
+    baseUrl = 'https://salonboard.com/login/';
+  }
+  // 「/」だけで終わる場合に /login/ を補う
+  if (/^https?:\/\/[^/]+\/?$/i.test(baseUrl)) {
+    baseUrl = baseUrl.replace(/\/?$/, '/') + 'login/';
+  }
   return {
     loginId: row.login_id,
     password: row.password,
-    baseUrl: row.base_url ?? 'https://salonboard.com/login/',
+    baseUrl,
   };
 }
 
@@ -95,8 +136,9 @@ async function revealCredentials(shopId) {
  * 1 店舗ぶんの同期処理 (Phase 2 ではログインまでで return)。
  * Phase 3 で予約一覧/予約管理/スタッフ/ブログのスクレイピングを足す。
  */
-async function processShop(target, channels, runId) {
+async function processShop(target, channels, runId, opts = {}) {
   const { shop_id: shopId, shop_name: shopName, organization_name: orgName } = target;
+  const showBrowser = !!opts.showBrowser;
   emit('shop:start', { shopId, shopName, orgName, channels });
   const counts = { bookings: 0, staff: 0, blogs: 0, customers: 0 };
 
@@ -109,16 +151,65 @@ async function processShop(target, channels, runId) {
     return { ok: false };
   }
 
-  const browser = await chromium.launch({ headless: true });
+  // showBrowser=true のときは headful (ブラウザ画面を表示)、slowMo で動きを見やすく。
+  // Akamai / リクルート系の bot 検知を回避するため、自動化検知シグナルを抑える
+  // フラグを追加: --disable-blink-features=AutomationControlled
+  const browser = await chromium.launch({
+    headless: !showBrowser,
+    slowMo: showBrowser ? 250 : 0,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-features=IsolateOrigins,site-per-process',
+    ],
+  });
   currentBrowser = browser;
   try {
     const ctx = await browser.newContext({
       userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
       locale: 'ja-JP',
       timezoneId: 'Asia/Tokyo',
+      viewport: { width: 1366, height: 900 },
+      extraHTTPHeaders: {
+        'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Ch-Ua': '"Google Chrome";v="127", "Chromium";v="127", "Not?A_Brand";v="24"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"macOS"',
+      },
     });
+
+    // navigator.webdriver = false に偽装 (stealth の最小実装)
+    await ctx.addInitScript(() => {
+      // @ts-ignore
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      // @ts-ignore
+      Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'] });
+      // @ts-ignore
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
+          { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+        ],
+      });
+      // window.chrome をでっちあげる (headless Chromium には無いことが多い)
+      // @ts-ignore
+      window.chrome = window.chrome ?? { runtime: {} };
+    });
+
     const page = await ctx.newPage();
+    // showBrowser=true のとき、Playwright Chromium はバックグラウンドで開くことがあるので、
+    // 明示的に前面に持ってくる (macOS で Electron アプリの下に隠れるのを防ぐ)。
+    if (showBrowser) {
+      try {
+        await page.bringToFront();
+      } catch (_e) {
+        /* 古い Playwright 版だとメソッドが無い場合あり。無視。 */
+      }
+    }
 
     emit('shop:progress', { shopId, step: 'login', msg: `${creds.baseUrl} に接続中` });
     const r = await tryLogin(page, creds);
@@ -148,7 +239,21 @@ async function processShop(target, channels, runId) {
         const { rows, debug } = await scrapeBookings(page);
         const sent = await sendBookings(shopId, rows);
         counts.bookings = sent;
-        summary.push(`予約 ${sent}/${rows.length}件 (検出${debug.itemsFound})`);
+        const skipNote =
+          debug.skipped > 0 && debug.sampleSkipped?.length
+            ? ` skip例:[${debug.sampleSkipped.slice(0, 2).join('|').slice(0, 200)}]`
+            : '';
+        const rangeNote = debug.range ? ` 範囲:${debug.range}` : '';
+        summary.push(
+          `予約 ${sent}/${rows.length}件 (検出${debug.itemsFound}${rangeNote}${skipNote})`,
+        );
+        if (debug.diag?.length) {
+          emit('log', {
+            level: 'info',
+            msg: `[${shopId.slice(0, 8)}] booking diag: ${debug.diag.join(' | ')}`,
+            at: new Date().toISOString(),
+          });
+        }
         emit('shop:progress', { shopId, step: 'bookings', msg: `予約 ${sent} 件保存` });
       } catch (e) {
         emit('log', {
@@ -179,11 +284,18 @@ async function processShop(target, channels, runId) {
     if (channelSet.has('blog')) {
       try {
         emit('shop:progress', { shopId, step: 'blog', msg: 'ブログを取得中…' });
-        const { rows } = await scrapeBlogs(page);
+        const { rows, debug } = await scrapeBlogs(page);
         const sent = await sendBlogs(shopId, rows);
         counts.blogs = sent;
-        summary.push(`ブログ ${sent} 件`);
-        emit('shop:progress', { shopId, step: 'blog', msg: `ブログ ${sent} 件保存` });
+        const detailNote = debug
+          ? ` 本文取得 ${debug.detailHit ?? 0}/${debug.detailAttempted ?? 0}`
+          : '';
+        summary.push(`ブログ ${sent} 件${detailNote}`);
+        emit('shop:progress', {
+          shopId,
+          step: 'blog',
+          msg: `ブログ ${sent} 件保存${detailNote}`,
+        });
       } catch (e) {
         emit('log', {
           level: 'warn',
@@ -210,8 +322,22 @@ async function processShop(target, channels, runId) {
       }
     }
 
-    // shifts (salonSchedule) は Phase 5 で実装
-    // if (channelSet.has('shifts')) { ... }
+    if (channelSet.has('shifts')) {
+      try {
+        emit('shop:progress', { shopId, step: 'shifts', msg: 'シフトを取得中…' });
+        const { rows, debug } = await scrapeShifts(page);
+        const sent = await sendShifts(shopId, rows);
+        counts.shifts = sent;
+        summary.push(`シフト ${sent} 件 (検出${debug.itemsFound})`);
+        emit('shop:progress', { shopId, step: 'shifts', msg: `シフト ${sent} 件保存` });
+      } catch (e) {
+        emit('log', {
+          level: 'warn',
+          msg: `[${shopId.slice(0, 8)}] shifts scrape error: ${e instanceof Error ? e.message : e}`,
+          at: new Date().toISOString(),
+        });
+      }
+    }
 
     await markCredentialSuccess(shopId);
     const summaryStr = summary.length > 0 ? summary.join(' / ') : 'login ok';
@@ -251,10 +377,45 @@ async function recordShopRun(runId, shopId, ok, summary, error, counts) {
 }
 
 async function tryLogin(page, c) {
-  try {
-    await page.goto(c.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  } catch (e) {
-    return { status: 'failed', reason: `navigation: ${e instanceof Error ? e.message : e}` };
+  // SalonBoard はトラッキングスクリプトが多く 'load' まで永遠に来ないため、
+  // 「入力欄の出現」を主軸 + 失敗時に最大3回リトライする戦略。
+  const MAX_ATTEMPTS = 3;
+  let lastNavError = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let navError = null;
+    const navPromise = page
+      .goto(c.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      .catch((e) => {
+        navError = e;
+      });
+    try {
+      // 入力欄の出現を待つ。1回目は 60秒、リトライ時は 45秒。
+      await page.waitForSelector('input[type="password"], input[name="password"]', {
+        timeout: attempt === 1 ? 60_000 : 45_000,
+      });
+      // 入力欄が見えた → 成功
+      await Promise.race([
+        navPromise,
+        new Promise((r) => setTimeout(r, 3_000)),
+      ]);
+      lastNavError = null;
+      break;
+    } catch (_e) {
+      lastNavError = navError;
+      await navPromise.catch(() => {});
+      if (attempt < MAX_ATTEMPTS) {
+        // 少し待ってからリトライ (バックオフ)
+        await new Promise((r) => setTimeout(r, attempt * 3_000));
+      }
+    }
+  }
+  if (lastNavError) {
+    return {
+      status: 'failed',
+      reason: `login form not visible after ${MAX_ATTEMPTS} attempts: ${
+        lastNavError instanceof Error ? lastNavError.message : lastNavError
+      }`,
+    };
   }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count()) > 0) {
@@ -278,14 +439,41 @@ async function tryLogin(page, c) {
     };
   }
 
+  // SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn" onclick="dologin(event)">
+  // で実装されている (button[type="submit"] は存在しない)。複数のセレクタを順に試し、
+  // どれもダメなら最後の手段として password 欄で Enter を送信する。
   try {
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
-      page
-        .locator('button[type="submit"], input[type="submit"]')
-        .first()
-        .click({ timeout: 10_000 }),
-    ]);
+    const submitCandidates = [
+      'a.common-CNCcommon__primaryBtn',
+      'a.loginBtnSize',
+      'a:has-text("ログイン"):not(:has-text("ログインできない"))',
+      'button[type="submit"]',
+      'input[type="submit"]',
+    ];
+    let clicked = false;
+    for (const sel of submitCandidates) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) === 0) continue;
+      try {
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+          loc.click({ timeout: 5_000 }),
+        ]);
+        clicked = true;
+        break;
+      } catch (_e) {
+        // 次の候補を試す
+      }
+    }
+    if (!clicked) {
+      // 最終フォールバック: password 欄で Enter (onkeypress="enterActionLogin")
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+        pwInput.press('Enter', { timeout: 5_000 }),
+      ]);
+    }
+    // クリック後にナビゲーションを少し待つ (XHR ベースの遷移にも対応)
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
   } catch (e) {
     return { status: 'failed', reason: `submit: ${e instanceof Error ? e.message : e}` };
   }
@@ -395,6 +583,26 @@ async function sendBlogs(shopId, rows) {
   return valid.length;
 }
 
+async function sendShifts(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  // 最低限 staff_external_id + shift_date が無いと UNIQUE 制約に当たって全件失敗するので捨てる
+  const valid = rows.filter((r) => r.staff_external_id && r.shift_date);
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_shifts', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_shifts: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
 async function markCredentialSuccess(shopId) {
   try {
     await supabase
@@ -434,7 +642,7 @@ async function markCredentialError(shopId, reason, blockedUntil) {
   }
 }
 
-async function runSync({ shopIds, channels, source }) {
+async function runSync({ shopIds, channels, source, showBrowser }) {
   if (running) {
     emit('error', { msg: '同期は既に実行中です' });
     return;
@@ -463,7 +671,7 @@ async function runSync({ shopIds, channels, source }) {
         emit('log', { level: 'warn', msg: 'ユーザー操作により中断' });
         break;
       }
-      const r = await processShop(t, channels, runId);
+      const r = await processShop(t, channels, runId, { showBrowser: !!showBrowser });
       if (r.ok) okCount++; else ngCount++;
     }
 
@@ -504,10 +712,27 @@ process.parentPort?.on('message', async (event) => {
   try {
     switch (m.type) {
       case 'init':
-        await initSupabase(m.payload);
-        emit('ready', { ok: true });
+        // 並行 init を防ぐため Promise を保持
+        initPromise = (async () => {
+          await initSupabase(m.payload);
+        })();
+        try {
+          await initPromise;
+          emit('ready', { ok: true });
+        } catch (e) {
+          emit('ready', { ok: false });
+          emit('error', { msg: `init failed: ${e instanceof Error ? e.message : e}` });
+        }
         break;
       case 'sync':
+        // init 完了を確実に待ってから sync。supabase が null のまま走ると
+        // 「Cannot read properties of null (reading 'from')」になる。
+        try {
+          await ensureReady();
+        } catch (e) {
+          emit('error', { msg: e instanceof Error ? e.message : String(e) });
+          break;
+        }
         await runSync(m.payload ?? {});
         break;
       case 'abort':

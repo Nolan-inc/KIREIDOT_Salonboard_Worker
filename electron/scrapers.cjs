@@ -23,24 +23,67 @@
 // ----------------- 共通ユーティリティ -----------------
 
 /**
- * JST 文字列 "YYYY/MM/DD HH:mm" や "YYYY-MM-DD HH:mm" を ISO 8601 (UTC) に変換。
- * 日付だけの場合は 00:00 として扱う。
+ * JST 文字列を ISO 8601 (UTC) に変換。複数のフォーマットを許容:
+ *   - "2025/05/23 14:30" / "2025-05-23 14:30" / "2025年5月23日 14:30"
+ *   - "5/23(金) 14:30"   ← 年なし (SalonBoard の予約一覧でよく出る)
+ *   - "05/23 14:30"
+ *   - "5月23日 14:30"
+ *
+ * 年が欠落している場合は「今日に最も近い年」を採用する。
+ * (今年・来年・去年を試して、今日との差が一番小さいものを選ぶ)
  */
 function parseJstDateTime(raw) {
   if (!raw || typeof raw !== 'string') return null;
-  const s = raw.trim();
-  // "2025/05/23 14:30" / "2025-05-23 14:30" / "2025/05/23"
-  const m = s.match(
-    /^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2}))?/,
+  // multiline (br 由来) も 1 行扱いに
+  const s = raw.replace(/\s+/g, ' ').trim();
+
+  // 1) 年あり: "YYYY/MM/DD HH:MM" 等
+  let m = s.match(
+    /(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})日?(?:[^\d]{0,5}(\d{1,2}):(\d{2}))?/,
   );
-  if (!m) return null;
-  const [, y, mm, dd, hh, mi] = m;
-  const Y = Number(y);
-  const M = Number(mm) - 1;
-  const D = Number(dd);
-  const H = hh ? Number(hh) : 0;
-  const Mi = mi ? Number(mi) : 0;
-  // JST -> UTC: UTC = JST - 9h
+  let Y, M, D, H, Mi;
+  if (m) {
+    Y = Number(m[1]);
+    M = Number(m[2]) - 1;
+    D = Number(m[3]);
+    H = m[4] ? Number(m[4]) : 0;
+    Mi = m[5] ? Number(m[5]) : 0;
+  } else {
+    // 2) 年なし: "5/25(月) 19:00" "M月D日 HH:MM" など。
+    //    時刻部分は「分」「時間」のような誤マッチを避けるため (?!分) を入れる。
+    m = s.match(
+      /(\d{1,2})[\/月](\d{1,2})日?(?:[^\d]{0,10}?)((\d{1,2}):(\d{2}))?(?!分)/,
+    );
+    if (!m) return null;
+    M = Number(m[1]) - 1;
+    D = Number(m[2]);
+    H = m[4] ? Number(m[4]) : 0;
+    Mi = m[5] ? Number(m[5]) : 0;
+    // 時刻が拾えてない場合は、文字列内の独立した HH:MM を探す
+    if (!m[3]) {
+      const tm = s.match(/(?<!\d)(\d{1,2}):(\d{2})(?!分)/);
+      if (tm) {
+        H = Number(tm[1]);
+        Mi = Number(tm[2]);
+      }
+    }
+    // 年は「今日に最も近い」候補を採用
+    const today = new Date();
+    const candidates = [today.getFullYear() - 1, today.getFullYear(), today.getFullYear() + 1];
+    let best = today.getFullYear();
+    let bestDiff = Infinity;
+    for (const y of candidates) {
+      const utc = Date.UTC(y, M, D, H - 9, Mi);
+      if (Number.isNaN(utc)) continue;
+      const diff = Math.abs(utc - today.getTime());
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = y;
+      }
+    }
+    Y = best;
+  }
+
   const utc = Date.UTC(Y, M, D, H - 9, Mi);
   if (Number.isNaN(utc)) return null;
   return new Date(utc).toISOString();
@@ -104,14 +147,542 @@ function extractIdFromUrl(url, ...candidates) {
 const RESERVE_LIST_URL = 'https://salonboard.com/KLP/reserve/reserveList/init';
 
 /**
- * 予約一覧をスクレイピングして bookings 行を返す。
- * 予約はテーブル or リスト形式のいずれか想定。
+ * 「昨日」から「N ヶ月後の月末」までの日付範囲を返す。
+ * 例) 今日が 2026-06-02 で months=3 なら from=2026-06-01, to=2026-08-31
  */
-async function scrapeBookings(page) {
+function defaultBookingDateRange(months = 3) {
+  const today = new Date();
+  const from = new Date(today);
+  from.setDate(today.getDate() - 1);
+  from.setHours(0, 0, 0, 0);
+  // N ヶ月後 (= 今月 + months) の月末
+  const to = new Date(today.getFullYear(), today.getMonth() + months + 1, 0);
+  to.setHours(23, 59, 59, 999);
+  const fmt = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return { from, to, fromStr: fmt(from), toStr: fmt(to) };
+}
+
+/**
+ * SalonBoard 予約一覧の検索フォームに日付範囲を入力して「検索する」を押す。
+ *
+ * 初期画面 (reserveList/init) は **検索を実行しないと結果が出ない**ため、
+ * このステップを必ず通る必要がある。
+ *
+ *  - 「来店日 開始」「来店日 終了」の input は name 規約が一定でないので
+ *    画面内の「日付っぽい」入力欄を上から最大 2 つ拾って先頭=from / 次=to とする
+ *  - 「検索する」ボタンは <a> タグの onclick 実装。テキスト一致で探す
+ *  - ステータスは全種チェック (済み・キャンセル等も含めて拾うため)
+ */
+async function applyBookingDateFilter(page, { fromStr, toStr }, { diag } = {}) {
+  const slashFrom = fromStr.replace(/-/g, '/');
+  const slashTo = toStr.replace(/-/g, '/');
+  const yyyymmddFrom = fromStr.replace(/-/g, '');
+  const yyyymmddTo = toStr.replace(/-/g, '');
+  const [fy, fm, fd] = fromStr.split('-');
+  const [ty, tm, td] = toStr.split('-');
+  const report = (s) => {
+    if (diag) diag.push(s);
+  };
+
+  // 現在のフォームから rsv*/disp* の値を読む (途中経過の可視化用)
+  const snapshot = async (label) => {
+    try {
+      const snap = await page.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const interesting = inputs
+          .filter((i) =>
+            /rsvDate|dispDate|searchDate|fromDate|toDate|fromYmd|toYmd/i.test(
+              (i.name || '') + (i.id || ''),
+            ),
+          )
+          .map(
+            (i) =>
+              `${i.name || i.id}(${i.type})=${i.value || ''}`,
+          );
+        return interesting;
+      });
+      report(`[${label}] ${snap.join(' | ')}`);
+    } catch (e) {
+      report(`[${label}] snapshot err: ${e.message}`);
+    }
+  };
+
+  try {
+    await snapshot('before');
+    // SalonBoard の日付欄は readonly で表示用 (dispDateFrom/dispDateTo)。
+    // 検索送信時に使われる本物のフィールドは hidden input (例:
+    // searchFromDate, searchToDate, fromYear, fromMonth, fromDay) であることが多い。
+    // 両方を上書きする + フォームの input 名を診断ログに残す。
+    const setResult = await page.evaluate(
+      ({ from, to, yyyymmddF, yyyymmddT, fy, fm, fd, ty, tm, td }) => {
+        function setVal(el, v) {
+          if (!el) return false;
+          el.removeAttribute('readonly');
+          el.removeAttribute('disabled');
+          const proto = Object.getPrototypeOf(el);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc && desc.set) desc.set.call(el, v);
+          else el.value = v;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+          return true;
+        }
+
+        // 1) 表示用の日付欄 (dispDate*) — UI 表示のために
+        const dispInputs = Array.from(document.querySelectorAll('input[type="text"]'))
+          .filter((el) => /disp.*date|date.*disp/i.test((el.name || '') + (el.id || '')));
+        if (dispInputs[0]) setVal(dispInputs[0], from);
+        if (dispInputs[1]) setVal(dispInputs[1], to);
+
+        // 2) 全フォームの全 input/select を抽出 (診断ログ用)
+        const allFormInputs = [];
+        for (const f of Array.from(document.forms)) {
+          for (const el of Array.from(f.elements)) {
+            if (!el.name) continue;
+            if (el.type === 'submit' || el.type === 'button') continue;
+            allFormInputs.push({
+              form: f.name || f.id || f.action,
+              name: el.name,
+              type: el.type,
+              value: el.value,
+            });
+          }
+        }
+
+        // 3) 名前に from/to/start/end + date/day/month/year を含む input を全部書き換える
+        //
+        // 重要: hidden で送信される値はほぼ確実に YYYYMMDD 形式。
+        //        例) rsvDateFrom=20260525 / rsvDateTo=20260525
+        //        ここでは hidden / text どちらでも YYYYMMDD を入れる。
+        function isFrom(n) {
+          return /(rsvDate|searchDate|reserveDate|reserveFromDate|searchFromDate|fromYmd|fromDate|startDate).*(?!to)/i.test(n)
+            && /from|start|begin/i.test(n);
+        }
+        function isTo(n) {
+          return /(rsvDate|searchDate|reserveDate|reserveToDate|searchToDate|toYmd|toDate|endDate)/i.test(n)
+            && /to|end|finish/i.test(n);
+        }
+        const filled = { from: [], to: [], parts: [] };
+        for (const f of Array.from(document.forms)) {
+          for (const el of Array.from(f.elements)) {
+            if (!el.name) continue;
+            const n = el.name + ' ' + (el.id || '');
+            // 表示用 disp は既に処理済み
+            if (/disp.*date|date.*disp/i.test(n)) continue;
+
+            // year/month/day の個別 select はまず判定
+            if (/(from|start).*year|fromYear/i.test(n) && el.tagName !== 'A') {
+              setVal(el, fy);
+              filled.parts.push(`${el.name}=${fy}`);
+              continue;
+            }
+            if (/(from|start).*month|fromMonth/i.test(n)) {
+              setVal(el, fm.replace(/^0/, ''));
+              filled.parts.push(`${el.name}=${fm}`);
+              continue;
+            }
+            if (/(from|start).*day|fromDay/i.test(n)) {
+              setVal(el, fd.replace(/^0/, ''));
+              filled.parts.push(`${el.name}=${fd}`);
+              continue;
+            }
+            if (/(to|end).*year|toYear/i.test(n)) {
+              setVal(el, ty);
+              filled.parts.push(`${el.name}=${ty}`);
+              continue;
+            }
+            if (/(to|end).*month|toMonth/i.test(n)) {
+              setVal(el, tm.replace(/^0/, ''));
+              filled.parts.push(`${el.name}=${tm}`);
+              continue;
+            }
+            if (/(to|end).*day|toDay/i.test(n)) {
+              setVal(el, td.replace(/^0/, ''));
+              filled.parts.push(`${el.name}=${td}`);
+              continue;
+            }
+
+            // 日付テキスト/hidden: from と to を判別
+            // rsvDateFrom / rsvDateTo / reserveFromDate / etc.
+            if (isFrom(n)) {
+              // hidden は YYYYMMDD, text は YYYY/MM/DD
+              const v = el.type === 'hidden' ? yyyymmddF : from;
+              setVal(el, v);
+              filled.from.push(`${el.name}=${v}`);
+            } else if (isTo(n)) {
+              const v = el.type === 'hidden' ? yyyymmddT : to;
+              setVal(el, v);
+              filled.to.push(`${el.name}=${v}`);
+            }
+          }
+        }
+        return {
+          dispCount: dispInputs.length,
+          allInputs: allFormInputs,
+          filledFrom: filled.from,
+          filledTo: filled.to,
+          filledParts: filled.parts,
+        };
+      },
+      {
+        from: slashFrom,
+        to: slashTo,
+        yyyymmddF: yyyymmddFrom,
+        yyyymmddT: yyyymmddTo,
+        fy, fm, fd, ty, tm, td,
+      },
+    );
+    report(`disp inputs: ${setResult.dispCount}`);
+    report(
+      `filled from: [${setResult.filledFrom.join(',')}] to: [${setResult.filledTo.join(',')}] parts: [${setResult.filledParts.join(',')}]`,
+    );
+    // 全 form の input 名を 1 回だけ短く出す (重要なヒント)
+    const dateNames = setResult.allInputs
+      .filter((i) => /date|day|month|year|ymd/i.test(i.name))
+      .map((i) => `${i.name}(${i.type})=${(i.value || '').slice(0, 12)}`);
+    if (dateNames.length > 0) {
+      report(`date-ish inputs: ${dateNames.join(' | ').slice(0, 500)}`);
+    }
+    await snapshot('after-write');
+
+    // 2) ステータスを全選択 (キャンセル含めて全部拾う)
+    const statusBoxes = await page.locator('input[type="checkbox"][name*="status" i], input[type="checkbox"][name*="Status" i]').all();
+    for (const cb of statusBoxes) {
+      try {
+        const checked = await cb.isChecked();
+        if (!checked) await cb.check({ timeout: 1000 });
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+    report(`status checkboxes: ${statusBoxes.length}`);
+
+    // 検索を押す直前にもう一度 rsv* を強制上書き + click(blur) で focusout を発火
+    // SB 側の onchange ハンドラが disp の change を見て rsv を上書きするため、
+    // disp に正しい値を書いた後 blur を発火して SB の同期を起こす方式と、
+    // それでもダメな場合の hidden 直書きを併用する。
+    await page.evaluate(
+      ({ yyyymmddF, yyyymmddT, slashF, slashT }) => {
+        function setVal(el, v) {
+          if (!el) return;
+          el.removeAttribute('readonly');
+          const proto = Object.getPrototypeOf(el);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc && desc.set) desc.set.call(el, v);
+          else el.value = v;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+        const inputs = Array.from(document.querySelectorAll('input'));
+        // まず disp に書いて SB の onchange に正しい値を伝える
+        for (const el of inputs) {
+          const n = (el.name || '') + ' ' + (el.id || '');
+          if (/dispDateFrom/i.test(n)) setVal(el, slashF);
+          else if (/dispDateTo/i.test(n)) setVal(el, slashT);
+        }
+        // SB が rsv を同期するのに任せた後、念のため hidden も直接上書き
+        for (const el of inputs) {
+          const n = (el.name || '') + ' ' + (el.id || '');
+          if (el.type !== 'hidden') continue;
+          if (/rsvDateFrom|searchFromDate|reserveFromDate|fromDate$|fromYmd/i.test(n)) {
+            setVal(el, yyyymmddF);
+          } else if (/rsvDateTo|searchToDate|reserveToDate|toDate$|toYmd/i.test(n)) {
+            setVal(el, yyyymmddT);
+          }
+        }
+      },
+      {
+        yyyymmddF: yyyymmddFrom,
+        yyyymmddT: yyyymmddTo,
+        slashF: slashFrom,
+        slashT: slashTo,
+      },
+    );
+    await snapshot('right-before-submit');
+
+    // 全 hidden 値を 1 回だけダンプ (大量だが原因究明には必要)
+    try {
+      const allHidden = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('input[type="hidden"], input[type="text"]'))
+          .filter((i) => i.name)
+          .map((i) => `${i.name}=${(i.value || '').slice(0, 30)}`)
+          .join(' | ');
+      });
+      report(`all-inputs: ${allHidden.slice(0, 1200)}`);
+    } catch (_e) {
+      /* ignore */
+    }
+
+    // 「検索する」ボタンの onclick の中身を確認 (関数名 dologin の予約版があるか)
+    try {
+      const submitInfo = await page.evaluate(() => {
+        const a = Array.from(document.querySelectorAll('a, button')).find((e) =>
+          /検索する/.test(e.textContent || ''),
+        );
+        if (!a) return null;
+        return {
+          tag: a.tagName,
+          text: (a.textContent || '').trim(),
+          onclick: a.getAttribute('onclick') || '',
+          href: a.getAttribute('href') || '',
+          cls: a.className,
+        };
+      });
+      if (submitInfo) {
+        report(
+          `submit btn: <${submitInfo.tag}> "${submitInfo.text}" class="${submitInfo.cls}" onclick="${(submitInfo.onclick || '').slice(0, 200)}"`,
+        );
+      } else {
+        report('submit btn: NOT FOUND');
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+
+    // 3) 「検索する」ボタンをクリック
+    const submitCandidates = [
+      'a:has-text("検索する")',
+      'a.common-CNCcommon__primaryBtn:has-text("検索")',
+      'a[onclick*="searchReserve" i]',
+      'a[onclick*="search" i]:not([onclick*="reset" i])',
+      'a:has-text("検索"):not(:has-text("クリア"))',
+      'button:has-text("検索")',
+    ];
+    for (const sel of submitCandidates) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) === 0) continue;
+      try {
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+          loc.click({ timeout: 5000 }),
+        ]);
+        await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+        report(`clicked submit: ${sel}`);
+        await snapshot('after-submit');
+        // 検索後の結果テーブル行数も簡易ログ
+        try {
+          const rowsCount = await page.evaluate(() => {
+            const ts = Array.from(document.querySelectorAll('table'));
+            const counts = ts
+              .map((t) => t.querySelectorAll('tbody tr, tr').length)
+              .filter((n) => n > 0);
+            return counts.join(',');
+          });
+          report(`tables row counts after submit: ${rowsCount}`);
+        } catch (_e) {
+          /* ignore */
+        }
+        return true;
+      } catch (e) {
+        report(`submit err (${sel}): ${e.message}`);
+      }
+    }
+    report('no submit button matched');
+    return false;
+  } catch (e) {
+    report(`fatal: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * 予約一覧をスクレイピングして bookings 行を返す。
+ *  - 日付範囲: 昨日〜N ヶ月後の月末 (デフォルト 3 ヶ月)
+ *  - ページネーション: 「次へ」リンクがある限り辿る (最大 30 ページ)
+ */
+async function scrapeBookings(page, opts = {}) {
+  const months = Number.isFinite(opts.months) ? opts.months : 3;
+  const range = defaultBookingDateRange(months);
+  const diag = [];
+
   await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  // ページ内検索: 「予約番号」「予約日時」を含むテーブルがあれば認識
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
+  // 検索フォームに日付範囲を入れて検索を実行 (これが無いと結果が出ない)
+  const searched = await applyBookingDateFilter(page, range, { diag });
+  diag.unshift(`searched: ${searched}`);
+
+  // 表示件数のセレクトボックスがあれば最大値にする (1 ページで全件取得)
+  try {
+    const pageSizeChanged = await page.evaluate(() => {
+      const selects = Array.from(document.querySelectorAll('select'));
+      const results = [];
+      for (const sel of selects) {
+        const labelText =
+          (sel.previousElementSibling?.textContent || '') +
+          (sel.parentElement?.textContent || '');
+        const name = sel.name || sel.id || '';
+        // ラベル/name のどちらかが件数系なら対象
+        if (
+          /件数|表示件数|表示数|表示件/.test(labelText) ||
+          /list.*count|page.*size|disp.*count|count|limit/i.test(name)
+        ) {
+          // 最大の数値オプションを選ぶ
+          const opts = Array.from(sel.options);
+          const numericOpts = opts
+            .map((o) => ({ o, v: Number(o.value) || Number(o.text.replace(/\D/g, '')) }))
+            .filter((x) => Number.isFinite(x.v) && x.v > 0);
+          if (numericOpts.length === 0) continue;
+          numericOpts.sort((a, b) => b.v - a.v);
+          sel.value = numericOpts[0].o.value;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          results.push({ name, value: numericOpts[0].o.value });
+        }
+      }
+      return results;
+    });
+    if (pageSizeChanged && pageSizeChanged.length > 0) {
+      diag.push(
+        `page sizes -> ${pageSizeChanged.map((p) => `${p.name}=${p.value}`).join(', ')}`,
+      );
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      // 件数を変えたら再検索が必要なフォームもあるので、もう一度「検索する」を押す
+      const reSearch = page
+        .locator('a:has-text("検索する"), a.common-CNCcommon__primaryBtn:has-text("検索")')
+        .first();
+      if ((await reSearch.count()) > 0) {
+        try {
+          await Promise.all([
+            page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+            reSearch.click({ timeout: 3000 }),
+          ]);
+          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+          diag.push('re-searched after page size change');
+        } catch (_e) {
+          /* ignore */
+        }
+      }
+    }
+  } catch (_e) {
+    /* ignore */
+  }
+
+  // ページネーション: 各ページの items を集める。1000 件 / 30件ページなら 34 ページ、
+  // 安全マージンで 60 ページまで辿る。
+  const allItems = [];
+  const MAX_PAGES = 60;
+  const visitedPageHashes = new Set();
+  for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+    const items = await extractBookingItemsFromCurrentPage(page);
+    allItems.push(...items);
+    diag.push(`page ${pageNum}: ${items.length} rows`);
+
+    // 同じページに留まり続けるのを避けるため、簡易ハッシュで判定
+    const sig = items
+      .slice(0, 3)
+      .map((it) => it.row_text?.slice(0, 60) || '')
+      .join('|');
+    if (visitedPageHashes.has(sig)) {
+      diag.push(`page ${pageNum}: loop detected, stop`);
+      break;
+    }
+    visitedPageHashes.add(sig);
+
+    // 「次へ」 / ">" / 「次のページ番号」を辿る
+    const nextSelectors = [
+      'a:has-text("次へ"):not(.disabled)',
+      'a:has-text("次"):not(:has-text("次回"))',
+      'a[onclick*="next" i]',
+      'a[rel="next"]',
+      'li.pagerNext a',
+      'a.pagerNext',
+      // ページ番号リンクで「次の番号」を探す → 後段の JS で
+    ];
+    let advanced = false;
+    for (const sel of nextSelectors) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) === 0) continue;
+      try {
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+          loc.click({ timeout: 3000 }),
+        ]);
+        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+        advanced = true;
+        break;
+      } catch (_e) {
+        /* try next */
+      }
+    }
+
+    if (!advanced) {
+      // 数字のページ番号リンクで「現在ページ + 1」を JS で探す
+      const jumped = await page.evaluate((next) => {
+        const links = Array.from(document.querySelectorAll('a'));
+        for (const a of links) {
+          const t = (a.textContent || '').trim();
+          if (t === String(next)) {
+            a.click();
+            return true;
+          }
+        }
+        return false;
+      }, pageNum + 1);
+      if (jumped) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+        advanced = true;
+        diag.push(`page ${pageNum}: jumped to ${pageNum + 1} via number link`);
+      }
+    }
+    if (!advanced) break;
+  }
+
+  // パース
+  const rows = [];
+  let skipped = 0;
+  const sampleSkipped = [];
+  for (const it of allItems) {
+    const scheduled_at = parseJstDateTime(it.datetime_raw);
+    if (!scheduled_at) {
+      skipped++;
+      if (sampleSkipped.length < 3) sampleSkipped.push(it.datetime_raw || '(空)');
+      continue;
+    }
+    const external_id =
+      extractIdFromUrl(it.link_href, 'reservationId', 'reserveId', 'rsvId') ||
+      `${it.datetime_raw}|${it.customer_raw}`.replace(/\s+/g, '_');
+    const status = mapBookingStatus(it.status_raw);
+    rows.push({
+      external_id,
+      scheduled_at,
+      duration_min: parseMinutes(it.duration_raw),
+      customer_name: cleanText(it.customer_raw),
+      customer_code: extractCustomerCode(it.customer_raw) || extractCustomerCode(it.row_text),
+      customer_phone: null,
+      customer_email: null,
+      customer_birthday: null,
+      menu_name: cleanText(it.menu_raw),
+      amount: parseYen(it.amount_raw),
+      status,
+      staff_name: cleanText(it.staff_raw),
+      staff_external_id: null,
+      reservation_route: cleanText(it.route_raw) || null,
+      payment_method_label: cleanText(it.payment_raw) || null,
+      coupon_name: cleanText(it.coupon_raw) || null,
+      notes: null,
+    });
+  }
+  return {
+    rows,
+    debug: {
+      itemsFound: allItems.length,
+      parsed: rows.length,
+      skipped,
+      sampleSkipped,
+      range: `${range.fromStr} 〜 ${range.toStr}`,
+      diag,
+    },
+  };
+}
+
+/**
+ * 現在表示されているページから予約行を抽出する。
+ * scrapeBookings の旧 page.evaluate と同じロジック。
+ */
+async function extractBookingItemsFromCurrentPage(page) {
   const raw = await page.evaluate(() => {
     function txt(el) {
       return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
@@ -119,18 +690,59 @@ async function scrapeBookings(page) {
     function attr(el, name) {
       return el ? el.getAttribute(name) : null;
     }
-    // テーブル候補: thead/th に「予約日時」「お客様」「メニュー」を含む table
+    /** セルの中身を改行区切りで取り出す (br を \n に置換、複数空白を 1 つに)。 */
+    function multilineTxt(el) {
+      if (!el) return '';
+      const html = el.innerHTML
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li)>/gi, '\n');
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      return (tmp.textContent || '')
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join('\n');
+    }
+    /**
+     * 「予約結果テーブル」を 1 つ選ぶ。
+     * 検索フォームのレイアウト table を誤って選ばないよう、
+     *   - thead/th に「予約番号 / 来店 / 顧客 / お客様」のうち 2 つ以上含む
+     *   - tbody tr が 1 行以上ある
+     * の両方を満たすテーブルを優先する。
+     */
     const tables = Array.from(document.querySelectorAll('table'));
+    function score(t) {
+      const heads = Array.from(t.querySelectorAll('th, thead td'))
+        .map((e) => (e.textContent || '').trim())
+        .join(' ');
+      let s = 0;
+      if (/予約番号|予約No|予約Ｎｏ/.test(heads)) s += 3;
+      if (/来店日|来店時間|来店日時|予約日時/.test(heads)) s += 3;
+      if (/お客様|顧客|お名前/.test(heads)) s += 2;
+      if (/メニュー/.test(heads)) s += 1;
+      if (/スタッフ|担当/.test(heads)) s += 1;
+      if (/ステータス|状態/.test(heads)) s += 1;
+      const bodyRows = t.querySelectorAll('tbody tr, tr').length;
+      if (bodyRows < 2) s -= 3;
+      // 検索フォームの table を弾く: input / select を含んでいたら大幅減点
+      const inputs = t.querySelectorAll('input, select, textarea').length;
+      if (inputs > 5) s -= 10;
+      return s;
+    }
     let target = null;
+    let bestScore = 0;
     for (const t of tables) {
-      const ths = Array.from(t.querySelectorAll('th, thead td')).map((e) => (e.textContent || '').trim());
-      const flat = ths.join(' ');
-      if (/予約|お客様|メニュー|来店|スタッフ/.test(flat)) {
+      const sc = score(t);
+      if (sc > bestScore) {
+        bestScore = sc;
         target = t;
-        break;
       }
     }
-    if (!target) return { items: [], html: document.title };
+    if (!target || bestScore < 4) {
+      // 結果テーブル無し = 「該当する予約はありません」状態
+      return { items: [], reason: `no_result_table (best=${bestScore})` };
+    }
 
     // 列順を th から推定 (なければ DOM 順)
     const headers = Array.from(target.querySelectorAll('th, thead td')).map((e) =>
@@ -157,7 +769,35 @@ async function scrapeBookings(page) {
       payment: findCol('支払'),
     };
 
-    const rows = Array.from(target.querySelectorAll('tbody tr'));
+    // ヘッダーに「日時」列が見つからない場合、データ行を全部走査して
+    // 「日付らしい文字列」を含む列番号を多数決で推定する。
+    function looksLikeDate(s) {
+      return /\d{1,4}[\/年\-月]\d{1,2}[月\/\-]?\d{0,2}/.test(s) || /\d{1,2}:\d{2}/.test(s);
+    }
+    let datetimeCol = idx.datetime;
+    if (datetimeCol < 0) {
+      const sample = Array.from(target.querySelectorAll('tbody tr, tr')).slice(0, 8);
+      const colHits = {};
+      for (const tr of sample) {
+        const tds = Array.from(tr.querySelectorAll('td'));
+        tds.forEach((td, i) => {
+          if (looksLikeDate(txt(td))) {
+            colHits[i] = (colHits[i] ?? 0) + 1;
+          }
+        });
+      }
+      let best = -1;
+      let bestCount = 0;
+      for (const [k, v] of Object.entries(colHits)) {
+        if (v > bestCount) {
+          bestCount = v;
+          best = Number(k);
+        }
+      }
+      if (best >= 0) datetimeCol = best;
+    }
+
+    const rows = Array.from(target.querySelectorAll('tbody tr, tr'));
     const items = rows
       .map((tr) => {
         const tds = Array.from(tr.querySelectorAll('td'));
@@ -166,62 +806,53 @@ async function scrapeBookings(page) {
         const link =
           tr.querySelector('a[href*="reserveDetail"], a[href*="reservation"]') ||
           tr.querySelector('a[href]');
+        // セルごとに multiline 文字列 (改行区切り) を取り出す
+        const cells = tds.map(multilineTxt);
+        const rowText = cells.join('\n');
+
+        // 日時カラム: 列指定があればそこ、無ければ全セルから日付パターンを含むものを採用
+        let datetimeRaw = datetimeCol >= 0 ? cells[datetimeCol] : '';
+        if (!datetimeRaw || !looksLikeDate(datetimeRaw)) {
+          for (const c of cells) {
+            if (looksLikeDate(c)) {
+              datetimeRaw = c;
+              break;
+            }
+          }
+        }
+
+        // 顧客名: 「ゲスト」「(名前)」を含む or 顧客コードを含む列を探す。
+        // 列インデックスが分かっていればそれを使い、ダメなら行全体から推定。
+        let customerRaw = idx.customer >= 0 ? cells[idx.customer] : '';
+        if (!customerRaw) {
+          for (const c of cells) {
+            if (/(ゲスト|YG\d+|お名前|様)/.test(c) && !looksLikeDate(c)) {
+              customerRaw = c;
+              break;
+            }
+          }
+        }
+
         return {
-          datetime_raw: idx.datetime >= 0 ? txt(tds[idx.datetime]) : txt(tds[0]),
-          customer_raw: idx.customer >= 0 ? txt(tds[idx.customer]) : '',
-          menu_raw: idx.menu >= 0 ? txt(tds[idx.menu]) : '',
-          staff_raw: idx.staff >= 0 ? txt(tds[idx.staff]) : '',
-          amount_raw: idx.amount >= 0 ? txt(tds[idx.amount]) : '',
-          duration_raw: idx.duration >= 0 ? txt(tds[idx.duration]) : '',
-          status_raw: idx.status >= 0 ? txt(tds[idx.status]) : '',
-          route_raw: idx.route >= 0 ? txt(tds[idx.route]) : '',
-          coupon_raw: idx.coupon >= 0 ? txt(tds[idx.coupon]) : '',
-          payment_raw: idx.payment >= 0 ? txt(tds[idx.payment]) : '',
+          datetime_raw: datetimeRaw,
+          customer_raw: customerRaw,
+          menu_raw: idx.menu >= 0 ? cells[idx.menu] : '',
+          staff_raw: idx.staff >= 0 ? cells[idx.staff] : '',
+          amount_raw: idx.amount >= 0 ? cells[idx.amount] : '',
+          duration_raw: idx.duration >= 0 ? cells[idx.duration] : '',
+          status_raw: idx.status >= 0 ? cells[idx.status] : '',
+          route_raw: idx.route >= 0 ? cells[idx.route] : '',
+          coupon_raw: idx.coupon >= 0 ? cells[idx.coupon] : '',
+          payment_raw: idx.payment >= 0 ? cells[idx.payment] : '',
           link_href: attr(link, 'href'),
-          row_text: txt(tr),
+          row_text: rowText,
+          headers_debug: headers,
         };
       })
       .filter(Boolean);
     return { items };
   });
-
-  const rows = [];
-  let skipped = 0;
-  for (const it of raw.items) {
-    const scheduled_at = parseJstDateTime(it.datetime_raw);
-    if (!scheduled_at) {
-      skipped++;
-      continue;
-    }
-    const external_id =
-      extractIdFromUrl(it.link_href, 'reservationId', 'reserveId', 'rsvId') ||
-      // フォールバック: 日時 + 顧客名 (店舗内ユニークになる前提)
-      `${it.datetime_raw}|${it.customer_raw}`.replace(/\s+/g, '_');
-
-    // ステータスは日本語ラベル → enum 文字列
-    const status = mapBookingStatus(it.status_raw);
-
-    rows.push({
-      external_id,
-      scheduled_at,
-      duration_min: parseMinutes(it.duration_raw),
-      customer_name: cleanText(it.customer_raw),
-      customer_code: extractCustomerCode(it.customer_raw) || extractCustomerCode(it.row_text),
-      customer_phone: null,
-      customer_email: null,
-      customer_birthday: null,
-      menu_name: cleanText(it.menu_raw),
-      amount: parseYen(it.amount_raw),
-      status,
-      staff_name: cleanText(it.staff_raw),
-      staff_external_id: null,
-      reservation_route: cleanText(it.route_raw) || null,
-      payment_method_label: cleanText(it.payment_raw) || null,
-      coupon_name: cleanText(it.coupon_raw) || null,
-      notes: null,
-    });
-  }
-  return { rows, debug: { itemsFound: raw.items.length, parsed: rows.length, skipped } };
+  return raw.items ?? [];
 }
 
 function mapBookingStatus(raw) {
@@ -333,7 +964,9 @@ function absoluteUrl(src) {
 
 const BLOG_LIST_URL = 'https://salonboard.com/KLP/blog/blogList/';
 
-async function scrapeBlogs(page) {
+async function scrapeBlogs(page, opts = {}) {
+  // 詳細ページから本文を取得する最大件数 (順次アクセスのため負荷に注意)
+  const maxDetails = Number.isFinite(opts.maxDetails) ? opts.maxDetails : 60;
   await page.goto(BLOG_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
@@ -412,9 +1045,98 @@ async function scrapeBlogs(page) {
       url: it.link_href ? absoluteUrl(it.link_href) : null,
     });
   }
+
+  // 詳細ページを巡回して body_html を埋める。
+  //   - 一覧で取れた URL が無い行はスキップ
+  //   - 取得失敗は無視 (一覧側のメタデータは保持)
+  let detailHit = 0;
+  let detailMiss = 0;
+  const targets = rows.filter((r) => r.url).slice(0, maxDetails);
+  for (const r of targets) {
+    try {
+      await page.goto(r.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      const detail = await page.evaluate(() => {
+        function txt(el) {
+          return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
+        }
+        // 本文ブロックの候補を広めに探し、最も大きいものを採用する。
+        // SalonBoard 詳細ページのテンプレート差を吸収するため class 名で限定しない。
+        const candidates = Array.from(
+          document.querySelectorAll(
+            '[class*="blogDetail" i], [class*="blogBody" i], [class*="article" i], [class*="entry" i], [class*="body" i], main, #content',
+          ),
+        );
+        let best = null;
+        let bestLen = 0;
+        for (const el of candidates) {
+          const t = txt(el);
+          if (t.length > bestLen) {
+            bestLen = t.length;
+            best = el;
+          }
+        }
+        // 最低限の閾値を満たさなければ body 全体から拾う
+        if (!best || bestLen < 80) {
+          best = document.body;
+        }
+        // 本文 HTML を取得 (script/style は除去)
+        const clone = best.cloneNode(true);
+        for (const tag of ['script', 'style', 'iframe', 'noscript']) {
+          for (const n of Array.from(clone.querySelectorAll(tag))) n.remove();
+        }
+        // 画像の src を絶対 URL に
+        for (const img of Array.from(clone.querySelectorAll('img'))) {
+          const s = img.getAttribute('src') || img.getAttribute('data-src');
+          if (s) {
+            try {
+              img.setAttribute('src', new URL(s, location.href).toString());
+            } catch (_e) {
+              /* ignore */
+            }
+          }
+        }
+        // 投稿日時の精度を上げる (詳細ページのほうが詳しいことが多い)
+        const dateText = (document.body.textContent || '').match(
+          /(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})日?(?:[^\d]+(\d{1,2}):(\d{2}))?/,
+        );
+        return {
+          html: clone.innerHTML,
+          text: txt(clone),
+          dateHint: dateText ? dateText[0] : null,
+        };
+      });
+      if (detail?.html) {
+        // 本文 HTML を 200,000 文字でカット (DB 圧縮)
+        r.body_html = String(detail.html).slice(0, 200_000);
+        // excerpt が空なら本文先頭を抜粋として保存
+        if (!r.body_excerpt && detail.text) {
+          r.body_excerpt = String(detail.text).slice(0, 280);
+        }
+        // 投稿日時がまだ取れていなければ詳細ページから補う
+        if (!r.posted_at && detail.dateHint) {
+          const dt = parseJstDateTime(detail.dateHint);
+          if (dt) r.posted_at = dt;
+        }
+        detailHit++;
+      } else {
+        detailMiss++;
+      }
+    } catch (_e) {
+      detailMiss++;
+    }
+  }
+
   return {
     rows,
-    debug: { itemsFound: raw.items.length, parsed: rows.length, skipped: raw.items.length - rows.length },
+    debug: {
+      itemsFound: raw.items.length,
+      parsed: rows.length,
+      skipped: raw.items.length - rows.length,
+      detailHit,
+      detailMiss,
+      detailAttempted: targets.length,
+    },
   };
 }
 
@@ -543,10 +1265,151 @@ function cleanPhone(raw) {
   return s || null;
 }
 
+// ----------------- スタッフスケジュール (salonSchedule) -----------------
+//
+// URL: https://salonboard.com/KLP/schedule/salonSchedule/
+// 画面構造: スタッフ × 日付 のグリッド (週単位 / 月単位を切替) で、
+//           各セルに 出勤時間 / 休み / 備考 が入る。
+// 戻り値:
+//   rows = [{ staff_external_id, staff_name, shift_date, start_time, end_time, is_off, note }]
+//
+// SalonBoard の HTML はテンプレ差が大きいため、複数の構造パターンを試す。
+//   1. tr[data-staff-id] td[data-date] の構造
+//   2. テーブル + thead に日付、左カラムにスタッフ名の二次元配列構造
+//   3. それでも拾えない場合は本文の正規表現でテキストを切り出す
+// =====================================================================
+
+const SCHEDULE_URL = 'https://salonboard.com/KLP/schedule/salonSchedule/';
+
+async function scrapeShifts(page) {
+  await page.goto(SCHEDULE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+
+  const raw = await page.evaluate(() => {
+    function txt(el) {
+      return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
+    }
+    function attr(el, name) {
+      return el ? el.getAttribute(name) : null;
+    }
+
+    /**
+     * 表示中の年月を画面のタイトルから推定する。
+     * 「2026年5月」「2026/05」などのフォーマットを許容。
+     * 取れなければ今日の年月を返す。
+     */
+    function pickBaseYearMonth() {
+      const candidates = Array.from(
+        document.querySelectorAll('h1,h2,h3,.ttl,[class*="title" i],[class*="caption" i]'),
+      );
+      for (const el of candidates) {
+        const t = txt(el);
+        const m = t.match(/(\d{4})[\/年\-\.](\d{1,2})/);
+        if (m) return { y: Number(m[1]), m: Number(m[2]) };
+      }
+      const today = new Date();
+      return { y: today.getFullYear(), m: today.getMonth() + 1 };
+    }
+    const base = pickBaseYearMonth();
+
+    /** "10:00-19:00" / "10:00〜19:00" などから [start, end] を取り出す */
+    function pickRange(s) {
+      const m = s.match(/(\d{1,2}):(\d{2})\s*[〜~\-－ーto]+\s*(\d{1,2}):(\d{2})/);
+      if (!m) return null;
+      const pad = (x) => String(x).padStart(2, '0');
+      return [`${pad(m[1])}:${m[2]}`, `${pad(m[3])}:${m[4]}`];
+    }
+    function isOffMark(s) {
+      return /^(休|休み|−|—|-|×|OFF|休日|有給|希望休)$/u.test(s.replace(/\s/g, ''));
+    }
+    /** 日付文字列を YYYY-MM-DD に正規化。dayCell の data-date 優先。 */
+    function dateFromCell(td, dayHint, monthHint) {
+      const d = attr(td, 'data-date') || attr(td, 'data-day');
+      if (d && /^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
+      if (d && /^\d{4}\/\d{1,2}\/\d{1,2}/.test(d)) {
+        const m = d.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+        return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+      }
+      // フォールバック: thead から拾った日付ヒント (例: 月の何日目か)
+      if (dayHint != null && monthHint != null) {
+        return `${base.y}-${String(monthHint).padStart(2, '0')}-${String(dayHint).padStart(2, '0')}`;
+      }
+      return null;
+    }
+
+    // --- パターン1: tr ごとにスタッフ + td に日付セル ---
+    const items = [];
+    const rows = Array.from(document.querySelectorAll('table tr'));
+
+    // ヘッダー行から日付の日 (1-31) を拾う
+    let dayHeaders = []; // [{ col: number, day: number, month: number }]
+    const headerRow = rows.find((tr) => tr.querySelector('th'));
+    if (headerRow) {
+      const ths = Array.from(headerRow.querySelectorAll('th,td'));
+      ths.forEach((th, i) => {
+        const t = txt(th);
+        const m = t.match(/(\d{1,2})/);
+        if (m) {
+          dayHeaders.push({ col: i, day: Number(m[1]), month: base.m });
+        }
+      });
+    }
+
+    for (const tr of rows) {
+      if (tr === headerRow) continue;
+      const staffCell = tr.querySelector('th, td');
+      if (!staffCell) continue;
+      const staffName = txt(staffCell);
+      if (!staffName || staffName.length > 30 || /\d{1,2}\/\d{1,2}/.test(staffName)) continue;
+      const staffId =
+        attr(tr, 'data-staff-id') ||
+        attr(staffCell, 'data-staff-id') ||
+        (attr(staffCell.querySelector('a[href]'), 'href') || '').match(/W\d{6,}/)?.[0] ||
+        staffName;
+
+      const cells = Array.from(tr.querySelectorAll('td'));
+      cells.forEach((td, idx) => {
+        if (td === staffCell) return;
+        const t = txt(td);
+        if (!t) return;
+
+        // 日付の決定 (data-date 優先、無ければヘッダーから推定)
+        const header = dayHeaders.find((h) => h.col === idx);
+        const dateStr = dateFromCell(
+          td,
+          header ? header.day : null,
+          header ? header.month : null,
+        );
+        if (!dateStr) return;
+
+        const range = pickRange(t);
+        const isOff = !range && isOffMark(t);
+        if (!range && !isOff) return;
+        items.push({
+          staff_external_id: String(staffId),
+          staff_name: staffName,
+          shift_date: dateStr,
+          start_time: range ? range[0] : null,
+          end_time: range ? range[1] : null,
+          is_off: !!isOff,
+          note: range ? null : t.slice(0, 80),
+        });
+      });
+    }
+    return { items };
+  });
+
+  return {
+    rows: raw.items,
+    debug: { itemsFound: raw.items.length, parsed: raw.items.length, skipped: 0 },
+  };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
   scrapeBlogs,
+  scrapeShifts,
   scrapeCustomerDetails,
   // テスト用にエクスポート
   _internal: {

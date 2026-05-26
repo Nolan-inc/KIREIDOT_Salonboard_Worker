@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Plus, Star, Briefcase, Loader2 } from 'lucide-react';
+import { Plus, Loader2 } from 'lucide-react';
 import { Card } from '../components/Card';
-import { useAuth } from '../lib/auth-context';
+import { useEffectiveScope } from '../lib/selection-context';
 import { fetchStaffList, type StaffRow } from '../lib/data';
 
 const ROLE_LABELS: Record<string, string> = {
@@ -13,13 +13,12 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 export function Staff() {
-  const auth = useAuth();
+  const scope = useEffectiveScope();
   const [loading, setLoading] = useState(true);
   const [staff, setStaff] = useState<StaffRow[]>([]);
 
   useEffect(() => {
-    if (auth.status !== 'signed-in') return;
-    const scope = auth.scope;
+    if (!scope) return;
     let cancelled = false;
     setLoading(true);
     fetchStaffList(scope)
@@ -28,7 +27,7 @@ export function Staff() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [scope?.shopId, scope?.organizationId]);
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -78,31 +77,30 @@ export function Staff() {
                 </div>
                 <div className="pt-10">
                   <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="font-serif text-[16px] font-bold text-ink">{s.full_name}</h3>
-                      <p className="text-[11px] text-ink-soft">{ROLE_LABELS[s.role ?? ''] ?? 'スタッフ'}</p>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate font-serif text-[16px] font-bold text-ink">
+                        {s.full_name}
+                      </h3>
+                      <p className="text-[11px] text-ink-soft">
+                        {s.position ?? ROLE_LABELS[s.role ?? ''] ?? 'スタッフ'}
+                      </p>
                     </div>
-                    {s.tenure_years != null && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">
-                        <Star className="h-3 w-3 fill-amber-500 text-amber-500" />
-                        {s.tenure_years.toFixed(1)}
+                    {s.external_id && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-brand-light/60 px-2 py-0.5 text-[10px] font-mono font-bold text-brand-700">
+                        {s.external_id}
                       </span>
                     )}
                   </div>
 
-                  <div className="mt-4 grid grid-cols-2 gap-2 text-center">
-                    <Metric icon={<Briefcase className="h-3 w-3" />} label="勤続" value={s.tenure_years != null ? `${s.tenure_years.toFixed(1)}年` : '-'} />
-                    <Metric icon={<Star className="h-3 w-3" />} label="ロール" value={ROLE_LABELS[s.role ?? ''] ?? '-'} />
-                  </div>
+                  {s.catch_phrase && (
+                    <p className="mt-2 line-clamp-2 text-[12px] text-ink-soft">
+                      {s.catch_phrase}
+                    </p>
+                  )}
 
-                  <div className="mt-4 flex items-center gap-2">
-                    <button type="button" className="flex-1 rounded-[10px] border border-hairline bg-white py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/40">
-                      プロフィール編集
-                    </button>
-                    <button type="button" className="flex-1 rounded-[10px] bg-brand-light py-1.5 text-[11px] font-semibold text-brand-700 hover:bg-brand-200">
-                      シフト確認
-                    </button>
-                  </div>
+                  {s.bio && (
+                    <p className="mt-1 line-clamp-3 text-[11px] text-muted">{s.bio}</p>
+                  )}
                 </div>
               </div>
             </Card>
@@ -113,14 +111,3 @@ export function Staff() {
   );
 }
 
-function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
-  return (
-    <div className="rounded-[10px] bg-brand-light/40 px-2 py-2">
-      <div className="flex items-center justify-center gap-1 text-[9px] text-ink-soft">
-        {icon}
-        {label}
-      </div>
-      <div className="mt-0.5 text-[12px] font-bold text-ink">{value}</div>
-    </div>
-  );
-}

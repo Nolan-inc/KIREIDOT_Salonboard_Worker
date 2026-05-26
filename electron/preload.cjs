@@ -3,8 +3,16 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// package.json から実際のバージョンを動的取得 (build 時に asar 内に同梱される)
+let appVersion = '0.0.0';
+try {
+  appVersion = require('../package.json').version || '0.0.0';
+} catch (_e) {
+  /* fallback */
+}
+
 contextBridge.exposeInMainWorld('salondesk', {
-  version: '0.1.0',
+  version: appVersion,
   platform: process.platform,
 });
 
@@ -28,6 +36,7 @@ contextBridge.exposeInMainWorld('kireidotApp', {
     return () => ipcRenderer.removeListener('updater:status', listener);
   },
   quitAndInstallUpdate: () => ipcRenderer.invoke('updater:quit-and-install'),
+  checkForUpdate: () => ipcRenderer.invoke('updater:check'),
 
   // ---- Worker (utilityProcess) 操作 ----
   // init: Supabase URL/anonKey/session を渡して worker を初期化

@@ -71,6 +71,35 @@ export async function upsertSalonboardCredentials(args: {
   return { ok: true, id: String(data) };
 }
 
+/**
+ * 既存の認証情報 (平文パスワード含む) を取得する。
+ * 編集モーダルを開いたときに「すでに保存済みのパスワード」を prefill するために使う。
+ *
+ *   - super_owner / admin: 全店舗
+ *   - owner: 自社の店舗のみ
+ *   - shop_manager: 自店舗のみ
+ *   - staff: 拒否される
+ */
+export async function revealSalonboardCredentials(
+  shopId: string,
+): Promise<
+  | { ok: true; loginId: string; password: string; baseUrl: string | null }
+  | { ok: false; error: string }
+> {
+  const { data, error } = await supabase.rpc('salonboard_reveal_credentials', {
+    p_shop_id: shopId,
+  });
+  if (error) return { ok: false, error: error.message };
+  const row = (data as Array<{ login_id: string; password: string; base_url: string | null }>)?.[0];
+  if (!row) return { ok: false, error: '認証情報が見つかりません' };
+  return {
+    ok: true,
+    loginId: row.login_id,
+    password: row.password,
+    baseUrl: row.base_url,
+  };
+}
+
 /** 認証情報を削除 (super_owner / admin のみ) */
 export async function deleteSalonboardCredentials(
   shopId: string,

@@ -11,7 +11,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Card, CardBody, CardHeader, SectionTitle } from '../components/Card';
-import { useAuth } from '../lib/auth-context';
+import { useEffectiveScope } from '../lib/selection-context';
 import {
   fetchDashboardSummary,
   fetchTodayBookings,
@@ -22,14 +22,13 @@ import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 import type { NavKey } from '../lib/nav';
 
 export function Dashboard({ onNavigate }: { onNavigate: (k: NavKey) => void }) {
-  const auth = useAuth();
+  const scope = useEffectiveScope();
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
 
   useEffect(() => {
-    if (auth.status !== 'signed-in') return;
-    const scope = auth.scope;
+    if (!scope) return;
     let cancelled = false;
     setLoading(true);
     Promise.all([fetchDashboardSummary(scope), fetchTodayBookings(scope)])
@@ -44,7 +43,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (k: NavKey) => void }) {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [scope?.shopId, scope?.organizationId]);
 
   return (
     <div className="flex flex-col gap-8 pt-4">
@@ -135,9 +134,12 @@ export function Dashboard({ onNavigate }: { onNavigate: (k: NavKey) => void }) {
               <ul className="divide-y divide-hairline/60">
                 {bookings.slice(0, 8).map((b) => {
                   const status = bookingStatusJp(b.status);
-                  const memberName = b.profiles?.full_name ?? null;
                   const customerKind = b.user_id ? '会員' : 'ゲスト';
-                  const displayName = memberName ?? b.customer_name ?? '名前未設定';
+                  const displayName =
+                    b.customers?.full_name ??
+                    b.profiles?.full_name ??
+                    b.customer_name ??
+                    'ゲスト';
                   return (
                     <li key={b.id} className="flex items-center gap-4 px-5 py-3 transition hover:bg-brand-light/30">
                       <div className="w-14 shrink-0 text-center">

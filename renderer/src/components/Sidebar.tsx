@@ -1,6 +1,10 @@
-import { NAV_ITEMS, type NavKey } from '../lib/nav';
+import { useEffect, useState } from 'react';
+import { Store, X } from 'lucide-react';
+import { NAV_ITEMS, getVisibleNavKeys, type NavKey } from '../lib/nav';
 import { cn } from '../lib/cn';
 import { useAuth } from '../lib/auth-context';
+import { useSelection } from '../lib/selection-context';
+import { supabase } from '../lib/supabase';
 
 export function Sidebar({
   active,
@@ -9,6 +13,10 @@ export function Sidebar({
   active: NavKey;
   onChange: (k: NavKey) => void;
 }) {
+  const { selectedShopId } = useSelection();
+  const visibleKeys = new Set(getVisibleNavKeys(!!selectedShopId));
+  const items = NAV_ITEMS.filter((i) => visibleKeys.has(i.key));
+
   return (
     <aside className="flex h-full w-[248px] flex-col border-r border-hairline/70 bg-white/55 backdrop-blur-md">
       {/* ロゴ + ドラッグ可能なヘッダー */}
@@ -28,10 +36,13 @@ export function Sidebar({
         </div>
       </div>
 
+      {/* 選択中の店舗 (選択中のときだけ表示) */}
+      <SelectedShopBanner />
+
       {/* ナビ */}
       <nav className="app-no-drag mt-2 flex-1 overflow-y-auto px-3">
         <ul className="flex flex-col gap-1">
-          {NAV_ITEMS.map((item) => {
+          {items.map((item) => {
             const Icon = item.icon;
             const isActive = item.key === active;
             return (
@@ -76,6 +87,60 @@ export function Sidebar({
   );
 }
 
+/**
+ * 「いま操作中の店舗」を表示するバナー。店舗が選択されていないときは何も表示しない。
+ * バツボタンで選択を解除でき、選択解除すると店舗一覧画面に戻る (App.tsx 側のガードに任せる)。
+ */
+function SelectedShopBanner() {
+  const { selectedShopId, setSelectedShop } = useSelection();
+  const [shopName, setShopName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedShopId) {
+      setShopName(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const { data } = await supabase
+        .from('shops')
+        .select('name')
+        .eq('id', selectedShopId)
+        .maybeSingle();
+      if (cancelled) return;
+      setShopName(((data as any)?.name ?? null) as string | null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedShopId]);
+
+  if (!selectedShopId) return null;
+
+  return (
+    <div className="app-no-drag mx-3 mt-3 flex items-center gap-2 rounded-[10px] border border-brand-200 bg-brand-light/50 px-2.5 py-2">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white">
+        <Store className="h-3 w-3" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[9px] uppercase tracking-wider text-brand-700/80">操作中の店舗</div>
+        <div className="truncate text-[12px] font-semibold text-ink">
+          {shopName ?? '読み込み中…'}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => setSelectedShop(null)}
+        className="rounded-full p-1 text-ink-soft transition hover:bg-white hover:text-ink"
+        title="店舗の選択を解除"
+        aria-label="店舗の選択を解除"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
 function Footer() {
   const auth = useAuth();
   const name =
@@ -92,7 +157,7 @@ function Footer() {
         </div>
       )}
       <div className="flex items-center justify-between">
-        <span>v 0.1.0</span>
+        <span>v {window.salondesk?.version ?? '0.0.0'}</span>
         <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100/70 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
           接続済み

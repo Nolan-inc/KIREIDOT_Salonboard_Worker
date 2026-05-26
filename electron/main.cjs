@@ -7,7 +7,7 @@
 
 const { app, BrowserWindow, shell, ipcMain, utilityProcess } = require('electron');
 const path = require('node:path');
-const { initAutoUpdater, quitAndInstall } = require('./updater.cjs');
+const { initAutoUpdater, quitAndInstall, manualCheck } = require('./updater.cjs');
 
 // ---------------------------------------------------------------------
 // Worker (utilityProcess) — マルチ店舗スクレイピングのバックグラウンド実行
@@ -170,6 +170,11 @@ ipcMain.handle('app:open-external', async (_event, url) => {
 ipcMain.handle('updater:quit-and-install', async () => {
   quitAndInstall();
   return { ok: true };
+});
+
+// renderer の「アップデートを今すぐ確認」ボタンから呼ばれる。
+ipcMain.handle('updater:check', async () => {
+  return await manualCheck();
 });
 
 // ---------------------------------------------------------------------

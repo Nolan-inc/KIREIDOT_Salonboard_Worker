@@ -34,7 +34,7 @@ export type SyncRunSummary = {
   done: boolean;
 };
 
-type ChannelKey = 'bookings' | 'staff' | 'shifts' | 'blog' | 'customers';
+export type ChannelKey = 'bookings' | 'staff' | 'shifts' | 'blog' | 'customers';
 
 type SyncContextValue = {
   ready: boolean;
@@ -44,23 +44,42 @@ type SyncContextValue = {
   lastRun: SyncRunSummary | null;
   // worker のログ (リング 200 件)
   logs: { at: string; level: 'info' | 'warn' | 'error'; msg: string }[];
-  /** 自動同期が有効か (sync_interval_minutes に従って定期実行) */
+  /** 自動同期が有効か (sync_interval_minutes に従って全チャネルを定期実行) */
   autoSyncEnabled: boolean;
   setAutoSyncEnabled: (v: boolean) => void;
+  /** 予約だけを 5 分おきに自動取得するモード */
+  bookingsAutoSyncEnabled: boolean;
+  setBookingsAutoSyncEnabled: (v: boolean) => void;
+  /** 予約自動同期の最後の実行時刻 (ms, ローカル時刻基準) */
+  lastBookingsAutoSyncAt: number | null;
 
-  syncAll: (channels?: ChannelKey[]) => Promise<{ ok: boolean; error?: string }>;
-  syncShops: (shopIds: string[], channels?: ChannelKey[]) => Promise<{ ok: boolean; error?: string }>;
+  syncAll: (
+    channels?: ChannelKey[],
+    opts?: { showBrowser?: boolean },
+  ) => Promise<{ ok: boolean; error?: string }>;
+  syncShops: (
+    shopIds: string[],
+    channels?: ChannelKey[],
+    opts?: { showBrowser?: boolean },
+  ) => Promise<{ ok: boolean; error?: string }>;
   abort: () => Promise<void>;
 };
 
 const SyncContext = createContext<SyncContextValue | null>(null);
 
-const DEFAULT_CHANNELS: ChannelKey[] = ['bookings', 'staff', 'blog', 'customers'];
+const DEFAULT_CHANNELS: ChannelKey[] = ['bookings', 'staff', 'shifts', 'blog', 'customers'];
 
 /** 自動同期 ON/OFF を localStorage に保存するキー */
 const AUTO_SYNC_KEY = 'salondesk.autoSyncEnabled';
 /** 自動同期チェック間隔 (ms)。実行間隔ではなく「実行可否を判定する周期」 */
 const AUTO_SYNC_TICK_MS = 60_000; // 60 秒に 1 回判定
+
+/** 「予約のみ」自動同期 ON/OFF を localStorage に保存するキー */
+const BOOKINGS_AUTO_SYNC_KEY = 'salondesk.bookingsAutoSyncEnabled';
+/** 「予約のみ」自動同期の実行間隔 (5 分) */
+const BOOKINGS_AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
+/** 「予約のみ」自動同期の判定周期 (30 秒) */
+const BOOKINGS_AUTO_SYNC_TICK_MS = 30_000;
 
 export function SyncControllerProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
@@ -88,6 +107,30 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
   }, []);
   /** 最後に自動同期を実行した時刻 (ms) */
   const lastAutoSyncAtRef = useRef<number>(0);
+
+  // ---- 「予約のみ」5 分おき自動同期 ----
+  const [bookingsAutoSyncEnabled, setBookingsAutoSyncEnabledState] = useState<boolean>(
+    () => {
+      if (typeof window === 'undefined') return false;
+      try {
+        return localStorage.getItem(BOOKINGS_AUTO_SYNC_KEY) === '1';
+      } catch {
+        return false;
+      }
+    },
+  );
+  const setBookingsAutoSyncEnabled = useCallback((v: boolean) => {
+    setBookingsAutoSyncEnabledState(v);
+    try {
+      localStorage.setItem(BOOKINGS_AUTO_SYNC_KEY, v ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const lastBookingsAutoSyncAtRef = useRef<number>(0);
+  const [lastBookingsAutoSyncAt, setLastBookingsAutoSyncAt] = useState<number | null>(
+    null,
+  );
 
   // Worker 初期化: ログイン状態が変わるたびにセッショントークンを渡し直す
   useEffect(() => {
@@ -122,8 +165,11 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     const unsubscribe = bridge.onWorkerEvent((msg) => {
       switch (msg.type) {
         case 'boot':
+          // worker プロセス自体は起動した (Supabase init 前)
+          break;
         case 'ready':
-          // setReady は init 完了時にもう立てている
+          // Supabase client セット完了 → 同期可能
+          if (msg.payload.ok) setReady(true);
           break;
         case 'log':
           setLogs((cur) => [...cur, msg.payload].slice(-200));
@@ -223,7 +269,7 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const syncAll = useCallback<SyncContextValue['syncAll']>(
-    async (channels = DEFAULT_CHANNELS) => {
+    async (channels = DEFAULT_CHANNELS, opts) => {
       const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
       if (!bridge) return { ok: false, error: 'Electron 環境ではありません' };
       if (!ready) {
@@ -231,21 +277,31 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
         const { data } = await supabase.auth.getSession();
         if (!data.session) return { ok: false, error: '未ログインです' };
       }
-      const r = await bridge.workerSync({ channels });
+      const r = await bridge.workerSync({ channels, showBrowser: !!opts?.showBrowser });
       return { ok: !!r?.ok };
     },
     [ready],
   );
 
   const syncShops = useCallback<SyncContextValue['syncShops']>(
-    async (shopIds, channels = DEFAULT_CHANNELS) => {
+    async (shopIds, channels = DEFAULT_CHANNELS, opts) => {
       const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
       if (!bridge) return { ok: false, error: 'Electron 環境ではありません' };
       if (!shopIds || shopIds.length === 0) return { ok: false, error: '店舗が指定されていません' };
-      const r = await bridge.workerSync({ shopIds, channels });
+      if (!ready) {
+        return {
+          ok: false,
+          error: '同期ワーカーがまだ初期化されていません。数秒待ってからもう一度お試しください。',
+        };
+      }
+      const r = await bridge.workerSync({
+        shopIds,
+        channels,
+        showBrowser: !!opts?.showBrowser,
+      });
       return { ok: !!r?.ok };
     },
-    [],
+    [ready],
   );
 
   const abort = useCallback(async () => {
@@ -294,6 +350,54 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     };
   }, [autoSyncEnabled, ready]);
 
+  // ---- 「予約のみ」5 分おき自動同期 ----
+  // 上の自動同期と独立した別ループ。連携済みかつ enabled な全店舗を対象に、
+  // channels=['bookings'] だけで workerSync を呼ぶ。
+  useEffect(() => {
+    if (!bookingsAutoSyncEnabled || !ready) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      // 既に同期が走っているならスキップ (全チャネル同期と競合させない)
+      if (runningRef.current) return;
+      const elapsed = Date.now() - lastBookingsAutoSyncAtRef.current;
+      if (elapsed < BOOKINGS_AUTO_SYNC_INTERVAL_MS) return;
+
+      // 対象店舗: 認証情報があり enabled な店舗の shop_id 一覧
+      const { data } = await supabase
+        .from('salonboard_credentials_overview')
+        .select('shop_id, has_credential, enabled, blocked_until')
+        .eq('has_credential', true)
+        .eq('enabled', true);
+      const now = Date.now();
+      const shopIds = (data ?? [])
+        .filter((r: any) => {
+          if (!r.blocked_until) return true;
+          return new Date(r.blocked_until).getTime() <= now;
+        })
+        .map((r: any) => r.shop_id as string)
+        .filter(Boolean);
+      if (shopIds.length === 0) return;
+
+      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+      if (!bridge) return;
+
+      lastBookingsAutoSyncAtRef.current = Date.now();
+      setLastBookingsAutoSyncAt(lastBookingsAutoSyncAtRef.current);
+      await bridge.workerSync({ shopIds, channels: ['bookings'] });
+    };
+
+    // 起動直後にも 1 回判定
+    const initialDelay = setTimeout(() => void tick(), 5_000);
+    const interval = setInterval(() => void tick(), BOOKINGS_AUTO_SYNC_TICK_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(initialDelay);
+      clearInterval(interval);
+    };
+  }, [bookingsAutoSyncEnabled, ready]);
+
   const value = useMemo<SyncContextValue>(
     () => ({
       ready,
@@ -303,6 +407,9 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       logs,
       autoSyncEnabled,
       setAutoSyncEnabled,
+      bookingsAutoSyncEnabled,
+      setBookingsAutoSyncEnabled,
+      lastBookingsAutoSyncAt,
       syncAll,
       syncShops,
       abort,
@@ -315,6 +422,9 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       logs,
       autoSyncEnabled,
       setAutoSyncEnabled,
+      bookingsAutoSyncEnabled,
+      setBookingsAutoSyncEnabled,
+      lastBookingsAutoSyncAt,
       syncAll,
       syncShops,
       abort,

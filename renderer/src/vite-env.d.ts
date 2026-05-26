@@ -58,6 +58,8 @@ interface Window {
     onUpdaterStatus: (handler: (status: UpdaterStatus) => void) => () => void;
     /** 「今すぐ再起動して更新を適用」をリクエストする。 */
     quitAndInstallUpdate: () => Promise<{ ok: boolean }>;
+    /** 手動でアップデート確認を実行する。結果は onUpdaterStatus 経由で受け取る。 */
+    checkForUpdate: () => Promise<{ ok: boolean; reason?: string }>;
 
     /** worker (utilityProcess) を Supabase セッション付きで初期化 */
     workerInit: (payload: {
@@ -70,6 +72,8 @@ interface Window {
     workerSync: (payload: {
       shopIds?: string[];
       channels: WorkerChannel[];
+      /** true でブラウザを表示 (headless: false + slowMo)。デバッグ・確認用 */
+      showBrowser?: boolean;
     }) => Promise<{ ok: boolean }>;
     /** 現在の同期を中断 */
     workerAbort: () => Promise<{ ok: boolean }>;

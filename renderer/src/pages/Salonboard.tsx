@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Building2,
+  CalendarClock,
+  CalendarRange,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -8,6 +10,7 @@ import {
   EyeOff,
   Loader2,
   Lock,
+  Newspaper,
   Pause,
   Pencil,
   PlayCircle,
@@ -18,15 +21,18 @@ import {
   Store,
   TriangleAlert,
   Trash2,
+  Users,
   X,
 } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../components/Card';
 import { useAuth } from '../lib/auth-context';
-import { useSyncController } from '../lib/sync-controller';
+import { useSelection } from '../lib/selection-context';
+import { useSyncController, type ChannelKey } from '../lib/sync-controller';
 import {
   deleteSalonboardCredentials,
   fetchCredentialOverview,
   fetchRecentSyncRuns,
+  revealSalonboardCredentials,
   setSalonboardCredentialEnabled,
   upsertSalonboardCredentials,
   type CredentialOverviewRow,
@@ -41,9 +47,19 @@ import {
  */
 export function SalonboardPage() {
   const auth = useAuth();
+  const { selectedOrgId, selectedShopId } = useSelection();
+  // 認証情報の編集権限:
+  //   - super_owner / admin: 全社・全店舗を編集可
+  //   - owner / shop_manager: 自社の店舗のみ編集可 (RLS で弾く)
+  //   - staff / user: 閲覧のみ
   const canEdit =
     auth.status === 'signed-in'
-    && (auth.scope.role === 'super_owner' || auth.scope.role === 'admin');
+    && (
+      auth.scope.role === 'super_owner'
+      || auth.scope.role === 'admin'
+      || auth.scope.role === 'owner'
+      || auth.scope.role === 'shop_manager'
+    );
 
   const sync = useSyncController();
   const [rows, setRows] = useState<CredentialOverviewRow[]>([]);
@@ -88,10 +104,18 @@ export function SalonboardPage() {
     }
   }, [sync.lastRun?.done]);
 
-  // 会社単位でグルーピング
+  // 選択中の会社で絞り込み。さらに店舗まで選択中なら 1 店舗に絞る。
+  const scopedRows = useMemo(() => {
+    if (!selectedOrgId) return [];
+    let list = rows.filter((r) => r.organization_id === selectedOrgId);
+    if (selectedShopId) list = list.filter((r) => r.shop_id === selectedShopId);
+    return list;
+  }, [rows, selectedOrgId, selectedShopId]);
+
+  // 会社単位でグルーピング (実質 1 グループ)
   const grouped = useMemo(() => {
     const m = new Map<string, { name: string; shops: CredentialOverviewRow[] }>();
-    for (const r of rows) {
+    for (const r of scopedRows) {
       const e = m.get(r.organization_id);
       if (e) e.shops.push(r);
       else m.set(r.organization_id, { name: r.organization_name, shops: [r] });
@@ -101,11 +125,16 @@ export function SalonboardPage() {
       orgName: v.name,
       shops: v.shops,
     }));
-  }, [rows]);
+  }, [scopedRows]);
 
-  const totalShops = rows.length;
-  const linkedShops = rows.filter((r) => r.has_credential).length;
-  const errorShops = rows.filter((r) => (r.consecutive_failures ?? 0) > 0).length;
+  const totalShops = scopedRows.length;
+  const linkedShops = scopedRows.filter((r) => r.has_credential).length;
+  const errorShops = scopedRows.filter((r) => (r.consecutive_failures ?? 0) > 0).length;
+  /** 「全店舗を同期」で渡す shop_id 一覧。選択中組織で連携済みかつ有効な店舗のみ。 */
+  const orgShopIds = useMemo(
+    () => scopedRows.filter((r) => r.has_credential && r.enabled).map((r) => r.shop_id),
+    [scopedRows],
+  );
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -144,18 +173,37 @@ export function SalonboardPage() {
             ) : (
               <button
                 type="button"
-                disabled={!sync.ready || linkedShops === 0}
-                onClick={() => void sync.syncAll()}
+                disabled={!sync.ready || orgShopIds.length === 0}
+                onClick={() => void sync.syncShops(orgShopIds)}
                 className="inline-flex items-center gap-1.5 rounded-[10px] bg-brand-gradient px-3 py-1.5 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+                title={
+                  selectedShopId
+                    ? '選択中の店舗をすべて同期'
+                    : 'この会社の全店舗をバックグラウンドで同期'
+                }
               >
-                <PlayCircle className="h-3.5 w-3.5" /> 全店舗を同期
+                <PlayCircle className="h-3.5 w-3.5" />{' '}
+                {selectedShopId ? 'この店舗を一括同期' : '会社の全店舗を一括同期'}
+              </button>
+            )}
+            {!sync.isRunning && (
+              <button
+                type="button"
+                disabled={!sync.ready || orgShopIds.length === 0}
+                onClick={() =>
+                  void sync.syncShops(orgShopIds, undefined, { showBrowser: true })
+                }
+                className="inline-flex items-center gap-1.5 rounded-[10px] border border-brand-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-brand-700 hover:bg-brand-light/40 disabled:opacity-50"
+                title="ブラウザ画面を表示しながら同期 (デバッグ用)"
+              >
+                <PlayCircle className="h-3.5 w-3.5" /> 表示しながら一括同期
               </button>
             )}
             <label
               className="inline-flex cursor-pointer items-center gap-2 rounded-[10px] border border-hairline bg-white px-3 py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/20"
               title={
                 sync.autoSyncEnabled
-                  ? '自動同期 ON: 設定された間隔で自動で実行されます'
+                  ? '自動同期 ON: 設定された間隔で全項目を自動実行'
                   : '自動同期 OFF: 手動で実行する必要があります'
               }
             >
@@ -167,9 +215,93 @@ export function SalonboardPage() {
                 disabled={!sync.ready}
               />
               <RefreshCcw className="h-3.5 w-3.5" />
-              自動同期
+              自動同期 (全項目)
+            </label>
+            <label
+              className={
+                'inline-flex cursor-pointer items-center gap-2 rounded-[10px] border px-3 py-1.5 text-[11px] font-semibold transition ' +
+                (sync.bookingsAutoSyncEnabled
+                  ? 'border-brand-300 bg-brand-light/40 text-brand-700'
+                  : 'border-hairline bg-white text-ink-soft hover:bg-brand-light/20')
+              }
+              title={
+                sync.bookingsAutoSyncEnabled
+                  ? '予約だけを 5 分おきに自動取得'
+                  : '予約だけを 5 分おきに自動取得 (OFF)'
+              }
+            >
+              <input
+                type="checkbox"
+                checked={sync.bookingsAutoSyncEnabled}
+                onChange={(e) => sync.setBookingsAutoSyncEnabled(e.target.checked)}
+                className="h-3 w-3 accent-brand"
+                disabled={!sync.ready}
+              />
+              <CalendarRange className="h-3.5 w-3.5" />
+              予約のみ 5 分おき
+              {sync.lastBookingsAutoSyncAt && (
+                <span className="ml-1 text-[10px] font-normal text-ink-soft">
+                  ({new Date(sync.lastBookingsAutoSyncAt).toLocaleTimeString('ja-JP', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })})
+                </span>
+              )}
             </label>
           </div>
+
+          {/* 項目別の同期ボタン */}
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[10px] border border-hairline bg-white/70 px-3 py-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+              項目別で同期
+            </span>
+            <ChannelSyncButton
+              icon={<CalendarRange className="h-3 w-3" />}
+              label="予約"
+              channel="bookings"
+              shopIds={orgShopIds}
+              disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
+              onSync={(ch, opts) =>
+                sync.syncShops(orgShopIds, [ch], { showBrowser: !!opts?.showBrowser })
+              }
+            />
+            <ChannelSyncButton
+              icon={<Users className="h-3 w-3" />}
+              label="スタッフ"
+              channel="staff"
+              shopIds={orgShopIds}
+              disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
+              onSync={(ch, opts) =>
+                sync.syncShops(orgShopIds, [ch], { showBrowser: !!opts?.showBrowser })
+              }
+            />
+            <ChannelSyncButton
+              icon={<CalendarClock className="h-3 w-3" />}
+              label="シフト"
+              channel="shifts"
+              shopIds={orgShopIds}
+              disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
+              onSync={(ch, opts) =>
+                sync.syncShops(orgShopIds, [ch], { showBrowser: !!opts?.showBrowser })
+              }
+            />
+            <ChannelSyncButton
+              icon={<Newspaper className="h-3 w-3" />}
+              label="ブログ"
+              channel="blog"
+              shopIds={orgShopIds}
+              disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
+              onSync={(ch, opts) =>
+                sync.syncShops(orgShopIds, [ch], { showBrowser: !!opts?.showBrowser })
+              }
+            />
+            <span className="ml-1 text-[10px] text-ink-soft">
+              {selectedShopId
+                ? '選択中の店舗のみ実行'
+                : `この会社の連携店舗 ${orgShopIds.length} 件に実行`}
+            </span>
+          </div>
+
           {sync.isRunning && sync.lastRun && (
             <div className="mt-3 rounded-[10px] bg-brand-light/40 px-3 py-2 text-[11px] text-brand-700">
               <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />
@@ -181,7 +313,15 @@ export function SalonboardPage() {
             <div className="mt-3 flex items-start gap-2 rounded-[10px] bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
               <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                認証情報の編集は <strong>super_owner / admin</strong> ロールのみ可能です。閲覧モードで表示しています。
+                認証情報の編集は <strong>owner / shop_manager / admin / super_owner</strong> ロールのみ可能です。閲覧モードで表示しています。
+              </span>
+            </div>
+          )}
+          {!sync.ready && canEdit && (
+            <div className="mt-3 flex items-start gap-2 rounded-[10px] bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+              <span>
+                同期ワーカーを初期化しています… (Supabase セッション引き継ぎ中)
               </span>
             </div>
           )}
@@ -198,11 +338,19 @@ export function SalonboardPage() {
         <div className="flex items-center justify-center gap-2 py-10 text-[12px] text-ink-soft">
           <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
         </div>
+      ) : !selectedOrgId ? (
+        <Card>
+          <CardBody>
+            <p className="text-[12px] text-ink-soft">
+              右上で操作対象の会社を選択してください。
+            </p>
+          </CardBody>
+        </Card>
       ) : grouped.length === 0 ? (
         <Card>
           <CardBody>
             <p className="text-[12px] text-ink-soft">
-              閲覧可能な組織がありません。super_owner ロールでログインしてください。
+              この会社にはサロンボード連携対象の店舗がありません。
             </p>
           </CardBody>
         </Card>
@@ -245,7 +393,16 @@ export function SalonboardPage() {
                         syncStatus={sync.shopStatuses[s.shop_id]}
                         isRunning={sync.isRunning}
                         ready={sync.ready}
-                        onSync={() => void sync.syncShops([s.shop_id])}
+                        onSync={async (opts) => {
+                          const r = await sync.syncShops(
+                            [s.shop_id],
+                            opts?.channels,
+                            { showBrowser: !!opts?.showBrowser },
+                          );
+                          if (!r.ok && r.error) {
+                            alert(`同期を開始できませんでした: ${r.error}`);
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -254,6 +411,34 @@ export function SalonboardPage() {
             </Card>
           );
         })
+      )}
+
+      {/* Worker ログ (デバッグ用) */}
+      {sync.logs.length > 0 && (
+        <Card>
+          <CardHeader
+            title="同期ワーカーログ"
+            subtitle="直近 200 件まで保持。エラー時の手がかりに。"
+          />
+          <CardBody>
+            <div className="max-h-48 overflow-y-auto rounded-[10px] bg-slate-50 p-2 font-mono text-[10px] text-ink-soft">
+              {sync.logs.slice(-30).map((l, i) => (
+                <div
+                  key={i}
+                  className={
+                    l.level === 'error'
+                      ? 'text-red-700'
+                      : l.level === 'warn'
+                        ? 'text-amber-700'
+                        : 'text-ink-soft'
+                  }
+                >
+                  [{new Date(l.at).toLocaleTimeString('ja-JP')}] [{l.level}] {l.msg}
+                </div>
+              ))}
+            </div>
+          </CardBody>
+        </Card>
       )}
 
       {/* 同期実行履歴 */}
@@ -334,6 +519,56 @@ export function SalonboardPage() {
   );
 }
 
+/**
+ * チャネル別の同期ボタン。クリックでバックグラウンド同期。
+ * 右端の小さい「👁」を押すとブラウザを表示しながら同期する (デバッグ用)。
+ */
+function ChannelSyncButton({
+  icon,
+  label,
+  channel,
+  shopIds,
+  disabled,
+  onSync,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  channel: ChannelKey;
+  shopIds: string[];
+  disabled?: boolean;
+  onSync: (ch: ChannelKey, opts?: { showBrowser?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  return (
+    <span className="inline-flex overflow-hidden rounded-[8px] border border-brand-200 bg-white">
+      <button
+        type="button"
+        disabled={disabled || shopIds.length === 0}
+        onClick={async () => {
+          const r = await onSync(channel);
+          if (!r.ok && r.error) alert(`同期を開始できませんでした: ${r.error}`);
+        }}
+        title={`${label}のみを同期 (バックグラウンド)`}
+        className="inline-flex items-center gap-1 bg-brand-light/60 px-2.5 py-1 text-[11px] font-semibold text-brand-700 hover:bg-brand-light disabled:opacity-50"
+      >
+        {icon}
+        {label}
+      </button>
+      <button
+        type="button"
+        disabled={disabled || shopIds.length === 0}
+        onClick={async () => {
+          const r = await onSync(channel, { showBrowser: true });
+          if (!r.ok && r.error) alert(`同期を開始できませんでした: ${r.error}`);
+        }}
+        title={`${label}を「ブラウザ表示しながら」同期 (デバッグ用)`}
+        className="border-l border-brand-200 px-1.5 py-1 text-brand-700 hover:bg-brand-light/40 disabled:opacity-50"
+      >
+        <Eye className="h-3 w-3" />
+      </button>
+    </span>
+  );
+}
+
 function Stat({
   label,
   value,
@@ -373,7 +608,7 @@ function ShopCredentialCard({
   syncStatus?: import('../lib/sync-controller').ShopSyncStatus;
   isRunning: boolean;
   ready: boolean;
-  onSync: () => void;
+  onSync: (opts?: { showBrowser?: boolean; channels?: ChannelKey[] }) => void;
 }) {
   const linked = row.has_credential;
   const [busy, setBusy] = useState<'enable' | 'delete' | null>(null);
@@ -496,11 +731,22 @@ function ShopCredentialCard({
               <button
                 type="button"
                 disabled={!ready || isRunning || !row.enabled}
-                onClick={onSync}
+                onClick={() => onSync()}
                 className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
-                title={!row.enabled ? '停止中の店舗は同期できません' : '今すぐ同期'}
+                title={!row.enabled ? '停止中の店舗は同期できません' : '今すぐ同期 (バックグラウンド)'}
               >
                 <PlayCircle className="h-3 w-3" /> 同期
+              </button>
+            )}
+            {linked && (
+              <button
+                type="button"
+                disabled={!ready || isRunning || !row.enabled}
+                onClick={() => onSync({ showBrowser: true })}
+                className="inline-flex items-center gap-1 rounded-[8px] border border-brand-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-brand-700 hover:bg-brand-light/40 disabled:opacity-50"
+                title="ブラウザを表示しながら同期 (デバッグ用)"
+              >
+                <PlayCircle className="h-3 w-3" /> 表示同期
               </button>
             )}
             {linked && (
@@ -526,6 +772,45 @@ function ShopCredentialCard({
           </>
         )}
       </div>
+
+      {/* 項目別の同期 (店舗カード内) */}
+      {canEdit && linked && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-muted">
+            項目別
+          </span>
+          {(
+            [
+              { ch: 'bookings' as const, label: '予約', icon: <CalendarRange className="h-2.5 w-2.5" /> },
+              { ch: 'staff' as const, label: 'スタッフ', icon: <Users className="h-2.5 w-2.5" /> },
+              { ch: 'shifts' as const, label: 'シフト', icon: <CalendarClock className="h-2.5 w-2.5" /> },
+              { ch: 'blog' as const, label: 'ブログ', icon: <Newspaper className="h-2.5 w-2.5" /> },
+            ]
+          ).map(({ ch, label, icon }) => (
+            <span key={ch} className="inline-flex overflow-hidden rounded-[6px] border border-brand-200 bg-white">
+              <button
+                type="button"
+                disabled={!ready || isRunning || !row.enabled}
+                onClick={() => onSync({ channels: [ch] })}
+                title={`${label}のみを同期`}
+                className="inline-flex items-center gap-1 bg-brand-light/50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 hover:bg-brand-light disabled:opacity-50"
+              >
+                {icon}
+                {label}
+              </button>
+              <button
+                type="button"
+                disabled={!ready || isRunning || !row.enabled}
+                onClick={() => onSync({ channels: [ch], showBrowser: true })}
+                title={`${label}を表示しながら同期`}
+                className="border-l border-brand-200 px-1 py-0.5 text-brand-700 hover:bg-brand-light/40 disabled:opacity-50"
+              >
+                <Eye className="h-2.5 w-2.5" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       {actionErr && <p className="mt-2 text-[11px] text-red-700">{actionErr}</p>}
     </div>
   );
@@ -542,10 +827,39 @@ function EditModal({
 }) {
   const [loginId, setLoginId] = useState(row.login_id ?? '');
   const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
+  // パスワードは「入力ミスを目で確認したい」運用なのでデフォルトで平文表示
+  const [showPassword, setShowPassword] = useState(true);
   const [baseUrl, setBaseUrl] = useState(row.base_url ?? 'https://salonboard.com/login/');
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [revealing, setRevealing] = useState(row.has_credential);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  // 編集モードのとき、既存の login_id / password / base_url を RPC で取得して prefill。
+  // パスワードは pgsodium で暗号化されているが reveal RPC で復号できる
+  // (owner / shop_manager / admin / super_owner のみ)。
+  useEffect(() => {
+    if (!row.has_credential) {
+      setRevealing(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const r = await revealSalonboardCredentials(row.shop_id);
+      if (cancelled) return;
+      if (r.ok) {
+        setLoginId(r.loginId);
+        setPassword(r.password);
+        if (r.baseUrl) setBaseUrl(r.baseUrl);
+      } else {
+        setRevealError(r.error);
+      }
+      setRevealing(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [row.shop_id, row.has_credential]);
 
   async function save() {
     setErr(null);
@@ -554,7 +868,7 @@ function EditModal({
       return;
     }
     if (!password.trim()) {
-      setErr('パスワードを入力してください (再保存する場合も必須)');
+      setErr('パスワードを入力してください');
       return;
     }
     setPending(true);
@@ -610,23 +924,27 @@ function EditModal({
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoComplete="new-password"
+                autoComplete="off"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={row.has_credential ? '変更する場合のみ入力' : 'サロンボードのパスワード'}
-                className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 pr-10 text-[13px] outline-none focus:border-brand"
+                placeholder={revealing ? '既存パスワードを取得中…' : 'サロンボードのパスワード'}
+                disabled={revealing}
+                className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 pr-10 text-[13px] outline-none focus:border-brand disabled:bg-slate-50"
               />
               <button
                 type="button"
                 tabIndex={-1}
                 onClick={() => setShowPassword((v) => !v)}
                 className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-soft hover:text-ink"
+                title={showPassword ? 'パスワードを隠す' : 'パスワードを表示'}
               >
                 {showPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
             </div>
             <p className="mt-1 text-[10px] text-ink-soft">
-              ※ パスワードは Supabase 側で pgsodium により暗号化されます。
+              {revealError
+                ? `※ 既存パスワードを取得できませんでした (${revealError})。新しいパスワードを入力すれば上書きできます。`
+                : '※ パスワードは Supabase 側で pgsodium により暗号化されます。'}
             </p>
           </div>
           <div>

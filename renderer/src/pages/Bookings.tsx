@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2 } from 'lucide-react';
 import { Card } from '../components/Card';
-import { useAuth } from '../lib/auth-context';
+import { useEffectiveScope } from '../lib/selection-context';
 import { fetchRecentBookings, type BookingRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 
@@ -15,15 +15,14 @@ const FILTER_LABELS: Record<(typeof FILTERS)[number], string> = {
 };
 
 export function Bookings() {
-  const auth = useAuth();
+  const scope = useEffectiveScope();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('すべて');
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    if (auth.status !== 'signed-in') return;
-    const scope = auth.scope;
+    if (!scope) return;
     let cancelled = false;
     setLoading(true);
     fetchRecentBookings(scope, 7)
@@ -35,14 +34,20 @@ export function Bookings() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, auth.status === 'signed-in' ? auth.scope.shopId : null]);
+  }, [scope?.shopId, scope?.organizationId]);
+
+  const displayName = (b: BookingRow) =>
+    b.customers?.full_name ??
+    b.profiles?.full_name ??
+    b.customer_name ??
+    'ゲスト';
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return bookings.filter((b) => {
       if (filter !== 'すべて' && b.status !== filter) return false;
       if (q) {
-        const name = (b.profiles?.full_name ?? b.customer_name ?? '').toLowerCase();
+        const name = displayName(b).toLowerCase();
         const menu = (b.menus?.name ?? '').toLowerCase();
         if (!name.includes(q) && !menu.includes(q)) return false;
       }
@@ -127,9 +132,9 @@ export function Bookings() {
             <tbody className="divide-y divide-hairline/60">
               {filtered.map((b) => {
                 const status = bookingStatusJp(b.status);
-                const memberName = b.profiles?.full_name ?? null;
                 const isMember = !!b.user_id;
-                const displayName = memberName ?? b.customer_name ?? '名前未設定';
+                const customerName = displayName(b);
+                const staffName = b.salonboard_staff_name ?? b.staff?.full_name ?? '-';
                 return (
                   <tr key={b.id} className="transition hover:bg-brand-light/30">
                     <td className="px-5 py-3">
@@ -139,7 +144,7 @@ export function Bookings() {
                         ・{b.duration_min ?? 60}分
                       </div>
                     </td>
-                    <td className="px-3 py-3 font-semibold text-ink">{displayName}</td>
+                    <td className="px-3 py-3 font-semibold text-ink">{customerName}</td>
                     <td className="px-3 py-3">
                       <span
                         className={
