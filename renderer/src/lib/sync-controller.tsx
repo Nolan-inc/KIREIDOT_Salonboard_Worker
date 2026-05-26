@@ -145,11 +145,28 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     if (!accessToken || !refreshToken) return;
     let cancelled = false;
     (async () => {
+      // device 認証経由で /api/salonboard/device/credentials を叩くために、
+      // device_id / device_token / API base URL も Worker に渡す。
+      // .env.local に未設定なら未指定で渡し、Worker 側は warning を出す。
+      const apiBaseUrl =
+        import.meta.env.VITE_KIREIDOT_API_URL ??
+        import.meta.env.VITE_ADMIN_API_URL ??
+        '';
+      const deviceId = import.meta.env.VITE_SALONBOARD_DEVICE_ID ?? '';
+      const deviceToken = import.meta.env.VITE_SALONBOARD_DEVICE_TOKEN ?? '';
+      const workerId = import.meta.env.VITE_WORKER_ID ?? 'electron-worker';
+      const appVersion = import.meta.env.VITE_APP_VERSION ?? '';
+
       const r = await bridge.workerInit({
         url: import.meta.env.VITE_SUPABASE_URL ?? '',
         anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY ?? '',
         accessToken,
         refreshToken,
+        apiBaseUrl,
+        deviceId,
+        deviceToken,
+        workerId,
+        appVersion,
       });
       if (!cancelled) setReady(!!r?.ok);
     })();
@@ -209,14 +226,48 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
             ...cur,
             [msg.payload.shopId]: msg.payload.ok
               ? { state: 'success', summary: msg.payload.summary }
-              : { state: 'failed', error: msg.payload.error ?? 'unknown' },
+              : {
+                  state: 'failed',
+                  // userHint があれば人間向け案内を優先、無ければ error 原文
+                  error:
+                    (msg.payload.userHint && `${msg.payload.userHint}`) ||
+                    msg.payload.error ||
+                    'unknown',
+                },
           }));
+          // 失敗のうち再試行非推奨なものはユーザー向けログにも残す
+          if (
+            !msg.payload.ok &&
+            msg.payload.errorCode &&
+            ['captcha_detected', 'blocked', 'rate_limited', 'login_required'].includes(
+              msg.payload.errorCode,
+            )
+          ) {
+            setLogs((cur) =>
+              [
+                ...cur,
+                {
+                  at: new Date().toISOString(),
+                  level: 'warn' as const,
+                  msg: `[${msg.payload.errorCode}] ${msg.payload.userHint ?? msg.payload.error ?? ''}${
+                    msg.payload.blockedUntil
+                      ? ` (解除予定: ${new Date(msg.payload.blockedUntil).toLocaleString('ja-JP')})`
+                      : ''
+                  }`,
+                },
+              ].slice(-200),
+            );
+          }
           setLastRun((cur) => {
             if (!cur) return cur;
             return msg.payload.ok
               ? { ...cur, ok: cur.ok + 1 }
               : { ...cur, ng: cur.ng + 1 };
           });
+          break;
+        case 'shop:record':
+          // 監査用の構造化レコード。今は何も UI に出さないが、将来 device 状態カードや
+          // 履歴画面で参照する想定。現時点では log には流さない (ノイズ多いため)。
           break;
         case 'run:end':
           runningRef.current = false;

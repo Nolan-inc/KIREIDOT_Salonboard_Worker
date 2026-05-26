@@ -40,6 +40,57 @@ let running = false;
 let abortRequested = false;
 let currentBrowser = null;
 
+/**
+ * device 認証で /api/salonboard/device/credentials を叩くための設定。
+ * 親プロセス (main.cjs) からまとめて渡される。
+ *
+ *   apiBaseUrl  : Admin の URL (例: https://admin.example.com)
+ *   deviceId    : SALONBOARD_DEVICE_ID (uuid)
+ *   deviceToken : SALONBOARD_DEVICE_TOKEN (発行直後だけ表示される平文)
+ *   workerId    : 任意の識別子
+ *   appVersion  : 表示用
+ *   platform    : process.platform
+ *
+ * 旧 RPC `salonboard_reveal_credentials(shop_id)` を Supabase 直叩きで呼ぶのを
+ * 廃止し、Admin API 経由 (device scope 検証) に寄せる。
+ *
+ * 未設定の場合は revealCredentials が device 認証エラーで失敗させる。
+ */
+let deviceAuth = {
+  apiBaseUrl: null,
+  deviceId: null,
+  deviceToken: null,
+  workerId: 'electron-worker',
+  appVersion: null,
+  platform: process.platform,
+};
+
+/**
+ * shop_id 単位の in-progress lock。
+ *   key   : shop_id
+ *   value : { startedAt: epoch ms, workerLabel: string }
+ *
+ * 同じ shop_id の同期が裏で走っている間は、新規同期要求を skip する。
+ * lock は 20 分で stale 扱い (Playwright が固まったケースに備える)。
+ *
+ * プロセス再起動でこの Map は空になるので、要件「app再起動後に古いlockで詰まらないようにする」も満たす。
+ */
+const inProgressShops = new Map();
+const SHOP_LOCK_TTL_MS = 20 * 60_000;
+
+function tryAcquireShopLock(shopId, workerLabel) {
+  const now = Date.now();
+  const cur = inProgressShops.get(shopId);
+  if (cur && now - cur.startedAt < SHOP_LOCK_TTL_MS) {
+    return { ok: false, since: cur.startedAt, workerLabel: cur.workerLabel };
+  }
+  inProgressShops.set(shopId, { startedAt: now, workerLabel });
+  return { ok: true };
+}
+function releaseShopLock(shopId) {
+  inProgressShops.delete(shopId);
+}
+
 function emit(type, payload) {
   try {
     process.parentPort?.postMessage({ type, payload });
@@ -54,7 +105,17 @@ function log(msg, level = 'info') {
   console.log(`[worker:${level}] ${msg}`);
 }
 
-async function initSupabase({ url, anonKey, accessToken, refreshToken }) {
+async function initSupabase({
+  url,
+  anonKey,
+  accessToken,
+  refreshToken,
+  apiBaseUrl,
+  deviceId,
+  deviceToken,
+  workerId,
+  appVersion,
+}) {
   if (!url || !anonKey) {
     throw new Error('Supabase URL / anon key が空です。.env.local の VITE_SUPABASE_URL を確認してください');
   }
@@ -74,6 +135,25 @@ async function initSupabase({ url, anonKey, accessToken, refreshToken }) {
   // 親プロセス (renderer/main) で取得したセッションをそのまま注入する。
   // これで RLS が super_owner / admin として評価される。
   await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+
+  // device 認証で credentials を取りに行く先を覚えておく。
+  // どれか欠けていると revealCredentials が必ず失敗する (= 同期不能になる) ので、
+  // ここで明示ログだけ出して受理 (v0.3.0 で必須化する)。
+  deviceAuth = {
+    apiBaseUrl: (apiBaseUrl || '').replace(/\/+$/, '') || null,
+    deviceId: deviceId || null,
+    deviceToken: deviceToken || null,
+    workerId: workerId || 'electron-worker',
+    appVersion: appVersion || null,
+    platform: process.platform,
+  };
+  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+    log(
+      'device 認証情報が未設定です (apiBaseUrl/deviceId/deviceToken)。credential 取得に失敗します。',
+      'warn',
+    );
+  }
+
   initReady = true;
 }
 
@@ -110,21 +190,87 @@ async function fetchTargets(shopIds) {
   });
 }
 
+/**
+ * 店舗の SalonBoard 認証情報を Admin API 経由で取得する。
+ *
+ * v0.2.2 で旧 RPC `salonboard_reveal_credentials(shop_id)` の Supabase 直叩きを
+ * 廃止し、device scope を通る Admin API:
+ *   POST /api/salonboard/device/credentials
+ * に切り替えた。
+ *
+ * device 認証ヘッダ:
+ *   Authorization: Bearer <SALONBOARD_DEVICE_TOKEN>
+ *   X-Device-Id:   <uuid>
+ *   X-Worker-Id:   <任意>
+ *   X-App-Version: <表示用>
+ *   X-Platform:    <process.platform>
+ *
+ * 失敗時は分かるエラーを投げる:
+ *   - device_auth_missing : Electron 側に device 認証 env が無い
+ *   - device_unauthorized : 401
+ *   - credentials_not_set / credentials_disabled / blocked / consent_missing /
+ *     shop_not_allowed / credentials_not_revealable : 403/404
+ *   - http_error          : 5xx
+ *   - network_error       : fetch 失敗 (タイムアウト等)
+ *
+ * これらは processShop 側で error_code として分類される。
+ */
 async function revealCredentials(shopId) {
-  const { data, error } = await supabase.rpc('salonboard_reveal_credentials', {
-    p_shop_id: shopId,
-  });
-  if (error) throw new Error(`reveal: ${error.message}`);
-  const row = (data ?? [])[0];
-  if (!row) throw new Error('credentials not found');
+  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+    const e = new Error('device_auth_missing');
+    e.code = 'device_auth_missing';
+    throw e;
+  }
+
+  const url = `${deviceAuth.apiBaseUrl}/api/salonboard/device/credentials`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${deviceAuth.deviceToken}`,
+        'X-Device-Id': deviceAuth.deviceId,
+        'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
+        ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
+        'X-Platform': deviceAuth.platform ?? process.platform,
+      },
+      body: JSON.stringify({ shop_id: shopId }),
+    });
+  } catch (e) {
+    const err = new Error(`network_error: ${e?.message ?? e}`);
+    err.code = 'network_error';
+    throw err;
+  }
+
+  if (!res.ok) {
+    let json;
+    try {
+      json = await res.json();
+    } catch (_e) {
+      json = null;
+    }
+    const code = (json && json.error) || `http_${res.status}`;
+    const err = new Error(`reveal failed: ${code}`);
+    err.code = code;
+    err.status = res.status;
+    if (json && json.blocked_until) err.blockedUntil = json.blocked_until;
+    throw err;
+  }
+
+  const row = await res.json();
+  if (!row || !row.login_id) {
+    const err = new Error('credentials_not_revealable');
+    err.code = 'credentials_not_revealable';
+    throw err;
+  }
+
   // base_url の正規化: 末尾スラッシュのみだったり login パスが抜けていると
   // 「https://salonboard.com/」 にアクセスしてしまって遅延・タイムアウトになる。
-  // 既定値 = ログイン画面 URL に揃える。
-  let baseUrl = (row.base_url ?? '').trim();
+  let baseUrl = String(row.base_url ?? '').trim();
   if (!baseUrl || baseUrl === 'https://salonboard.com' || baseUrl === 'https://salonboard.com/') {
     baseUrl = 'https://salonboard.com/login/';
   }
-  // 「/」だけで終わる場合に /login/ を補う
   if (/^https?:\/\/[^/]+\/?$/i.test(baseUrl)) {
     baseUrl = baseUrl.replace(/\/?$/, '/') + 'login/';
   }
@@ -142,6 +288,21 @@ async function revealCredentials(shopId) {
 async function processShop(target, channels, runId, opts = {}) {
   const { shop_id: shopId, shop_name: shopName, organization_name: orgName } = target;
   const showBrowser = !!opts.showBrowser;
+
+  // 多重起動防止: 同じ shop_id がすでに同期中なら skip
+  const lock = tryAcquireShopLock(shopId, deviceAuth.workerId ?? 'electron-worker');
+  if (!lock.ok) {
+    const sinceSec = Math.round((Date.now() - lock.since) / 1000);
+    emit('shop:start', { shopId, shopName, orgName, channels });
+    emit('shop:end', {
+      shopId,
+      ok: false,
+      error: `同期中です (約${sinceSec}秒前から)。完了まで待ってください。`,
+      errorCode: 'already_in_progress',
+    });
+    return { ok: false, errorCode: 'already_in_progress' };
+  }
+
   emit('shop:start', { shopId, shopName, orgName, channels });
   const counts = { bookings: 0, staff: 0, blogs: 0, customers: 0 };
 
@@ -149,9 +310,21 @@ async function processShop(target, channels, runId, opts = {}) {
   try {
     creds = await revealCredentials(shopId);
   } catch (e) {
-    emit('shop:end', { shopId, ok: false, error: `credentials: ${e.message}` });
-    await recordShopRun(runId, shopId, false, null, `credentials: ${e.message}`, counts);
-    return { ok: false };
+    // credentials 失敗も classifyError で分類して、ロック解除
+    const classified = classifyError(e);
+    const blockedUntil = blockedUntilForCode(classified.code);
+    await markCredentialError(shopId, e.message ?? String(e), blockedUntil, classified.code);
+    emit('shop:end', {
+      shopId,
+      ok: false,
+      error: `credentials: ${e.message ?? e}`,
+      errorCode: classified.code,
+      userHint: classified.userHint,
+      blockedUntil,
+    });
+    await recordShopRun(runId, shopId, false, null, `credentials: ${e.message ?? e}`, counts);
+    releaseShopLock(shopId);
+    return { ok: false, errorCode: classified.code };
   }
 
   // showBrowser=true のときは headful (ブラウザ画面を表示)、slowMo で動きを見やすく。
@@ -221,31 +394,43 @@ async function processShop(target, channels, runId, opts = {}) {
     emit('shop:progress', { shopId, step: 'login', msg: `${creds.baseUrl} に接続中` });
 
     // 1) 既存セッションが有効なら tryLogin を完全にスキップ (bot 検知/reCAPTCHA 回避)
+    // session_expired のときは「1 回だけ」再ログインする (連打しない)
     let needsLogin = true;
+    let sessionReused = false;
+    let sessionExpiredFlag = false;
     if (initialStorage) {
       try {
         const sessionState = await isLoggedIn(page, creds.baseUrl);
         if (sessionState === 'logged_in') {
           needsLogin = false;
+          sessionReused = true;
           emit('shop:progress', {
             shopId,
             step: 'login',
             msg: '既存セッションで継続 (ログインスキップ)',
           });
         } else if (sessionState === 'captcha') {
-          // captcha 検知 → セッションも怪しいので破棄し、ブロック扱い
+          // captcha 検知 → セッション破棄 + 6h ブロック (再ログイン連打しない)
           clearStorageState(ssPath);
-          const blockedUntil = new Date(Date.now() + 6 * 3600_000).toISOString();
-          await markCredentialError(shopId, 'captcha_detected', blockedUntil);
+          const blockedUntil = blockedUntilForCode('captcha_detected');
+          await markCredentialError(
+            shopId,
+            'reCAPTCHA encountered at landing',
+            blockedUntil,
+            'captcha_detected',
+          );
           emit('shop:end', {
             shopId,
             ok: false,
             error: 'reCAPTCHA を検知しました (6 時間ブロック)',
+            errorCode: 'captcha_detected',
+            blockedUntil,
           });
           await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
-          return { ok: false };
+          return { ok: false, errorCode: 'captcha_detected' };
         } else if (sessionState === 'needs_login') {
-          // セッション切れ → 通常ログインに進む
+          // セッション切れ → 1 回だけ再ログイン (連打しない)
+          sessionExpiredFlag = true;
           clearStorageState(ssPath);
         }
       } catch (_e) {
@@ -253,28 +438,60 @@ async function processShop(target, channels, runId, opts = {}) {
       }
     }
 
-    // 2) 必要なときだけログイン
+    // 2) 必要なときだけログイン (session_expired のときも合計 1 回)
+    let loginAttempted = false;
     if (needsLogin) {
+      loginAttempted = true;
       const r = await tryLogin(page, creds);
       if (r.status === 'captcha') {
         clearStorageState(ssPath);
-        const blockedUntil = new Date(Date.now() + 6 * 3600_000).toISOString();
-        await markCredentialError(shopId, 'captcha_detected', blockedUntil);
-        emit('shop:end', { shopId, ok: false, error: 'reCAPTCHA を検知しました (6 時間ブロック)' });
+        const blockedUntil = blockedUntilForCode('captcha_detected');
+        await markCredentialError(
+          shopId,
+          'reCAPTCHA encountered during login',
+          blockedUntil,
+          'captcha_detected',
+        );
+        emit('shop:end', {
+          shopId,
+          ok: false,
+          error: 'reCAPTCHA を検知しました (6 時間ブロック)',
+          errorCode: 'captcha_detected',
+          blockedUntil,
+        });
         await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
-        return { ok: false };
+        return { ok: false, errorCode: 'captcha_detected' };
       }
       if (r.status === 'failed') {
+        // session_expired → 再ログイン失敗 = login_required
+        // 通常 login 失敗 → reason から推測 (classifyError と同じルール)
+        const code = sessionExpiredFlag
+          ? 'login_required'
+          : classifyError(new Error(r.reason ?? 'login_failed')).code;
         clearStorageState(ssPath);
-        await markCredentialError(shopId, r.reason ?? 'login_failed', null);
-        emit('shop:end', { shopId, ok: false, error: r.reason ?? 'ログイン失敗' });
+        const blockedUntil = blockedUntilForCode(code);
+        await markCredentialError(shopId, r.reason ?? 'login_failed', blockedUntil, code);
+        emit('shop:end', {
+          shopId,
+          ok: false,
+          error: r.reason ?? 'ログイン失敗',
+          errorCode: code,
+          blockedUntil,
+        });
         await recordShopRun(runId, shopId, false, null, r.reason ?? 'login_failed', counts);
-        return { ok: false };
+        return { ok: false, errorCode: code };
       }
       emit('shop:progress', { shopId, step: 'login', msg: 'ログイン成功' });
       // 成功 → storageState を保存
       await saveStorageState(ctx, ssPath);
     }
+
+    // 監査用フラグ (作業6 のログ拡張で使う)
+    counts._meta = {
+      storage_state_used: !!initialStorage,
+      session_reused: sessionReused,
+      login_attempted: loginAttempted,
+    };
 
     // ---- スクレイピング本体 (channels で選択された分だけ) ----
     const channelSet = new Set(channels);
@@ -393,13 +610,112 @@ async function processShop(target, channels, runId, opts = {}) {
     return { ok: true };
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
-    await markCredentialError(shopId, errMsg, null);
-    emit('shop:end', { shopId, ok: false, error: errMsg });
+    const classified = classifyError(e);
+    const blockedUntil = blockedUntilForCode(classified.code);
+    await markCredentialError(shopId, errMsg, blockedUntil, classified.code);
+    emit('shop:end', {
+      shopId,
+      ok: false,
+      error: errMsg,
+      errorCode: classified.code,
+      userHint: classified.userHint,
+      blockedUntil,
+    });
     await recordShopRun(runId, shopId, false, null, errMsg, counts);
-    return { ok: false };
+    return { ok: false, errorCode: classified.code };
   } finally {
     await browser.close().catch(() => {});
     currentBrowser = null;
+    releaseShopLock(shopId);
+  }
+}
+
+/**
+ * 例外を以下のいずれかに分類する:
+ *   captcha_detected / blocked / rate_limited / login_required /
+ *   session_expired / non_retryable_failed / retryable_failed
+ *
+ * 既知の Playwright / fetch エラーメッセージから判定。
+ * 未知のものは retryable_failed として扱う (=ネット系想定で短期再試行可能)。
+ */
+function classifyError(e) {
+  if (!e) return { code: 'retryable_failed', userHint: '不明なエラー' };
+  if (typeof e === 'object' && e.code) {
+    // revealCredentials が code を付けて投げてきたケース
+    switch (e.code) {
+      case 'blocked':
+        return {
+          code: 'blocked',
+          userHint:
+            '店舗のSalonBoard連携は一時的にブロックされています。' +
+            (e.blockedUntil ? `${e.blockedUntil} まで停止中。` : '時間をおいて再試行してください。'),
+        };
+      case 'credentials_disabled':
+        return {
+          code: 'non_retryable_failed',
+          userHint: '店舗のSalonBoard連携が無効化されています (admin/salonboard で確認)',
+        };
+      case 'consent_missing':
+        return {
+          code: 'non_retryable_failed',
+          userHint: 'SalonBoard連携の利用同意が登録されていません',
+        };
+      case 'credentials_not_set':
+        return {
+          code: 'non_retryable_failed',
+          userHint: 'SalonBoardのログイン情報が未設定です',
+        };
+      case 'shop_not_allowed':
+      case 'device_unauthorized':
+      case 'device_auth_missing':
+      case 'http_401':
+        return {
+          code: 'login_required',
+          userHint: 'このデバイスはこの店舗のSalonBoard連携を扱えません。管理者に確認してください',
+        };
+      case 'network_error':
+        return { code: 'retryable_failed', userHint: 'ネットワーク不調。時間をおいて再試行' };
+    }
+  }
+  const msg = (e?.message ?? String(e)).toLowerCase();
+  // captcha
+  if (/captcha|recaptcha|不審なアクセス|ロボット|画像認証/i.test(e?.message ?? '')) {
+    return { code: 'captcha_detected', userHint: 'reCAPTCHA を検知しました。手動確認が必要です' };
+  }
+  // 429 / rate limit
+  if (/\b429\b|too many requests|アクセスが集中|しばらく時間をおいて|rate.?limit/i.test(e?.message ?? '')) {
+    return { code: 'rate_limited', userHint: 'アクセス制限です。しばらく時間を空けてください' };
+  }
+  // 403 / blocked
+  if (/\b403\b|forbidden|アカウントロック|アクセス.*制限|一時的に利用できない|不正なアクセス/i.test(e?.message ?? '')) {
+    return { code: 'blocked', userHint: 'SalonBoard側で一時ブロックされています' };
+  }
+  // login_required
+  if (/login.*fail|invalid.*(password|userid|loginid|credential)|認証情報|ログインに失敗|ログイン.*失敗/i.test(e?.message ?? '')) {
+    return { code: 'login_required', userHint: 'ログイン情報の確認が必要です' };
+  }
+  // session 切れ
+  if (/session|セッション|再ログイン|タイムアウト/i.test(e?.message ?? '')) {
+    return { code: 'session_expired', userHint: 'セッションが切れました。再ログインが必要です' };
+  }
+  // タイムアウトやネット系
+  if (msg.includes('timeout') || msg.includes('econnreset') || msg.includes('econnrefused')) {
+    return { code: 'retryable_failed', userHint: '一時的なネットワークエラー' };
+  }
+  return { code: 'retryable_failed', userHint: '不明なエラー (ログ参照)' };
+}
+
+function blockedUntilForCode(code) {
+  const now = Date.now();
+  switch (code) {
+    case 'captcha_detected':
+      return new Date(now + 6 * 3600_000).toISOString(); // 6h
+    case 'blocked':
+      return new Date(now + 6 * 3600_000).toISOString(); // 6h
+    case 'rate_limited':
+      return new Date(now + 3 * 3600_000).toISOString(); // 3h
+    default:
+      return null; // login_required / non_retryable_failed / retryable_failed は blocked にしない
   }
 }
 
@@ -407,16 +723,46 @@ async function processShop(target, channels, runId, opts = {}) {
 async function recordShopRun(runId, shopId, ok, summary, error, counts) {
   if (!runId) return;
   try {
+    // ログ強化 (作業6): meta 情報を summary 末尾に JSON 付記。
+    // DB スキーマ変更を伴わずに device_id / storage_state_used / session_reused /
+    // login_attempted / error_code を追跡可能にする。
+    const meta = {
+      worker_id: deviceAuth.workerId ?? 'electron-worker',
+      device_id: deviceAuth.deviceId ?? null,
+      app_version: deviceAuth.appVersion ?? null,
+      platform: deviceAuth.platform ?? process.platform,
+      storage_state_used: counts?._meta?.storage_state_used ?? null,
+      session_reused: counts?._meta?.session_reused ?? null,
+      login_attempted: counts?._meta?.login_attempted ?? null,
+    };
+    const summaryWithMeta =
+      (summary ?? '') + ` [meta:${JSON.stringify(meta)}]`;
+
     await supabase.rpc('salonboard_run_record_shop', {
       p_run_id: runId,
       p_shop_id: shopId,
       p_ok: ok,
-      p_summary: summary,
+      p_summary: summaryWithMeta.slice(0, 2000),
       p_error: error,
       p_bookings_count: counts?.bookings ?? 0,
       p_staff_count: counts?.staff ?? 0,
       p_blogs_count: counts?.blogs ?? 0,
       p_customers_count: counts?.customers ?? 0,
+    });
+
+    // 構造化ログを Electron UI 側でも見られるように emit
+    emit('shop:record', {
+      shopId,
+      ok,
+      summary,
+      error,
+      counts: {
+        bookings: counts?.bookings ?? 0,
+        staff: counts?.staff ?? 0,
+        blogs: counts?.blogs ?? 0,
+        customers: counts?.customers ?? 0,
+      },
+      meta,
     });
   } catch (_e) {
     /* 履歴記録失敗は致命的でないので無視 */
@@ -778,7 +1124,7 @@ async function markCredentialSuccess(shopId) {
   }
 }
 
-async function markCredentialError(shopId, reason, blockedUntil) {
+async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
   try {
     // consecutive_failures はインクリメントしたいので、いったん最新値を取得して +1
     const { data: cur } = await supabase
@@ -787,8 +1133,11 @@ async function markCredentialError(shopId, reason, blockedUntil) {
       .eq('shop_id', shopId)
       .maybeSingle();
     const next = (cur?.consecutive_failures ?? 0) + 1;
+    // DB スキーマには last_error_code 列がまだ無いので、prefix で残す。
+    // 例: "[captcha_detected] reCAPTCHA encountered during login"
+    const prefixed = errorCode ? `[${errorCode}] ${String(reason)}` : String(reason);
     const update = {
-      last_error: String(reason).slice(0, 500),
+      last_error: prefixed.slice(0, 500),
       last_error_at: new Date().toISOString(),
       consecutive_failures: next,
     };

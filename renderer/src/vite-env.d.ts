@@ -38,7 +38,42 @@ type WorkerEvent =
     }
   | {
       type: 'shop:end';
-      payload: { shopId: string; ok: boolean; summary?: string; error?: string };
+      payload: {
+        shopId: string;
+        ok: boolean;
+        summary?: string;
+        error?: string;
+        /**
+         * 失敗時に worker-process.cjs が classifyError で分類した状態コード。
+         * 'captcha_detected' | 'blocked' | 'rate_limited' | 'session_expired'
+         * | 'login_required' | 'non_retryable_failed' | 'retryable_failed'
+         * | 'already_in_progress'
+         */
+        errorCode?: string;
+        /** UI に表示する人間向け案内 (classifyError の userHint) */
+        userHint?: string;
+        /** captcha / blocked / rate_limited の場合の解除予定時刻 (ISO) */
+        blockedUntil?: string | null;
+      };
+    }
+  | {
+      type: 'shop:record';
+      payload: {
+        shopId: string;
+        ok: boolean;
+        summary?: string | null;
+        error?: string | null;
+        counts: { bookings: number; staff: number; blogs: number; customers: number };
+        meta: {
+          worker_id: string;
+          device_id: string | null;
+          app_version: string | null;
+          platform: string;
+          storage_state_used: boolean | null;
+          session_reused: boolean | null;
+          login_attempted: boolean | null;
+        };
+      };
     }
   | { type: 'exited'; payload: { code: number | null } };
 
@@ -61,12 +96,22 @@ interface Window {
     /** 手動でアップデート確認を実行する。結果は onUpdaterStatus 経由で受け取る。 */
     checkForUpdate: () => Promise<{ ok: boolean; reason?: string }>;
 
-    /** worker (utilityProcess) を Supabase セッション付きで初期化 */
+    /**
+     * worker (utilityProcess) を Supabase セッション + device 認証情報付きで初期化。
+     * device 認証情報 (apiBaseUrl/deviceId/deviceToken) は credential 取得を
+     * Admin API 経由 (/api/salonboard/device/credentials) に寄せるために使う。
+     * v0.2.2 で追加。未設定でも worker は起動するが credential 取得が必ず失敗する。
+     */
     workerInit: (payload: {
       url: string;
       anonKey: string;
       accessToken: string;
       refreshToken: string;
+      apiBaseUrl?: string;
+      deviceId?: string;
+      deviceToken?: string;
+      workerId?: string;
+      appVersion?: string;
     }) => Promise<{ ok: boolean }>;
     /** 同期実行: shopIds 未指定で全店舗 */
     workerSync: (payload: {
