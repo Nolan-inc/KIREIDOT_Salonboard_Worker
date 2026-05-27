@@ -241,44 +241,83 @@ async function fetchDeviceOverview() {
  * 同期対象の店舗一覧を取得 (enabled かつ未ブロック)。
  *  - shopIds が指定されている場合はその店舗だけ
  *
- * v0.2.3: salonboard_credentials_overview の Supabase 直読みを廃止し、
- * Admin API (/api/salonboard/device/overview) 経由に変更。Electron 側に
- * super_owner/admin 相当の権限を要求しないよう、device token 認証で済む形に揃える。
- *
- * 戻り値は従来の形 ({shop_id, shop_name, organization_name, organization_id,
- * enabled, blocked_until, has_credential}) を維持。
+ * v0.2.3: Admin API (/api/salonboard/device/overview) 経由に変更。
+ * v0.2.4: device 未設定の店舗PCを救済するため、device_auth_missing /
+ *         network_error のときに限り旧 salonboard_credentials_overview 直読みに
+ *         fallback する。auth 系拒否 (device_unauthorized など) では fallback しない
+ *         (= 故意に無効化された device に旧経路で動かれては困るため)。
  */
+let _fetchTargetsFallbackWarned = false;
 async function fetchTargets(shopIds) {
   const overview = await fetchDeviceOverview();
-  if (!overview.ok) {
+
+  if (overview.ok) {
+    const orgName = overview.device?.organization_id ?? null;
+    const now = Date.now();
+    const rows = (overview.shops ?? []).filter((s) => {
+      if (s.credential_status === 'missing') return false;
+      if (s.enabled === false) return false;
+      if (s.blocked_until && new Date(s.blocked_until).getTime() > now) return false;
+      return true;
+    });
+    const filtered = Array.isArray(shopIds) && shopIds.length > 0
+      ? rows.filter((r) => shopIds.includes(r.shop_id))
+      : rows;
+    return filtered.map((s) => ({
+      shop_id: s.shop_id,
+      shop_name: s.shop_name,
+      organization_id: s.organization_id,
+      organization_name: orgName,
+      has_credential: true,
+      enabled: !!s.enabled,
+      blocked_until: s.blocked_until ?? null,
+    }));
+  }
+
+  // ----- fallback (v0.2.4) -----
+  const safeFallbackCodes = new Set([
+    'device_auth_missing',
+    'network_error',
+    'http_500',
+    'http_502',
+    'http_503',
+    'http_504',
+  ]);
+  if (!safeFallbackCodes.has(String(overview.code ?? ''))) {
+    // 401/403 など「故意に拒否された」ケースは fallback しない
     throw new Error(
-      `fetchTargets via /overview API failed: ${overview.code}${
+      `fetchTargets via /overview API rejected: ${overview.code}${
         overview.error ? ` (${overview.error})` : ''
       }`
     );
   }
-  const orgName = overview.device?.organization_id ?? null;
+
+  if (!_fetchTargetsFallbackWarned) {
+    log(
+      `device API 利用不可 (${overview.code})。旧 Supabase 直読みに fallback します (要 device 設定)`,
+      'warn',
+    );
+    _fetchTargetsFallbackWarned = true;
+  }
+
+  // 旧経路: salonboard_credentials_overview を直接読む (Supabase auth セッションの権限で)
+  let q = supabase
+    .from('salonboard_credentials_overview')
+    .select(
+      'organization_id, organization_name, shop_id, shop_name, has_credential, enabled, blocked_until'
+    );
+  q = q.eq('has_credential', true);
+  if (Array.isArray(shopIds) && shopIds.length > 0) {
+    q = q.in('shop_id', shopIds);
+  }
+  const { data, error } = await q;
+  if (error) throw new Error(`fetchTargets fallback failed: ${error.message}`);
   const now = Date.now();
-  // overview の shop は credential が無い shop も含むので、ここで絞り込み:
-  //   credential_status === 'active' AND enabled === true AND blocked_until が未来でない
-  const rows = (overview.shops ?? []).filter((s) => {
-    if (s.credential_status === 'missing') return false;
-    if (s.enabled === false) return false;
-    if (s.blocked_until && new Date(s.blocked_until).getTime() > now) return false;
+  return (data ?? []).filter((r) => {
+    if (!r.enabled) return false;
+    if (r.blocked_until && new Date(r.blocked_until).getTime() > now) return false;
     return true;
   });
-  const filtered = Array.isArray(shopIds) && shopIds.length > 0
-    ? rows.filter((r) => shopIds.includes(r.shop_id))
-    : rows;
-  return filtered.map((s) => ({
-    shop_id: s.shop_id,
-    shop_name: s.shop_name,
-    organization_id: s.organization_id,
-    organization_name: orgName, // overview API は org name を持っていないので null 許容
-    has_credential: true,
-    enabled: !!s.enabled,
-    blocked_until: s.blocked_until ?? null,
-  }));
 }
 
 /**
@@ -306,12 +345,52 @@ async function fetchTargets(shopIds) {
  *
  * これらは processShop 側で error_code として分類される。
  */
+/**
+ * 旧 RPC を使った credentials 取得 (v0.2.4 fallback 用)。
+ * device 認証情報が無い店舗PCで同期を継続するためのみに使う。
+ * Supabase auth セッションの権限 (super_owner / admin / owner / shop_manager) で
+ * RLS を通る前提。
+ */
+async function revealCredentialsLegacy(shopId) {
+  const { data, error } = await supabase.rpc('salonboard_reveal_credentials', {
+    p_shop_id: shopId,
+  });
+  if (error) {
+    const e = new Error(`legacy reveal failed: ${error.message}`);
+    e.code = 'legacy_reveal_failed';
+    throw e;
+  }
+  const row = Array.isArray(data) && data[0] ? data[0] : null;
+  if (!row) {
+    const e = new Error('credentials_not_revealable');
+    e.code = 'credentials_not_revealable';
+    throw e;
+  }
+  return row;
+}
+
+let _revealFallbackWarned = false;
 async function revealCredentials(shopId) {
   const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
+
+  // device 未設定 → 旧 RPC fallback (v0.2.4)
   if (!headers) {
-    const e = new Error('device_auth_missing');
-    e.code = 'device_auth_missing';
-    throw e;
+    if (!_revealFallbackWarned) {
+      log(
+        'device 認証未設定のため、credentials 取得を旧 RPC fallback で実行します (要 device 設定)',
+        'warn',
+      );
+      _revealFallbackWarned = true;
+    }
+    const row = await revealCredentialsLegacy(shopId);
+    let baseUrl = String(row.base_url ?? '').trim();
+    if (!baseUrl || baseUrl === 'https://salonboard.com' || baseUrl === 'https://salonboard.com/') {
+      baseUrl = 'https://salonboard.com/login/';
+    }
+    if (/^https?:\/\/[^/]+\/?$/i.test(baseUrl)) {
+      baseUrl = baseUrl.replace(/\/?$/, '/') + 'login/';
+    }
+    return { loginId: row.login_id, password: row.password, baseUrl };
   }
 
   const url = `${deviceAuth.apiBaseUrl}/api/salonboard/device/credentials`;
@@ -323,9 +402,29 @@ async function revealCredentials(shopId) {
       body: JSON.stringify({ shop_id: shopId }),
     });
   } catch (e) {
-    const err = new Error(`network_error: ${e?.message ?? e}`);
-    err.code = 'network_error';
-    throw err;
+    // API 自体に到達できない (オフライン等) → fallback
+    if (!_revealFallbackWarned) {
+      log(
+        `device API 疎通不可、旧 RPC fallback で credentials 取得を試みます: ${e?.message ?? e}`,
+        'warn',
+      );
+      _revealFallbackWarned = true;
+    }
+    try {
+      const row = await revealCredentialsLegacy(shopId);
+      let baseUrl = String(row.base_url ?? '').trim();
+      if (!baseUrl || baseUrl === 'https://salonboard.com' || baseUrl === 'https://salonboard.com/') {
+        baseUrl = 'https://salonboard.com/login/';
+      }
+      if (/^https?:\/\/[^/]+\/?$/i.test(baseUrl)) {
+        baseUrl = baseUrl.replace(/\/?$/, '/') + 'login/';
+      }
+      return { loginId: row.login_id, password: row.password, baseUrl };
+    } catch (e2) {
+      const err = new Error(`network_error: ${e?.message ?? e}`);
+      err.code = 'network_error';
+      throw err;
+    }
   }
 
   if (!res.ok) {

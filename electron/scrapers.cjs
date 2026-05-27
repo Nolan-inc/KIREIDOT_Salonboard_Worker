@@ -658,7 +658,7 @@ async function scrapeBookings(page, opts = {}) {
       amount: parseYen(it.amount_raw),
       status,
       staff_name: cleanText(it.staff_raw),
-      staff_external_id: null,
+      staff_external_id: it.staff_external_id ?? null,
       reservation_route: cleanText(it.route_raw) || null,
       payment_method_label: cleanText(it.payment_raw) || null,
       coupon_name: cleanText(it.coupon_raw) || null,
@@ -833,11 +833,35 @@ async function extractBookingItemsFromCurrentPage(page) {
           }
         }
 
+        // スタッフセル内のリンクから W001xxx 等の外部 ID を拾う
+        let staffExtId = null;
+        if (idx.staff >= 0 && tds[idx.staff]) {
+          const staffLinks = Array.from(
+            tds[idx.staff].querySelectorAll('a[href]'),
+          );
+          for (const sl of staffLinks) {
+            const href = sl.getAttribute('href') || '';
+            const m =
+              href.match(/(?:staffId|stylistId)=([WNwn]\d{4,})/) ||
+              href.match(/([WNwn]\d{6,})/);
+            if (m) {
+              staffExtId = (m[1] || '').toUpperCase();
+              break;
+            }
+          }
+        }
+        // 行全体からも保険でサーチ
+        if (!staffExtId) {
+          const m = rowText.match(/(?:staffId|stylistId)=([WNwn]\d{4,})/);
+          if (m) staffExtId = m[1].toUpperCase();
+        }
+
         return {
           datetime_raw: datetimeRaw,
           customer_raw: customerRaw,
           menu_raw: idx.menu >= 0 ? cells[idx.menu] : '',
           staff_raw: idx.staff >= 0 ? cells[idx.staff] : '',
+          staff_external_id: staffExtId,
           amount_raw: idx.amount >= 0 ? cells[idx.amount] : '',
           duration_raw: idx.duration >= 0 ? cells[idx.duration] : '',
           status_raw: idx.status >= 0 ? cells[idx.status] : '',
@@ -886,49 +910,75 @@ async function scrapeStaff(page) {
     function attr(el, name) {
       return el ? el.getAttribute(name) : null;
     }
-    // スタッフカードは div/li 単位で並んでいる想定。
-    // 名前を含むテキスト要素 + 写真 + 編集リンクを持つブロックを抽出。
-    const candidates = Array.from(
-      document.querySelectorAll(
-        '[class*="staff" i], [data-staff-id], li.staffItem, .staff-list-item, table tr',
-      ),
+    /**
+     * SalonBoard スタッフ詳細リンクから外部 ID を取り出す。
+     * 想定 URL: ...staffDetail?staffId=W001234... / ...stylistId=W001xxx
+     * 形式: 「W」または「N」+ 数字 6 桁以上 を必ず要求。
+     */
+    function extractStaffId(href) {
+      if (!href) return null;
+      // クエリ
+      const m1 = href.match(/(?:staffId|stylistId)=([WNwn]\d{4,})/);
+      if (m1) return m1[1].toUpperCase();
+      // パス末尾
+      const m2 = href.match(/[WNwn]\d{6,}/);
+      if (m2) return m2[0].toUpperCase();
+      return null;
+    }
+
+    // 真の「スタッフ詳細リンク」を持つ要素を全部集める。
+    // これによってキャッチコピーや見出しだけのブロックを誤検出しない。
+    const links = Array.from(
+      document.querySelectorAll('a[href*="staffDetail"], a[href*="stylistDetail"]'),
     );
     const items = [];
-    for (const node of candidates) {
-      const nameEl =
-        node.querySelector('[class*="name" i]') ||
-        node.querySelector('h2, h3, .ttl, .staff-name');
-      const name = txt(nameEl) || (txt(node).split('\n')[0] ?? '').trim();
-      if (!name || name.length > 40) continue;
-      const photo = node.querySelector('img');
-      const link =
-        node.querySelector('a[href*="staffDetail"], a[href*="staff"]') || node.querySelector('a[href]');
-      const positionEl = node.querySelector('[class*="position" i], [class*="role" i]');
-      const catchEl = node.querySelector('[class*="catch" i], [class*="message" i]');
-      const feeText = (txt(node).match(/指名料\s*([¥\d,]+)/) || [])[1];
+    const seenIds = new Set();
+    for (const link of links) {
+      const href = attr(link, 'href') || '';
+      const extId = extractStaffId(href);
+      if (!extId) continue;
+      if (seenIds.has(extId)) continue;
+      seenIds.add(extId);
+
+      // 行 (カード) の親要素を辿る
+      let card = link;
+      for (let i = 0; i < 6; i++) {
+        if (!card.parentElement) break;
+        card = card.parentElement;
+        const t = txt(card);
+        if (t.length > 20) break; // 名前以外の情報も含むレベルまで上がったら停止
+      }
+
+      // 名前は link 自身のテキスト or 近接 [class*="name"] から取得
+      let name = txt(link);
+      if (!name || name.length > 30) {
+        const nameEl =
+          card.querySelector('[class*="name" i], h2, h3, .ttl, .staff-name');
+        name = txt(nameEl);
+      }
+      // 一覧の余計なテキスト (「要確認」「サブスク中」など) を末尾から除去
+      name = name
+        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
+        .replace(/^\s*No\.\s*/i, '')
+        .trim();
+      if (!name) continue;
+
+      const photo = card.querySelector('img');
+      const positionEl = card.querySelector('[class*="position" i], [class*="role" i]');
+      const catchEl = card.querySelector('[class*="catch" i], [class*="message" i]');
+      const feeText = (txt(card).match(/指名料\s*([¥\d,]+)/) || [])[1];
+
       items.push({
-        external_id:
-          attr(node, 'data-staff-id') ||
-          attr(node, 'id') ||
-          (attr(link, 'href') || '').match(/(?:staffId|stylistId)=([\w-]+)/)?.[1] ||
-          name, // 最終フォールバック: 名前を ID にする
+        external_id: extId,
         name,
         position: txt(positionEl),
         catch_phrase: txt(catchEl),
         photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
         designation_fee_raw: feeText || null,
+        detail_url: href,
       });
     }
-    // 重複除去 (external_id + name で一意化)
-    const seen = new Set();
-    const unique = [];
-    for (const i of items) {
-      const k = `${i.external_id}|${i.name}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      unique.push(i);
-    }
-    return { items: unique };
+    return { items, totalLinks: links.length };
   });
 
   const rows = [];
@@ -946,7 +996,12 @@ async function scrapeStaff(page) {
   }
   return {
     rows,
-    debug: { itemsFound: raw.items.length, parsed: rows.length, skipped: raw.items.length - rows.length },
+    debug: {
+      itemsFound: raw.items.length,
+      parsed: rows.length,
+      skipped: raw.totalLinks - raw.items.length,
+      totalLinks: raw.totalLinks,
+    },
   };
 }
 
