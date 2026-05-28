@@ -124,5 +124,71 @@ interface Window {
     workerAbort: () => Promise<{ ok: boolean }>;
     /** worker からの全イベントを購読。返値は解除関数 */
     onWorkerEvent: (handler: (msg: WorkerEvent) => void) => () => void;
+
+    /**
+     * device 設定 (v0.2.5)。店舗 PC ごとの device_id / device_token を
+     * userData に保存する。token は get では last4 のみ返す。
+     */
+    deviceConfig: {
+      get: () => Promise<DeviceConfigMasked>;
+      save: (payload: {
+        deviceId: string;
+        deviceToken: string;
+        apiUrl: string;
+        deviceName?: string;
+        workerId?: string;
+      }) => Promise<DeviceConfigTestResult & { config: DeviceConfigMasked }>;
+      clear: () => Promise<{ ok: boolean }>;
+      test: (payload?: {
+        deviceId: string;
+        deviceToken: string;
+        apiUrl: string;
+        workerId?: string;
+      }) => Promise<DeviceConfigTestResult>;
+    };
   };
 }
+
+/** main から返る マスク済み device 設定 (token は last4 のみ)。 */
+type DeviceConfigMasked = {
+  configured: boolean;
+  deviceId?: string | null;
+  deviceName?: string | null;
+  apiUrl?: string | null;
+  workerId?: string | null;
+  configuredAt?: string | null;
+  lastVerifiedAt?: string | null;
+  tokenLast4?: string | null;
+};
+
+/** device 接続テストの結果 (token は含まない)。 */
+type DeviceConfigTestResult = {
+  ok: boolean;
+  code: string;
+  message?: string;
+  /** overview API が返す shop 配列 (lib/salonboard.ts の DeviceOverviewShop 互換)。 */
+  shops?: Array<{
+    shop_id: string;
+    shop_name: string;
+    organization_id: string;
+    credential_status: string;
+    consent_status: string;
+    sync_status: string;
+    enabled: boolean;
+    blocked_until: string | null;
+    last_success_at: string | null;
+    last_error_at: string | null;
+    last_error_code: string | null;
+    last_error_message: string | null;
+    consecutive_failures: number;
+  }>;
+  device?: {
+    id: string | null;
+    organization_id: string | null;
+    status: string | null;
+    device_name: string | null;
+    device_platform: string | null;
+    app_version: string | null;
+    last_seen_at: string | null;
+  } | null;
+};

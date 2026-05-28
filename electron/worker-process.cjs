@@ -41,6 +41,20 @@ let abortRequested = false;
 let currentBrowser = null;
 
 /**
+ * 旧 Supabase 直読み fallback を許可するか (v0.2.5)。
+ *
+ * v0.2.4 では device 未設定の店舗を救済するため常に fallback していたが、
+ * v0.2.5 では device 設定を userData から読む正規ルートが確立したので、
+ * 本番では fallback を禁止する。
+ *
+ *   - NODE_ENV !== 'production' かつ ALLOW_LEGACY_SUPABASE_FALLBACK=true のときだけ許可
+ *   - 本番ビルドでは常に false (= device 未設定なら同期せずエラー)
+ */
+const ALLOW_LEGACY_SUPABASE_FALLBACK =
+  process.env.NODE_ENV !== 'production' &&
+  /^(1|true|yes)$/i.test(process.env.ALLOW_LEGACY_SUPABASE_FALLBACK ?? '');
+
+/**
  * device 認証で /api/salonboard/device/credentials を叩くための設定。
  * 親プロセス (main.cjs) からまとめて渡される。
  *
@@ -274,7 +288,17 @@ async function fetchTargets(shopIds) {
     }));
   }
 
-  // ----- fallback (v0.2.4) -----
+  // ----- fallback (v0.2.4 → v0.2.5 で本番無効化) -----
+  // device 未設定 = 「設定が必要」エラーとして止める。
+  // 旧 Supabase 直読み fallback は ALLOW_LEGACY_SUPABASE_FALLBACK (開発のみ) のとき限定。
+  if (overview.code === 'device_auth_missing' && !ALLOW_LEGACY_SUPABASE_FALLBACK) {
+    const e = new Error(
+      'このPCのSalonBoard連携device設定が未完了です。管理画面でdeviceを発行し、設定画面で登録してください。'
+    );
+    e.code = 'device_unconfigured';
+    throw e;
+  }
+
   const safeFallbackCodes = new Set([
     'device_auth_missing',
     'network_error',
@@ -283,10 +307,10 @@ async function fetchTargets(shopIds) {
     'http_503',
     'http_504',
   ]);
-  if (!safeFallbackCodes.has(String(overview.code ?? ''))) {
-    // 401/403 など「故意に拒否された」ケースは fallback しない
+  if (!ALLOW_LEGACY_SUPABASE_FALLBACK || !safeFallbackCodes.has(String(overview.code ?? ''))) {
+    // 本番 (fallback 無効) では到達。401/403 など故意拒否でも到達。
     throw new Error(
-      `fetchTargets via /overview API rejected: ${overview.code}${
+      `fetchTargets via /overview API failed: ${overview.code}${
         overview.error ? ` (${overview.error})` : ''
       }`
     );
@@ -294,7 +318,7 @@ async function fetchTargets(shopIds) {
 
   if (!_fetchTargetsFallbackWarned) {
     log(
-      `device API 利用不可 (${overview.code})。旧 Supabase 直読みに fallback します (要 device 設定)`,
+      `[dev] device API 利用不可 (${overview.code})。旧 Supabase 直読みに fallback します`,
       'warn',
     );
     _fetchTargetsFallbackWarned = true;
@@ -373,11 +397,19 @@ let _revealFallbackWarned = false;
 async function revealCredentials(shopId) {
   const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
 
-  // device 未設定 → 旧 RPC fallback (v0.2.4)
+  // device 未設定: v0.2.5 では本番で fallback しない (= 設定が必要なエラー)
   if (!headers) {
+    if (!ALLOW_LEGACY_SUPABASE_FALLBACK) {
+      const e = new Error(
+        'このPCのSalonBoard連携device設定が未完了です。設定画面でdeviceを登録してください。'
+      );
+      e.code = 'device_unconfigured';
+      throw e;
+    }
+    // --- 開発限定 fallback ---
     if (!_revealFallbackWarned) {
       log(
-        'device 認証未設定のため、credentials 取得を旧 RPC fallback で実行します (要 device 設定)',
+        '[dev] device 未設定のため credentials を旧 RPC fallback で取得します',
         'warn',
       );
       _revealFallbackWarned = true;
@@ -1349,7 +1381,10 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
     }
   }
 
-  // フォールバック: 旧 Supabase 直書き (device 未設定 or 5xx のとき)
+  // フォールバック: 旧 Supabase 直書き (device 未設定 or 5xx のとき)。
+  // v0.2.5: 本番では fallback しない (エラー記録は API 経由のみ)。
+  // markCredentialError は致命的でないので、本番で書けなくても silent に諦める。
+  if (!ALLOW_LEGACY_SUPABASE_FALLBACK) return;
   try {
     const { data: cur } = await supabase
       .from('salonboard_credentials')

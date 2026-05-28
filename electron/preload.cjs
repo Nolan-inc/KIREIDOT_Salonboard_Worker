@@ -51,4 +51,17 @@ contextBridge.exposeInMainWorld('kireidotApp', {
     ipcRenderer.on('worker:event', listener);
     return () => ipcRenderer.removeListener('worker:event', listener);
   },
+
+  // device 設定 (v0.2.5): 店舗 PC ごとの device_id / device_token を
+  // userData に保存。get はマスク済み (token last4 のみ) を返す。
+  deviceConfig: {
+    // 保存済み設定 (マスク済み) を取得
+    get: () => ipcRenderer.invoke('device:get'),
+    // 設定を保存 (内部で接続テストを実行し、成功時のみ lastVerifiedAt を更新)
+    save: (payload) => ipcRenderer.invoke('device:save', payload),
+    // 設定を削除
+    clear: () => ipcRenderer.invoke('device:clear'),
+    // 接続テスト (payload 省略時は保存済み設定でテスト)
+    test: (payload) => ipcRenderer.invoke('device:test', payload),
+  },
 });

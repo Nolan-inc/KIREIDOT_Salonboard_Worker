@@ -10,7 +10,6 @@ import {
 } from 'react';
 import { supabase } from './supabase';
 import { useAuth } from './auth-context';
-import { fetchDeviceOverview } from './salonboard';
 
 /**
  * 予約同期くん: utilityProcess (electron/worker-process.cjs) を制御する Context。
@@ -188,28 +187,14 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     if (!accessToken || !refreshToken) return;
     let cancelled = false;
     (async () => {
-      // device 認証経由で /api/salonboard/device/credentials を叩くために、
-      // device_id / device_token / API base URL も Worker に渡す。
-      // .env.local に未設定なら未指定で渡し、Worker 側は warning を出す。
-      const apiBaseUrl =
-        import.meta.env.VITE_KIREIDOT_API_URL ??
-        import.meta.env.VITE_ADMIN_API_URL ??
-        '';
-      const deviceId = import.meta.env.VITE_SALONBOARD_DEVICE_ID ?? '';
-      const deviceToken = import.meta.env.VITE_SALONBOARD_DEVICE_TOKEN ?? '';
-      const workerId = import.meta.env.VITE_WORKER_ID ?? 'electron-worker';
-      const appVersion = import.meta.env.VITE_APP_VERSION ?? '';
-
+      // v0.2.5: device_id / device_token / apiBaseUrl は renderer から渡さない。
+      // main process が userData (salonboard-device.json) から読み、worker:init の
+      // payload にマージして worker に渡す。renderer は Supabase セッションだけ渡す。
       const r = await bridge.workerInit({
         url: import.meta.env.VITE_SUPABASE_URL ?? '',
         anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY ?? '',
         accessToken,
         refreshToken,
-        apiBaseUrl,
-        deviceId,
-        deviceToken,
-        workerId,
-        appVersion,
       });
       if (!cancelled) setReady(!!r?.ok);
     })();
@@ -369,18 +354,24 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
    * 失敗種別ごとに setupStatus にユーザー向けメッセージを入れる。
    */
   const refreshSetupStatus = useCallback(async () => {
-    const overview = await fetchDeviceOverview();
+    // v0.2.5: renderer は token を持たない。main の device:test (userData 設定で
+    // overview API を叩く) を使って状態判定する。
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    const overview = bridge?.deviceConfig
+      ? await bridge.deviceConfig.test()
+      : { ok: false, code: 'device_unconfigured' as const, shops: [] };
+
     if (!overview.ok) {
       switch (overview.code) {
+        case 'device_unconfigured':
         case 'device_auth_missing':
           setSetupStatus({
             code: 'device_unconfigured',
             message:
-              'デバイス設定が未完了です。.env.local の VITE_SALONBOARD_DEVICE_ID / VITE_SALONBOARD_DEVICE_TOKEN を設定してください。',
+              'デバイス設定が未完了です。設定画面の「SalonBoard連携デバイス」で Device ID / Token を登録してください。',
           });
           return;
         case 'unauthorized':
-        case 'device token rejected':
         case 'http_401':
           setSetupStatus({
             code: 'device_unauthorized',
@@ -392,7 +383,14 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
           setSetupStatus({
             code: 'network_error',
             message:
-              'KIREIDOT Admin との通信に失敗しました。インターネット接続と VITE_KIREIDOT_API_URL を確認してください。',
+              'KIREIDOT Admin との通信に失敗しました。インターネット接続と API URL を確認してください。',
+          });
+          return;
+        case 'no_shops_assigned':
+          setSetupStatus({
+            code: 'no_shops_assigned',
+            message:
+              'この店舗PCに紐付いた店舗がありません。管理画面で device に shop を紐付けてください。',
           });
           return;
         default:
@@ -534,28 +532,19 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       if (runningRef.current) return; // 既に走っているならスキップ
 
-      // v0.2.3: device API があればそれを使う。無ければ従来 (Supabase 直読み) に fallback。
-      // overview API は sync_interval_minutes を返さないので、フォールバック側は従来通り。
-      const overview = await fetchDeviceOverview();
+      // v0.2.5: device 設定 (userData) 経由で overview を取得 (main 経由)。
+      // active な店舗が 1 つでもあれば 12 分間隔で同期する (このループは
+      // 「設定が生きていれば走る」ガード)。device 未設定なら何もしない。
+      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+      const overview = bridge?.deviceConfig
+        ? await bridge.deviceConfig.test()
+        : { ok: false, shops: [] as never[] };
       let intervals: number[] = [];
       if (overview.ok) {
-        // overview に sync_interval_minutes は含まれないので、active な店舗が
-        // ある場合は固定で 12 分 (salonboard_credentials のデフォルト値) を使う。
-        // 個別の sync_interval_minutes を反映したい場合は Settings 画面側で
-        // 直接管理する想定 (このループは「動いていれば走る」ガード用)。
-        const activeShops = overview.shops.filter(
+        const activeShops = (overview.shops ?? []).filter(
           (s) => s.credential_status === 'active' && s.enabled,
         );
         if (activeShops.length > 0) intervals = [12];
-      } else {
-        const { data } = await supabase
-          .from('salonboard_credentials_overview')
-          .select('sync_interval_minutes, has_credential, enabled')
-          .eq('has_credential', true)
-          .eq('enabled', true);
-        intervals = (data ?? [])
-          .map((r) => Number((r as any).sync_interval_minutes))
-          .filter((n) => Number.isFinite(n) && n > 0);
       }
       if (intervals.length === 0) return;
       const minInterval = Math.min(...intervals);
@@ -563,7 +552,6 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (elapsed < minInterval * 60_000) return;
       // 実行
       lastAutoSyncAtRef.current = Date.now();
-      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
       if (!bridge) return;
       await bridge.workerSync({ channels: DEFAULT_CHANNELS });
     };
@@ -593,12 +581,14 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (elapsed < BOOKINGS_AUTO_SYNC_INTERVAL_MS) return;
 
       // 対象店舗: 認証情報があり enabled な店舗の shop_id 一覧
-      // v0.2.3: device API 優先、無理なら Supabase 直読みに fallback
+      // v0.2.5: device 設定 (userData) 経由で overview を取得 (main 経由)
       const now = Date.now();
       let shopIds: string[] = [];
-      const overview = await fetchDeviceOverview();
+      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+      if (!bridge?.deviceConfig) return;
+      const overview = await bridge.deviceConfig.test();
       if (overview.ok) {
-        shopIds = overview.shops
+        shopIds = (overview.shops ?? [])
           .filter((s) => {
             if (s.credential_status !== 'active') return false;
             if (!s.enabled) return false;
@@ -607,24 +597,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
             return true;
           })
           .map((s) => s.shop_id);
-      } else {
-        const { data } = await supabase
-          .from('salonboard_credentials_overview')
-          .select('shop_id, has_credential, enabled, blocked_until')
-          .eq('has_credential', true)
-          .eq('enabled', true);
-        shopIds = (data ?? [])
-          .filter((r: any) => {
-            if (!r.blocked_until) return true;
-            return new Date(r.blocked_until).getTime() <= now;
-          })
-          .map((r: any) => r.shop_id as string)
-          .filter(Boolean);
       }
       if (shopIds.length === 0) return;
-
-      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
-      if (!bridge) return;
 
       lastBookingsAutoSyncAtRef.current = Date.now();
       setLastBookingsAutoSyncAt(lastBookingsAutoSyncAtRef.current);

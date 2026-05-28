@@ -12,6 +12,9 @@ import {
   AlertCircle,
   Building2,
   Store,
+  Save,
+  Trash2,
+  PlugZap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Card, CardBody, CardHeader } from '../components/Card';
@@ -54,30 +57,8 @@ export function Settings() {
         </CardBody>
       </Card>
 
-      {/* サロンボード連携 */}
-      <Card>
-        <CardHeader title="サロンボード連携" subtitle="このアプリで使うサロンボードアカウント" />
-        <CardBody className="space-y-4">
-          <div className="flex items-center gap-3 rounded-[12px] bg-amber-50 p-3">
-            <ShieldCheck className="h-5 w-5 text-amber-600" />
-            <div>
-              <div className="text-[13px] font-semibold text-amber-700">未接続</div>
-              <div className="text-[11px] text-amber-700/80">
-                次の Phase でサロンボードの認証情報入力 UI を実装します
-              </div>
-            </div>
-            <button
-              type="button"
-              className="ml-auto rounded-[10px] border border-amber-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-amber-700 hover:bg-amber-50"
-            >
-              ログインする
-            </button>
-          </div>
-
-          <Field label="サロンボード ログイン ID" value="未設定" />
-          <Field label="API キー (KIREIDOT クラウドへの送信)" value="未発行" actionLabel="発行" />
-        </CardBody>
-      </Card>
+      {/* SalonBoard 連携デバイス設定 (v0.2.5) */}
+      <DeviceConfigSection />
 
       {/* 同期 */}
       <Card>
@@ -430,5 +411,334 @@ function SyncTargets() {
         ))}
       </div>
     </div>
+  );
+}
+
+// =====================================================================
+// SalonBoard 連携デバイス設定 (v0.2.5)
+//
+// 店舗 PC ごとに Admin (/admin/salonboard/devices) で発行した
+// Device ID / Device Token を入力 → 接続テスト → userData に保存。
+// token は入力欄以外には保存後 last4 のみ表示する。
+// =====================================================================
+const DEFAULT_API_URL = 'https://admin.kireidot.jp';
+
+function DeviceConfigSection() {
+  const [loading, setLoading] = useState(true);
+  const [config, setConfig] = useState<DeviceConfigMasked | null>(null);
+
+  // 入力フォーム
+  const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
+  const [deviceId, setDeviceId] = useState('');
+  const [deviceToken, setDeviceToken] = useState('');
+  const [deviceName, setDeviceName] = useState('');
+  const [editing, setEditing] = useState(false);
+
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{
+    ok: boolean;
+    code: string;
+    message?: string;
+    shopsReady?: number;
+    shopsTotal?: number;
+  } | null>(null);
+
+  const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+
+  const reload = async () => {
+    if (!bridge?.deviceConfig) {
+      setLoading(false);
+      return;
+    }
+    const c = await bridge.deviceConfig.get();
+    setConfig(c);
+    if (c.configured) {
+      setApiUrl(c.apiUrl ?? DEFAULT_API_URL);
+      setDeviceId(c.deviceId ?? '');
+      setDeviceName(c.deviceName ?? '');
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onTest = async () => {
+    if (!bridge?.deviceConfig) return;
+    setBusy(true);
+    setResult(null);
+    // 入力中なら入力値で、そうでなければ保存済み設定でテスト
+    const payload =
+      editing || !config?.configured
+        ? { apiUrl: apiUrl.trim(), deviceId: deviceId.trim(), deviceToken: deviceToken.trim() }
+        : undefined;
+    if (payload && (!payload.apiUrl || !payload.deviceId || !payload.deviceToken)) {
+      setResult({ ok: false, code: 'invalid_input', message: 'API URL / Device ID / Token を入力してください' });
+      setBusy(false);
+      return;
+    }
+    const r = await bridge.deviceConfig.test(payload);
+    setResult({
+      ok: r.ok,
+      code: r.code,
+      message: r.message,
+      shopsTotal: r.shops?.length,
+      shopsReady: (r.shops ?? []).filter(
+        (s) =>
+          s.credential_status === 'active' &&
+          s.enabled &&
+          s.consent_status === 'valid',
+      ).length,
+    });
+    setBusy(false);
+  };
+
+  const onSave = async () => {
+    if (!bridge?.deviceConfig) return;
+    setBusy(true);
+    setResult(null);
+    const r = await bridge.deviceConfig.save({
+      apiUrl: apiUrl.trim(),
+      deviceId: deviceId.trim(),
+      deviceToken: deviceToken.trim(),
+      deviceName: deviceName.trim() || undefined,
+    });
+    setResult({
+      ok: r.ok,
+      code: r.code,
+      message: r.message,
+      shopsTotal: r.shops?.length,
+      shopsReady: (r.shops ?? []).filter(
+        (s) =>
+          s.credential_status === 'active' &&
+          s.enabled &&
+          s.consent_status === 'valid',
+      ).length,
+    });
+    setConfig(r.config ?? null);
+    setEditing(false);
+    setDeviceToken(''); // 保存後はフォームから token をクリア (画面に残さない)
+    setBusy(false);
+  };
+
+  const onClear = async () => {
+    if (!bridge?.deviceConfig) return;
+    if (!confirm('このPCのデバイス設定を削除しますか？同期できなくなります。')) return;
+    await bridge.deviceConfig.clear();
+    setConfig({ configured: false });
+    setApiUrl(DEFAULT_API_URL);
+    setDeviceId('');
+    setDeviceToken('');
+    setDeviceName('');
+    setEditing(false);
+    setResult(null);
+  };
+
+  if (!bridge?.deviceConfig) {
+    return (
+      <Card>
+        <CardHeader title="SalonBoard 連携デバイス" subtitle="この機能はデスクトップアプリでのみ利用できます" />
+        <CardBody>
+          <p className="text-[12px] text-ink-soft">ブラウザ版では設定できません。</p>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  const configured = config?.configured ?? false;
+  const showForm = editing || !configured;
+
+  return (
+    <Card>
+      <CardHeader
+        title="SalonBoard 連携デバイス"
+        subtitle="この店舗PCの device 設定 (管理画面で発行した Device ID / Token を登録)"
+      />
+      <CardBody className="space-y-4">
+        {loading ? (
+          <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+            <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
+          </div>
+        ) : (
+          <>
+            {/* 現在の状態 */}
+            {configured ? (
+              <div className="flex items-start gap-3 rounded-[12px] bg-emerald-50 p-3">
+                <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                <div className="flex-1 text-[12px] text-emerald-800">
+                  <div className="font-semibold">デバイス設定済み</div>
+                  <div className="mt-1 space-y-0.5 text-[11px] text-emerald-700/90">
+                    <div>名前: {config?.deviceName ?? '(未設定)'}</div>
+                    <div>Device ID: {config?.deviceId?.slice(0, 8)}…</div>
+                    <div>Token: ****{config?.tokenLast4 ?? '????'}</div>
+                    <div>API: {config?.apiUrl}</div>
+                    <div>
+                      最終確認:{' '}
+                      {config?.lastVerifiedAt
+                        ? new Date(config.lastVerifiedAt).toLocaleString('ja-JP')
+                        : '未検証'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-3 rounded-[12px] bg-amber-50 p-3">
+                <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                <div className="text-[12px] text-amber-800">
+                  <div className="font-semibold">デバイス未設定</div>
+                  <div className="mt-0.5 text-[11px] text-amber-700/90">
+                    管理画面 (/admin/salonboard/devices) で device を発行し、
+                    表示された Device ID / Token をここに登録してください。
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 入力フォーム */}
+            {showForm ? (
+              <div className="space-y-3">
+                <LabeledInput
+                  label="API URL"
+                  value={apiUrl}
+                  onChange={setApiUrl}
+                  placeholder="https://admin.kireidot.jp"
+                />
+                <LabeledInput
+                  label="Device ID"
+                  value={deviceId}
+                  onChange={setDeviceId}
+                  placeholder="00000000-0000-0000-0000-000000000000"
+                  mono
+                />
+                <LabeledInput
+                  label="Device Token"
+                  value={deviceToken}
+                  onChange={setDeviceToken}
+                  placeholder="発行時に1回だけ表示されたトークン"
+                  password
+                  mono
+                />
+                <LabeledInput
+                  label="デバイス名 (任意)"
+                  value={deviceName}
+                  onChange={setDeviceName}
+                  placeholder="例: 銀座本店-受付PC"
+                />
+              </div>
+            ) : null}
+
+            {/* 接続テスト結果 */}
+            {result && (
+              <div
+                className={
+                  result.ok
+                    ? 'rounded-[10px] bg-emerald-50 px-3 py-2 text-[12px] text-emerald-800'
+                    : 'rounded-[10px] bg-rose-50 px-3 py-2 text-[12px] text-rose-800'
+                }
+              >
+                {result.ok ? (
+                  <span className="inline-flex items-center gap-1">
+                    <CheckCircle2 className="h-3.5 w-3.5" /> 接続成功
+                    {typeof result.shopsReady === 'number' &&
+                      ` (${result.shopsReady}/${result.shopsTotal} 店舗が同期可能)`}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    {result.message ?? `失敗 (${result.code})`}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* ボタン群 */}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onTest}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 rounded-[10px] border border-hairline bg-white px-3 py-2 text-[12px] font-semibold text-ink hover:bg-surface-soft disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
+                接続テスト
+              </button>
+
+              {showForm ? (
+                <button
+                  type="button"
+                  onClick={onSave}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1.5 rounded-[10px] bg-brand-gradient px-3 py-2 text-[12px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+                >
+                  <Save className="h-3.5 w-3.5" /> 保存
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditing(true);
+                    setDeviceToken('');
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-[10px] border border-hairline bg-white px-3 py-2 text-[12px] font-semibold text-ink hover:bg-surface-soft"
+                >
+                  <Key className="h-3.5 w-3.5" /> 設定を変更
+                </button>
+              )}
+
+              {configured && (
+                <button
+                  type="button"
+                  onClick={onClear}
+                  disabled={busy}
+                  className="ml-auto inline-flex items-center gap-1.5 rounded-[10px] border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> 設定を削除
+                </button>
+              )}
+            </div>
+
+            <p className="text-[11px] text-ink-soft">
+              ※ Device Token はこの PC 内 (userData) にのみ保存され、画面には末尾4桁しか表示されません。
+              紛失・漏洩時は管理画面で「token再発行」してください。
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  password,
+  mono,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  password?: boolean;
+  mono?: boolean;
+}) {
+  return (
+    <label className="block">
+      <span className="text-[11px] font-semibold text-ink-soft">{label}</span>
+      <input
+        type={password ? 'password' : 'text'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        autoComplete="off"
+        className={`mt-1 w-full rounded-[10px] border border-hairline bg-white px-3 py-2 text-[12px] text-ink placeholder:text-muted-faint focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20 ${
+          mono ? 'font-mono' : ''
+        }`}
+      />
+    </label>
   );
 }

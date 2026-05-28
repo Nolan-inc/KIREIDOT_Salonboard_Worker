@@ -8,6 +8,7 @@
 const { app, BrowserWindow, shell, ipcMain, utilityProcess } = require('electron');
 const path = require('node:path');
 const { initAutoUpdater, quitAndInstall, manualCheck } = require('./updater.cjs');
+const deviceConfig = require('./device-config.cjs');
 
 // ---------------------------------------------------------------------
 // Worker (utilityProcess) — マルチ店舗スクレイピングのバックグラウンド実行
@@ -178,10 +179,92 @@ ipcMain.handle('updater:check', async () => {
 });
 
 // ---------------------------------------------------------------------
+// device 設定 IPC (renderer → main, userData 永続化)
+// ---------------------------------------------------------------------
+// token は renderer に返さない (getMaskedDeviceConfig で last4 のみ)。
+// device:save / device:test は token を受け取るが、ログには絶対出さない。
+ipcMain.handle('device:get', async () => {
+  return deviceConfig.getMaskedDeviceConfig(app);
+});
+
+ipcMain.handle('device:save', async (_event, payload) => {
+  // payload: { deviceId, deviceToken, apiUrl, deviceName, workerId }
+  // 接続テストを通してから保存する (テスト失敗時は未検証として扱う)
+  const cfg = {
+    deviceId: String(payload?.deviceId ?? '').trim(),
+    deviceToken: String(payload?.deviceToken ?? '').trim(),
+    apiUrl: String(payload?.apiUrl ?? '').trim(),
+    deviceName: String(payload?.deviceName ?? '').trim() || null,
+    workerId: String(payload?.workerId ?? '').trim() || null,
+  };
+  if (!cfg.deviceId || !cfg.deviceToken || !cfg.apiUrl) {
+    return { ok: false, code: 'invalid_input', message: 'API URL / Device ID / Device Token は必須です' };
+  }
+  const test = await deviceConfig.testDeviceConfig(app, cfg);
+  // 接続成功時は lastVerifiedAt を更新して保存。失敗時も保存はするが lastVerifiedAt は null。
+  deviceConfig.writeDeviceConfig(app, {
+    ...cfg,
+    lastVerifiedAt: test.ok ? new Date().toISOString() : null,
+  });
+  return {
+    ok: test.ok,
+    code: test.code,
+    message: test.message,
+    shops: test.shops ?? [],
+    device: test.device ?? null,
+    config: deviceConfig.getMaskedDeviceConfig(app),
+  };
+});
+
+ipcMain.handle('device:clear', async () => {
+  deviceConfig.clearDeviceConfig(app);
+  return { ok: true };
+});
+
+ipcMain.handle('device:test', async (_event, payload) => {
+  // payload があればそれでテスト、無ければ保存済み設定でテスト
+  const cfg = payload
+    ? {
+        deviceId: String(payload?.deviceId ?? '').trim(),
+        deviceToken: String(payload?.deviceToken ?? '').trim(),
+        apiUrl: String(payload?.apiUrl ?? '').trim(),
+        workerId: String(payload?.workerId ?? '').trim() || null,
+      }
+    : undefined;
+  const test = await deviceConfig.testDeviceConfig(app, cfg);
+  // 保存済み設定でのテストが成功したら lastVerifiedAt を更新
+  if (!payload && test.ok) {
+    deviceConfig.writeDeviceConfig(app, { lastVerifiedAt: new Date().toISOString() });
+  }
+  return {
+    ok: test.ok,
+    code: test.code,
+    message: test.message,
+    shops: test.shops ?? [],
+    device: test.device ?? null,
+  };
+});
+
+// ---------------------------------------------------------------------
 // Worker 操作系 IPC (renderer → main → utilityProcess)
 // ---------------------------------------------------------------------
 ipcMain.handle('worker:init', async (_event, payload) => {
-  const ok = postToWorker({ type: 'init', payload });
+  // renderer から来た payload (Supabase URL/anonKey/session) に、
+  // main が userData から読んだ device 設定をマージする。
+  // これにより device_id/token は renderer を経由せず worker に届く。
+  const dev = deviceConfig.readDeviceConfig(app);
+  const merged = {
+    ...payload,
+    ...(dev
+      ? {
+          apiBaseUrl: dev.apiUrl ?? payload?.apiBaseUrl ?? null,
+          deviceId: dev.deviceId ?? null,
+          deviceToken: dev.deviceToken ?? null,
+          workerId: dev.workerId ?? payload?.workerId ?? 'electron-worker',
+        }
+      : {}),
+  };
+  const ok = postToWorker({ type: 'init', payload: merged });
   return { ok };
 });
 ipcMain.handle('worker:sync', async (_event, payload) => {
