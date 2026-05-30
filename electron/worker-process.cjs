@@ -751,7 +751,7 @@ async function processShop(target, channels, runId, opts = {}) {
         const sent = await sendStaff(shopId, rows);
         counts.staff = sent;
         summary.push(`スタッフ ${sent} 件 (検出${rows.length})`);
-        // v0.2.10: 取得状況を診断ログで残す (件数が想定と合わないとき切り分け用)
+        // v0.2.10+: 取得状況を診断ログで残す (件数が想定と合わないとき切り分け用)
         emit('log', {
           level: 'info',
           msg:
@@ -759,7 +759,8 @@ async function processShop(target, channels, runId, opts = {}) {
             `parsed=${debug?.parsed ?? 0} sent=${sent} ` +
             `totalLinks=${debug?.totalLinks ?? 0} ` +
             `totalRows=${debug?.totalRows ?? 0} ` +
-            `methodC=${debug?.methodCContainers ?? 0}`,
+            `methodC=${debug?.methodCContainers ?? 0} ` +
+            `methodD=${debug?.methodDExtracted ?? 0}/${debug?.methodDImgTrs ?? 0}`,
           at: new Date().toISOString(),
         });
         emit('shop:progress', { shopId, step: 'staff', msg: `スタッフ ${sent} 件保存` });
