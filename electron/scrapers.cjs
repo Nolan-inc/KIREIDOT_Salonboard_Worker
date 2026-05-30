@@ -911,80 +911,224 @@ async function scrapeStaff(page) {
       return el ? el.getAttribute(name) : null;
     }
     /**
-     * SalonBoard スタッフ詳細リンクから外部 ID を取り出す。
-     * 想定 URL: ...staffDetail?staffId=W001234... / ...stylistId=W001xxx
-     * 形式: 「W」または「N」+ 数字 6 桁以上 を必ず要求。
+     * SalonBoard スタッフ詳細 URL や hidden input から外部 ID を取り出す。
+     * 想定:
+     *   - ...staffDetail?staffId=W001234... / ...stylistId=W001xxx
+     *   - hidden input <input name="staffId" value="W..."> / 行属性 data-staff-id
+     *   - 行内テキストに W123456 / N123456 形式が露出していることもある
+     * 形式: 「W」または「N」+ 数字 4 桁以上 を要求。
      */
-    function extractStaffId(href) {
-      if (!href) return null;
-      // クエリ
-      const m1 = href.match(/(?:staffId|stylistId)=([WNwn]\d{4,})/);
+    function extractStaffId(s) {
+      if (!s) return null;
+      const m1 = String(s).match(/(?:staffId|stylistId|staff_id)=([WNwn]\d{4,})/);
       if (m1) return m1[1].toUpperCase();
-      // パス末尾
-      const m2 = href.match(/[WNwn]\d{6,}/);
-      if (m2) return m2[0].toUpperCase();
+      const m2 = String(s).match(/\b([WNwn]\d{6,})\b/);
+      if (m2) return m2[1].toUpperCase();
       return null;
     }
 
-    // 真の「スタッフ詳細リンク」を持つ要素を全部集める。
-    // これによってキャッチコピーや見出しだけのブロックを誤検出しない。
-    const links = Array.from(
-      document.querySelectorAll('a[href*="staffDetail"], a[href*="stylistDetail"]'),
-    );
+    /**
+     * v0.2.7+: SalonBoard 「スタッフ掲載情報一覧」画面は table 形式で、
+     * 各行に「順番 / PickUp / 写真 / 氏名+職種+キャッチ / 詳細 / 非掲載・削除」が並ぶ。
+     * 旧実装は a[href*="staffDetail"] だけを頼っていたが、現画面の「詳細」ボタンが
+     * リンクではなく button / form 化されていると一致せず 0 件になる。
+     *
+     * → 旧方式 (リンク収集) と新方式 (table 行スキャン) の両方で集めて、
+     *    どちらかで取れた行を全部出す。external_id が取れない行は drop。
+     */
     const items = [];
     const seenIds = new Set();
+    const seenNames = new Set();
+
+    // 「除外したい行テキスト」のヒューリスティック
+    // ヘッダ行や見出し行、フッタなど。
+    const SKIP_NAME_PATTERNS =
+      /^(順番|PickUp|スタッフ写真|氏名|職種|キャッチ|詳細|非掲載|削除|表示プラン|名前|職位|順位)$/u;
+
+    function pushItem(it) {
+      if (!it.name) return;
+      if (SKIP_NAME_PATTERNS.test(it.name)) return;
+      if (it.external_id) {
+        if (seenIds.has(it.external_id)) return;
+        seenIds.add(it.external_id);
+      } else {
+        // external_id がない行は name で de-dup (異なる店舗の同名スタッフは別物だが
+        // ここは 1 店舗のスタッフ一覧なので name 一意でよい)
+        if (seenNames.has(it.name)) return;
+        seenNames.add(it.name);
+      }
+      items.push(it);
+    }
+
+    // --- 方式 A: リンク経由 (旧実装) ---
+    const links = Array.from(
+      document.querySelectorAll(
+        'a[href*="staffDetail"], a[href*="stylistDetail"], a[href*="staffEdit"], a[href*="stylistEdit"]'
+      ),
+    );
     for (const link of links) {
       const href = attr(link, 'href') || '';
       const extId = extractStaffId(href);
       if (!extId) continue;
-      if (seenIds.has(extId)) continue;
-      seenIds.add(extId);
 
-      // 行 (カード) の親要素を辿る
       let card = link;
       for (let i = 0; i < 6; i++) {
         if (!card.parentElement) break;
         card = card.parentElement;
         const t = txt(card);
-        if (t.length > 20) break; // 名前以外の情報も含むレベルまで上がったら停止
+        if (t.length > 20) break;
       }
-
-      // 名前は link 自身のテキスト or 近接 [class*="name"] から取得
       let name = txt(link);
       if (!name || name.length > 30) {
-        const nameEl =
-          card.querySelector('[class*="name" i], h2, h3, .ttl, .staff-name');
+        const nameEl = card.querySelector(
+          '[class*="name" i], h2, h3, .ttl, .staff-name'
+        );
         name = txt(nameEl);
       }
-      // 一覧の余計なテキスト (「要確認」「サブスク中」など) を末尾から除去
       name = name
         .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
         .replace(/^\s*No\.\s*/i, '')
         .trim();
-      if (!name) continue;
 
       const photo = card.querySelector('img');
-      const positionEl = card.querySelector('[class*="position" i], [class*="role" i]');
-      const catchEl = card.querySelector('[class*="catch" i], [class*="message" i]');
+      const positionEl = card.querySelector(
+        '[class*="position" i], [class*="role" i]'
+      );
+      const catchEl = card.querySelector(
+        '[class*="catch" i], [class*="message" i]'
+      );
       const feeText = (txt(card).match(/指名料\s*([¥\d,]+)/) || [])[1];
 
-      items.push({
+      pushItem({
         external_id: extId,
         name,
         position: txt(positionEl),
         catch_phrase: txt(catchEl),
         photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
         designation_fee_raw: feeText || null,
-        detail_url: href,
       });
     }
-    return { items, totalLinks: links.length };
+
+    // --- 方式 B: table 行スキャン (現「スタッフ掲載情報一覧」画面用) ---
+    // テーブル列の意味は order/pickup/photo/info(name+position+catch)/detail/hide-delete
+    // 1 行に img が必ず 1 つあり、表内最初のテキスト塊 (1〜10 文字程度) が名前。
+    const trAll = Array.from(document.querySelectorAll('table tr'));
+    for (const tr of trAll) {
+      const tds = Array.from(tr.querySelectorAll('td'));
+      if (tds.length < 3) continue;
+      const rowText = txt(tr);
+      if (!rowText) continue;
+      // ヘッダ行を skip
+      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(rowText)) continue;
+
+      // external_id を行内のリンク / hidden input / 全テキストから探す
+      let extId = null;
+      for (const a of tr.querySelectorAll('a[href]')) {
+        const h = attr(a, 'href') || '';
+        const id = extractStaffId(h);
+        if (id) {
+          extId = id;
+          break;
+        }
+      }
+      if (!extId) {
+        for (const inp of tr.querySelectorAll(
+          'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
+        )) {
+          const id =
+            extractStaffId(attr(inp, 'value') || '') ||
+            extractStaffId(attr(inp, 'name') || '');
+          if (id) {
+            extId = id;
+            break;
+          }
+        }
+      }
+      if (!extId) {
+        // 行属性 / フォーム属性
+        const dataAttrs = [
+          attr(tr, 'data-staff-id'),
+          attr(tr, 'data-staffid'),
+          attr(tr, 'id'),
+        ]
+          .filter(Boolean)
+          .join(' ');
+        extId = extractStaffId(dataAttrs);
+      }
+      if (!extId) {
+        // 最終手段: 行テキスト全体からマッチ (露出してないことも多いので未取得なら null)
+        extId = extractStaffId(rowText);
+      }
+
+      // 名前は「氏名/職種/キャッチ」セル (= img を含まないセルで最初のテキスト塊)
+      let name = '';
+      let position = '';
+      let catchPhrase = '';
+      for (const td of tds) {
+        const t = txt(td);
+        if (!t) continue;
+        if (/^No\.\s*\d+$/.test(t)) continue;
+        if (/^\s*\d+\s*$/.test(t)) continue;
+        if (td.querySelector('img')) continue;
+        if (
+          td.querySelector(
+            'button, a.btn, input[type="button"], input[type="submit"]'
+          )
+        )
+          continue;
+
+        // 行内の改行や複数 div を素直に拾う
+        const blocks = Array.from(td.querySelectorAll('div, p, span'))
+          .map(txt)
+          .filter(Boolean);
+        const lines = blocks.length
+          ? blocks
+          : t.split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
+        if (lines.length > 0) {
+          // 1行目 = 名前候補、2行目 = 職種 + 指名料、3行目以降 = キャッチ
+          name = lines[0];
+          if (lines.length >= 2) position = lines[1];
+          if (lines.length >= 3) catchPhrase = lines.slice(2).join(' ');
+        } else {
+          name = t;
+        }
+        break;
+      }
+      name = String(name || '')
+        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
+        .replace(/^\s*No\.\s*/i, '')
+        .trim();
+      if (!name) continue;
+      if (SKIP_NAME_PATTERNS.test(name)) continue;
+
+      const photo = tr.querySelector('img');
+      const feeText = (rowText.match(/指名料\s*([¥\d,]+)/) || [])[1];
+
+      pushItem({
+        external_id: extId, // null でも OK (この場合 name で de-dup)
+        name,
+        position: position,
+        catch_phrase: catchPhrase,
+        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
+        designation_fee_raw: feeText || null,
+      });
+    }
+
+    return {
+      items,
+      totalLinks: links.length,
+      totalRows: trAll.length,
+    };
   });
 
   const rows = [];
   for (const it of raw.items) {
     rows.push({
-      external_id: String(it.external_id),
+      // external_id が無いスタッフも DB に保存できるよう "name:<name>" 形式の
+      // 代替キーを生成 (将来 SB 側から ID が取れるようになったら上書きされる)
+      external_id: String(
+        it.external_id || `name:${(it.name || '').slice(0, 64)}`
+      ),
       name: cleanText(it.name) ?? it.name,
       position: cleanText(it.position),
       designation_fee: parseYen(it.designation_fee_raw),
@@ -999,8 +1143,9 @@ async function scrapeStaff(page) {
     debug: {
       itemsFound: raw.items.length,
       parsed: rows.length,
-      skipped: raw.totalLinks - raw.items.length,
+      skipped: 0,
       totalLinks: raw.totalLinks,
+      totalRows: raw.totalRows,
     },
   };
 }
