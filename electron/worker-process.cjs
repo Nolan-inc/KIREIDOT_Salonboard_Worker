@@ -751,33 +751,17 @@ async function processShop(target, channels, runId, opts = {}) {
         const sent = await sendStaff(shopId, rows);
         counts.staff = sent;
         summary.push(`スタッフ ${sent} 件 (検出${rows.length})`);
-        // v0.2.10+: 取得状況を診断ログで残す (件数が想定と合わないとき切り分け用)
+        // v0.2.13: 診断ログを新仕様 (hidden input 起点) に対応
         emit('log', {
           level: 'info',
           msg:
             `[${shopId.slice(0, 8)}] staff scrape: ` +
             `parsed=${debug?.parsed ?? 0} sent=${sent} ` +
-            `totalLinks=${debug?.totalLinks ?? 0} ` +
-            `totalRows=${debug?.totalRows ?? 0} ` +
-            `methodC=${debug?.methodCContainers ?? 0} ` +
-            `methodD=${debug?.methodDExtracted ?? 0}/${debug?.methodDImgTrs ?? 0}`,
+            `staffIdInputs=${debug?.staffIdInputs ?? 0} ` +
+            `withoutPhotoRow=${debug?.withoutPhotoRow ?? 0} ` +
+            `nameCollision=${debug?.nameCollisionCount ?? 0}`,
           at: new Date().toISOString(),
         });
-        // v0.2.12: サンプル (最初の 3 件の方式 D 出力) を診断ログに残す
-        if (Array.isArray(debug?.methodDSamples)) {
-          for (const s of debug.methodDSamples) {
-            emit('log', {
-              level: 'info',
-              msg:
-                `[${shopId.slice(0, 8)}] staff sample#${s.idx}: ` +
-                `trCount=${s.groupTrCount} textTds=${s.textTdCount} ` +
-                `bestLines=${s.bestLinesCount} name="${(s.name || '').slice(0, 40)}" ` +
-                `ext=${s.extId ?? '-'} ` +
-                `lines=[${(s.bestLinesPreview || []).map((l) => '"' + String(l).slice(0, 30) + '"').join(', ')}]`,
-              at: new Date().toISOString(),
-            });
-          }
-        }
         emit('shop:progress', { shopId, step: 'staff', msg: `スタッフ ${sent} 件保存` });
       } catch (e) {
         emit('log', {

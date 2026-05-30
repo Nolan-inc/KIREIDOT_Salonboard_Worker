@@ -903,6 +903,30 @@ async function scrapeStaff(page) {
   await page.goto(STAFF_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
+  // ----------------------------------------------------------------
+  // SalonBoard 「スタッフ掲載情報一覧」の DOM 仕様 (確認済み):
+  //
+  // 1 つの <tbody> に全スタッフが並ぶ。1 スタッフ = 連続 2 つの <tr>:
+  //
+  //   <tr> 1行目: 順番 / PickUp / 写真 / 氏名 / 職種 / 施術歴 / チェック /
+  //              詳細 / 非掲載・削除
+  //   <tr> 2行目: キャッチコピー (colspan="4")
+  //
+  // 各スタッフの一意 ID は hidden input でフォーム配列として露出:
+  //   <input type="hidden"
+  //          name="frmStaffListStafferDtoList[N].staffId"
+  //          value="W001161524">
+  //   <input type="hidden"
+  //          name="frmStaffListStafferDtoList[N].presentFlg"
+  //          value="1">       <!-- 1=掲載中 / 0=非掲載 -->
+  //   <input type="text"
+  //          name="frmStaffListStafferDtoList[N].sortNo"
+  //          value="1">       <!-- 順番 -->
+  //
+  // 旧実装 (方式 A/B/C/D) は DOM を「賢く解釈」しようとして失敗していたが、
+  // 上記 input 配列の name 属性が SalonBoard 自身が用意した正規データなので、
+  // これを起点に巡回するのが最も堅牢。
+  // ----------------------------------------------------------------
   const raw = await page.evaluate(() => {
     function txt(el) {
       return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
@@ -910,528 +934,178 @@ async function scrapeStaff(page) {
     function attr(el, name) {
       return el ? el.getAttribute(name) : null;
     }
-    /**
-     * SalonBoard スタッフ詳細 URL や hidden input から外部 ID を取り出す。
-     * 想定:
-     *   - ...staffDetail?staffId=W001234... / ...stylistId=W001xxx
-     *   - hidden input <input name="staffId" value="W..."> / 行属性 data-staff-id
-     *   - 行内テキストに W123456 / N123456 形式が露出していることもある
-     * 形式: 「W」または「N」+ 数字 4 桁以上 を要求。
-     */
+    /** "W001161524" 形式のスタッフ外部 ID を文字列から抽出 */
     function extractStaffId(s) {
       if (!s) return null;
-      const m1 = String(s).match(/(?:staffId|stylistId|staff_id)=([WNwn]\d{4,})/);
-      if (m1) return m1[1].toUpperCase();
-      const m2 = String(s).match(/\b([WNwn]\d{6,})\b/);
-      if (m2) return m2[1].toUpperCase();
-      return null;
+      const m = String(s).match(/[WNwn]\d{6,}/);
+      return m ? m[0].toUpperCase() : null;
     }
 
-    /**
-     * v0.2.7+: SalonBoard 「スタッフ掲載情報一覧」画面は table 形式で、
-     * 各行に「順番 / PickUp / 写真 / 氏名+職種+キャッチ / 詳細 / 非掲載・削除」が並ぶ。
-     * 旧実装は a[href*="staffDetail"] だけを頼っていたが、現画面の「詳細」ボタンが
-     * リンクではなく button / form 化されていると一致せず 0 件になる。
-     *
-     * → 旧方式 (リンク収集) と新方式 (table 行スキャン) の両方で集めて、
-     *    どちらかで取れた行を全部出す。external_id が取れない行は drop。
-     */
+    // hidden input の name から index を取り出す
+    function indexFromName(name) {
+      const m = String(name || '').match(/\[(\d+)\]\.staffId$/);
+      return m ? Number(m[1]) : -1;
+    }
+
+    // 全 staffId 入力を取得 (= N の全配列)
+    const staffIdInputs = Array.from(
+      document.querySelectorAll(
+        'input[name^="frmStaffListStafferDtoList["][name$=".staffId"]'
+      )
+    );
+
+    // 結果と統計
     const items = [];
     const seenIds = new Set();
     const seenNames = new Set();
+    let nameCollisionCount = 0; // 同名スタッフが居た場合の検知用 (debug)
+    let withoutPhotoRow = 0;     // 写真行が見つからなかったケース
 
-    // 「除外したい行テキスト」のヒューリスティック
-    // ヘッダ行や見出し行、フッタなど。
-    const SKIP_NAME_PATTERNS =
-      /^(順番|PickUp|スタッフ写真|氏名|職種|キャッチ|詳細|非掲載|削除|表示プラン|名前|職位|順位)$/u;
+    for (const input of staffIdInputs) {
+      const index = indexFromName(attr(input, 'name'));
+      if (index < 0) continue;
+      const extId = extractStaffId(attr(input, 'value')) || null;
 
-    function pushItem(it) {
-      if (!it.name) return;
-      if (SKIP_NAME_PATTERNS.test(it.name)) return;
-      if (it.external_id) {
-        if (seenIds.has(it.external_id)) return;
-        seenIds.add(it.external_id);
+      // 1 行目 (写真行) は input の祖先 <tr>
+      const photoTr = input.closest('tr');
+      if (!photoTr) {
+        withoutPhotoRow++;
+        continue;
+      }
+      // 2 行目 (キャッチコピー行) は写真行の直後の <tr>
+      const catchTr =
+        photoTr.nextElementSibling && photoTr.nextElementSibling.tagName === 'TR'
+          ? photoTr.nextElementSibling
+          : null;
+
+      // ---- 写真 ----
+      // SalonBoard は img name="staffPhoto" を付ける
+      let photoEl = photoTr.querySelector('img[name="staffPhoto"]');
+      if (!photoEl) photoEl = photoTr.querySelector('img');
+      const photoUrl =
+        attr(photoEl, 'src') || attr(photoEl, 'data-src') || null;
+
+      // ---- 氏名 / 職種 / 施術歴 ----
+      // 写真行の <td> を順に: 順番 / PickUp / 写真 / 氏名 / 職種 / 施術歴 ...
+      // 写真 td は img を含むので、それを基準に「次の 2 つ」が 氏名 / 職種
+      const tds = Array.from(photoTr.querySelectorAll('td'));
+      let nameTd = null;
+      let positionTd = null;
+      const photoTdIdx = tds.findIndex((td) => td.querySelector('img'));
+      if (photoTdIdx >= 0) {
+        nameTd = tds[photoTdIdx + 1] ?? null;
+        positionTd = tds[photoTdIdx + 2] ?? null;
       } else {
-        // external_id がない行は name で de-dup (異なる店舗の同名スタッフは別物だが
-        // ここは 1 店舗のスタッフ一覧なので name 一意でよい)
-        if (seenNames.has(it.name)) return;
-        seenNames.add(it.name);
+        // fallback: img が見つからなくても、input 直後の input/td 構造から推測
+        nameTd = tds[3] ?? null;
+        positionTd = tds[4] ?? null;
       }
-      items.push(it);
-    }
+      const name = txt(nameTd);
+      const positionFull = txt(positionTd); // 例: "店長【指名料1000円】"
 
-    // --- 方式 A: リンク経由 (旧実装) ---
-    const links = Array.from(
-      document.querySelectorAll(
-        'a[href*="staffDetail"], a[href*="stylistDetail"], a[href*="staffEdit"], a[href*="stylistEdit"]'
-      ),
-    );
-    for (const link of links) {
-      const href = attr(link, 'href') || '';
-      const extId = extractStaffId(href);
-      if (!extId) continue;
-
-      let card = link;
-      for (let i = 0; i < 6; i++) {
-        if (!card.parentElement) break;
-        card = card.parentElement;
-        const t = txt(card);
-        if (t.length > 20) break;
+      // ---- キャッチコピー ----
+      let catchPhrase = '';
+      if (catchTr) {
+        // キャッチ行は colspan="4" の td を持つ。それを優先で拾う
+        const catchTd = catchTr.querySelector('td[colspan="4"]') ||
+                        catchTr.querySelector('td');
+        catchPhrase = txt(catchTd);
       }
-      let name = txt(link);
-      if (!name || name.length > 30) {
-        const nameEl = card.querySelector(
-          '[class*="name" i], h2, h3, .ttl, .staff-name'
-        );
-        name = txt(nameEl);
-      }
-      name = name
-        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
-        .replace(/^\s*No\.\s*/i, '')
-        .trim();
 
-      const photo = card.querySelector('img');
-      const positionEl = card.querySelector(
-        '[class*="position" i], [class*="role" i]'
+      // ---- 指名料 / 職種 を分離 ----
+      // "店長【指名料1000円】" → position="店長", designation_fee_raw="1000"
+      let position = positionFull;
+      let designationFeeRaw = null;
+      const feeMatch = positionFull.match(/【\s*指名料\s*([\d,]+)\s*円?\s*】/);
+      if (feeMatch) {
+        designationFeeRaw = feeMatch[1];
+        position = positionFull.replace(feeMatch[0], '').trim();
+      } else {
+        const feeMatch2 = positionFull.match(/指名料\s*([¥\\d,]+)/);
+        if (feeMatch2) designationFeeRaw = feeMatch2[1];
+      }
+
+      // ---- 掲載状態 ----
+      // 同インデックスの presentFlg input から取得
+      const presentInput = document.querySelector(
+        `input[name="frmStaffListStafferDtoList[${index}].presentFlg"]`
       );
-      const catchEl = card.querySelector(
-        '[class*="catch" i], [class*="message" i]'
+      const presentValue = presentInput ? attr(presentInput, 'value') : null;
+      // 1 = 掲載中, 0 = 非掲載。値が無ければ true 扱い (掲載中の方が多いため)
+      const isPublished =
+        presentValue === '0' ? false : true;
+
+      // ---- 順番 (sortNo) ----
+      const sortInput = document.querySelector(
+        `input[name="frmStaffListStafferDtoList[${index}].sortNo"]`
       );
-      const feeText = (txt(card).match(/指名料\s*([¥\d,]+)/) || [])[1];
+      const sortNo = sortInput ? Number(attr(sortInput, 'value')) : null;
 
-      pushItem({
-        external_id: extId,
-        name,
-        position: txt(positionEl),
-        catch_phrase: txt(catchEl),
-        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
-        designation_fee_raw: feeText || null,
-      });
-    }
-
-    // --- 方式 B: table 行スキャン (現「スタッフ掲載情報一覧」画面用) ---
-    // テーブル列の意味は order/pickup/photo/info(name+position+catch)/detail/hide-delete
-    // 1 行に img が必ず 1 つあり、表内最初のテキスト塊 (1〜10 文字程度) が名前。
-    const trAll = Array.from(document.querySelectorAll('table tr'));
-    for (const tr of trAll) {
-      const tds = Array.from(tr.querySelectorAll('td'));
-      if (tds.length < 3) continue;
-      const rowText = txt(tr);
-      if (!rowText) continue;
-      // ヘッダ行を skip
-      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(rowText)) continue;
-
-      // external_id を行内のリンク / hidden input / 全テキストから探す
-      let extId = null;
-      for (const a of tr.querySelectorAll('a[href]')) {
-        const h = attr(a, 'href') || '';
-        const id = extractStaffId(h);
+      // ---- external_id の追加 source: onclick の関数引数 ----
+      // 一部の行は onclick="staffEdit('W001161524')" 等を持つ
+      let extIdFromOnclick = null;
+      for (const a of photoTr.querySelectorAll('a[onclick]')) {
+        const oc = attr(a, 'onclick') || '';
+        const id = extractStaffId(oc);
         if (id) {
-          extId = id;
+          extIdFromOnclick = id;
           break;
         }
       }
-      if (!extId) {
-        for (const inp of tr.querySelectorAll(
-          'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
-        )) {
-          const id =
-            extractStaffId(attr(inp, 'value') || '') ||
-            extractStaffId(attr(inp, 'name') || '');
-          if (id) {
-            extId = id;
-            break;
-          }
-        }
-      }
-      if (!extId) {
-        // 行属性 / フォーム属性
-        const dataAttrs = [
-          attr(tr, 'data-staff-id'),
-          attr(tr, 'data-staffid'),
-          attr(tr, 'id'),
-        ]
-          .filter(Boolean)
-          .join(' ');
-        extId = extractStaffId(dataAttrs);
-      }
-      if (!extId) {
-        // 最終手段: 行テキスト全体からマッチ (露出してないことも多いので未取得なら null)
-        extId = extractStaffId(rowText);
-      }
 
-      // 名前は「氏名/職種/キャッチ」セル (= img を含まないセルで最初のテキスト塊)
-      let name = '';
-      let position = '';
-      let catchPhrase = '';
-      for (const td of tds) {
-        const t = txt(td);
-        if (!t) continue;
-        if (/^No\.\s*\d+$/.test(t)) continue;
-        if (/^\s*\d+\s*$/.test(t)) continue;
-        if (td.querySelector('img')) continue;
-        if (
-          td.querySelector(
-            'button, a.btn, input[type="button"], input[type="submit"]'
-          )
-        )
+      const finalExtId = extId || extIdFromOnclick;
+
+      // ---- 採用判定 ----
+      // 名前が無いなら skip (ヘッダ行など)
+      if (!name) continue;
+      // de-dup
+      if (finalExtId) {
+        if (seenIds.has(finalExtId)) continue;
+        seenIds.add(finalExtId);
+      } else {
+        if (seenNames.has(name)) {
+          nameCollisionCount++;
           continue;
-
-        // 行内の改行や複数 div を素直に拾う
-        const blocks = Array.from(td.querySelectorAll('div, p, span'))
-          .map(txt)
-          .filter(Boolean);
-        const lines = blocks.length
-          ? blocks
-          : t.split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
-        if (lines.length > 0) {
-          // 1行目 = 名前候補、2行目 = 職種 + 指名料、3行目以降 = キャッチ
-          name = lines[0];
-          if (lines.length >= 2) position = lines[1];
-          if (lines.length >= 3) catchPhrase = lines.slice(2).join(' ');
-        } else {
-          name = t;
         }
-        break;
-      }
-      name = String(name || '')
-        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
-        .replace(/^\s*No\.\s*/i, '')
-        .trim();
-      if (!name) continue;
-      if (SKIP_NAME_PATTERNS.test(name)) continue;
-
-      const photo = tr.querySelector('img');
-      const feeText = (rowText.match(/指名料\s*([¥\d,]+)/) || [])[1];
-
-      pushItem({
-        external_id: extId, // null でも OK (この場合 name で de-dup)
-        name,
-        position: position,
-        catch_phrase: catchPhrase,
-        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
-        designation_fee_raw: feeText || null,
-      });
-    }
-
-    // --- 方式 C: 「No.X」テキスト起点で行 container を見つけて抽出 ---
-    // SalonBoard 「スタッフ掲載情報一覧」は、各スタッフ行が独立した <table> で
-    // 構成されているケースがある (方式 B では最初の 1 行しか拾えない場合がある)。
-    // 方式 C では DOM 全体を text walk して "No. 1", "No. 2" ... を見つけ、
-    // その親要素を「行 container」として img / 名前 / 職種 / キャッチ を抜き出す。
-    const allNodes = document.querySelectorAll('*');
-    const seenContainers = new Set();
-    for (const node of allNodes) {
-      // 直接テキストノードに "No. <数字>" が含まれているかチェック (子の合計でない)
-      let hasNo = false;
-      for (const c of node.childNodes) {
-        if (c.nodeType === 3 /* TEXT_NODE */) {
-          const t = (c.nodeValue || '').trim();
-          if (/^No\.\s*\d+$/.test(t)) {
-            hasNo = true;
-            break;
-          }
-        }
-      }
-      if (!hasNo) continue;
-
-      // 行 container を上方向に探す (img を含む or 同一行を構成するレベル)
-      let row = node;
-      for (let depth = 0; depth < 8; depth++) {
-        if (!row.parentElement) break;
-        row = row.parentElement;
-        if (row.querySelector('img')) break;
-        const rt = txt(row);
-        if (rt.length > 30) break;
-      }
-      if (seenContainers.has(row)) continue;
-      seenContainers.add(row);
-
-      const rowText = txt(row);
-      if (!rowText) continue;
-      // ヘッダ container を除外
-      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(rowText)) continue;
-
-      // external_id を探す (方式 B と同じロジック)
-      let extId = null;
-      for (const a of row.querySelectorAll('a[href]')) {
-        const id = extractStaffId(attr(a, 'href') || '');
-        if (id) {
-          extId = id;
-          break;
-        }
-      }
-      if (!extId) {
-        for (const inp of row.querySelectorAll(
-          'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
-        )) {
-          const id =
-            extractStaffId(attr(inp, 'value') || '') ||
-            extractStaffId(attr(inp, 'name') || '');
-          if (id) {
-            extId = id;
-            break;
-          }
-        }
-      }
-      if (!extId) {
-        const dataAttrs = [
-          attr(row, 'data-staff-id'),
-          attr(row, 'data-staffid'),
-          attr(row, 'id'),
-        ]
-          .filter(Boolean)
-          .join(' ');
-        extId = extractStaffId(dataAttrs);
-      }
-      if (!extId) extId = extractStaffId(rowText);
-
-      // 名前 / 職種 / キャッチ を抽出
-      // 「氏名/職種/キャッチキャッチ」 セル相当の領域 = img を含まずボタンも含まない
-      // テキスト要素。row 全体から候補となる td / div を走査する。
-      let name = '';
-      let position = '';
-      let catchPhrase = '';
-
-      const textCandidates = Array.from(
-        row.querySelectorAll('td, .info, .staff-info, [class*="info"]')
-      ).filter((el) => {
-        if (el.querySelector('img')) return false;
-        if (
-          el.querySelector('button, input[type="button"], input[type="submit"]')
-        )
-          return false;
-        const tt = txt(el);
-        if (!tt) return false;
-        if (/^No\.\s*\d+$/.test(tt)) return false;
-        if (/^\s*\d+\s*$/.test(tt)) return false;
-        if (/^(PickUp|詳細|非掲載にする|削除する|要確認)$/.test(tt)) return false;
-        return true;
-      });
-
-      // 最も「複数行を持つ」候補を選ぶ (氏名/職種/キャッチが入っているはず)
-      let best = null;
-      let bestLineCount = 0;
-      for (const cand of textCandidates) {
-        const blocks = Array.from(cand.querySelectorAll('div, p, span'))
-          .map(txt)
-          .filter(Boolean);
-        const lc = blocks.length || (txt(cand).split(/[\n\r]+/).length);
-        if (lc > bestLineCount) {
-          best = cand;
-          bestLineCount = lc;
-        }
-      }
-      if (best) {
-        const blocks = Array.from(best.querySelectorAll('div, p, span'))
-          .map(txt)
-          .filter(Boolean);
-        const lines = blocks.length
-          ? blocks
-          : txt(best).split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
-        if (lines.length > 0) {
-          name = lines[0];
-          if (lines.length >= 2) position = lines[1];
-          if (lines.length >= 3) catchPhrase = lines.slice(2).join(' ');
-        }
+        seenNames.add(name);
       }
 
-      name = String(name || '')
-        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
-        .replace(/^\s*No\.\s*/i, '')
-        .replace(/^\s*\d+\s*[\.\)]?\s*/, '')
-        .trim();
-      if (!name) continue;
-      if (SKIP_NAME_PATTERNS.test(name)) continue;
-
-      const photo = row.querySelector('img');
-      const feeText = (rowText.match(/指名料\s*([¥\d,]+)/) || [])[1];
-
-      pushItem({
-        external_id: extId,
+      items.push({
+        external_id:
+          finalExtId ||
+          // SalonBoard の hidden input が落ちている場合 (実際にはほぼ無い) に備えて
+          // index ベースの代替キーを使う。次回 N が変わっても name でフォールバック
+          // できるよう name キーも含める。
+          `idx:${index}:name:${name.slice(0, 32)}`,
         name,
         position,
         catch_phrase: catchPhrase,
-        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
-        designation_fee_raw: feeText || null,
-      });
-    }
-
-    // --- 方式 D (v0.2.12 改): img を持つ <tr> ごとに直接 name/職種/キャッチを抽出 ---
-    // v0.2.11 では「同 tbody を 1 回だけ」処理する制限があり、
-    // 全スタッフが 1 つの大きな共通 tbody に並ぶ構造だと 1 件しか抽出できなかった。
-    // v0.2.12 では tbody スコープを廃止し、imgTr ごとに同 tr 内 (+ 直前/直後の tr) を見る。
-    const imgTrs = Array.from(document.querySelectorAll('tr')).filter(
-      (tr) => tr.querySelector('img'),
-    );
-    let methodDCount = 0;
-    // 名前 dump 用 (debug 出力)
-    const methodDSamples = [];
-    for (let idx = 0; idx < imgTrs.length; idx++) {
-      const imgTr = imgTrs[idx];
-      // group = imgTr 自身 + 直後 2 行 (氏名/キャッチが別 tr に分かれている構造に対応)
-      const group = [imgTr];
-      let nextEl = imgTr.nextElementSibling;
-      let added = 0;
-      while (nextEl && added < 2) {
-        if (nextEl.tagName === 'TR' && !nextEl.querySelector('img')) {
-          group.push(nextEl);
-          added++;
-        } else if (nextEl.tagName === 'TR' && nextEl.querySelector('img')) {
-          break; // 次のスタッフ写真行に到達したら終了
-        }
-        nextEl = nextEl.nextElementSibling;
-      }
-      const groupText = group.map(txt).join(' ');
-      if (!groupText) continue;
-      // ヘッダ行除外
-      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(groupText)) continue;
-
-      // external_id 探索
-      let extId = null;
-      for (const tr of group) {
-        for (const a of tr.querySelectorAll('a[href]')) {
-          const id = extractStaffId(attr(a, 'href') || '');
-          if (id) {
-            extId = id;
-            break;
-          }
-        }
-        if (extId) break;
-        for (const inp of tr.querySelectorAll(
-          'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
-        )) {
-          const id =
-            extractStaffId(attr(inp, 'value') || '') ||
-            extractStaffId(attr(inp, 'name') || '');
-          if (id) {
-            extId = id;
-            break;
-          }
-        }
-        if (extId) break;
-      }
-      if (!extId) extId = extractStaffId(groupText);
-
-      // 名前/職種/キャッチ抽出:
-      // group の中の全 td を走査して、img/ボタンを含まないテキスト td を集める。
-      // <br> 区切りで複数行を持っていれば最優先で採用。
-      const textTds = [];
-      for (const tr of group) {
-        for (const td of tr.querySelectorAll('td')) {
-          if (td.querySelector('img')) continue;
-          if (
-            td.querySelector(
-              'button, input[type="button"], input[type="submit"], a.btn'
-            )
-          )
-            continue;
-          const tt = txt(td);
-          if (!tt) continue;
-          if (/^No\.?\s*\d*$/.test(tt)) continue;
-          if (/^\s*\d+\s*$/.test(tt)) continue;
-          if (
-            /^(PickUp|詳細|非掲載にする|削除する|要確認|変更内容を登録する)$/.test(tt)
-          )
-            continue;
-          textTds.push(td);
-        }
-      }
-
-      // 各 textTd を「<br> で分解した lines」のリストに変換し、最大行数のものを採用
-      function tdToLines(td) {
-        const html = td.innerHTML || '';
-        const lines = html
-          .replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<\/(div|p|li)>/gi, '\n')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&nbsp;/g, ' ')
-          .split('\n')
-          .map((s) => s.trim().replace(/\s+/g, ' '))
-          .filter(Boolean);
-        if (lines.length > 0) return lines;
-        const t = txt(td);
-        return t ? [t] : [];
-      }
-      let bestLines = [];
-      for (const td of textTds) {
-        const lines = tdToLines(td);
-        if (lines.length > bestLines.length) bestLines = lines;
-      }
-
-      let name = '';
-      let position = '';
-      let catchPhrase = '';
-      if (bestLines.length > 0) {
-        name = bestLines[0];
-        if (bestLines.length >= 2) position = bestLines[1];
-        if (bestLines.length >= 3) catchPhrase = bestLines.slice(2).join(' ');
-      } else if (textTds.length > 0) {
-        // bestLines が取れなかったケース: 最初の textTd のテキストを name に
-        name = txt(textTds[0]);
-      }
-
-      name = String(name || '')
-        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
-        .replace(/^\s*No\.\s*/i, '')
-        .trim();
-
-      // 診断用に最初の 3 件はサンプルを残す (HTML/構造のヒント)
-      if (idx < 3) {
-        methodDSamples.push({
-          idx,
-          groupTrCount: group.length,
-          textTdCount: textTds.length,
-          name,
-          bestLinesCount: bestLines.length,
-          bestLinesPreview: bestLines.slice(0, 3),
-          extId,
-        });
-      }
-
-      if (!name) continue;
-      if (SKIP_NAME_PATTERNS.test(name)) continue;
-
-      const photo = imgTr.querySelector('img');
-      const feeText = (groupText.match(/指名料\s*([¥\d,]+)/) || [])[1];
-
-      methodDCount++;
-      pushItem({
-        external_id: extId,
-        name,
-        position,
-        catch_phrase: catchPhrase,
-        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
-        designation_fee_raw: feeText || null,
+        photo_url: photoUrl,
+        designation_fee_raw: designationFeeRaw,
+        is_published: isPublished,
+        sort_no: sortNo,
       });
     }
 
     return {
       items,
-      totalLinks: links.length,
-      totalRows: trAll.length,
-      methodCContainers: seenContainers.size,
-      methodDImgTrs: imgTrs.length,
-      methodDExtracted: methodDCount,
-      methodDSamples,
+      staffIdInputs: staffIdInputs.length,
+      nameCollisionCount,
+      withoutPhotoRow,
     };
   });
 
   const rows = [];
   for (const it of raw.items) {
     rows.push({
-      // external_id が無いスタッフも DB に保存できるよう "name:<name>" 形式の
-      // 代替キーを生成 (将来 SB 側から ID が取れるようになったら上書きされる)
-      external_id: String(
-        it.external_id || `name:${(it.name || '').slice(0, 64)}`
-      ),
+      external_id: String(it.external_id),
       name: cleanText(it.name) ?? it.name,
       position: cleanText(it.position),
       designation_fee: parseYen(it.designation_fee_raw),
       catch_phrase: cleanText(it.catch_phrase),
       bio: null,
       photo_url: it.photo_url ? absoluteUrl(it.photo_url) : null,
-      is_published: true,
+      is_published: it.is_published !== false,
     });
   }
   return {
@@ -1440,16 +1114,20 @@ async function scrapeStaff(page) {
       itemsFound: raw.items.length,
       parsed: rows.length,
       skipped: 0,
-      totalLinks: raw.totalLinks,
-      totalRows: raw.totalRows,
-      methodCContainers: raw.methodCContainers ?? 0,
-      methodDImgTrs: raw.methodDImgTrs ?? 0,
-      methodDExtracted: raw.methodDExtracted ?? 0,
-      methodDSamples: raw.methodDSamples ?? [],
+      // 後方互換のため旧フィールド名も残す (Admin/UI 側で参照されていなければ無視可能)
+      totalLinks: 0,
+      totalRows: 0,
+      methodCContainers: 0,
+      methodDImgTrs: 0,
+      methodDExtracted: 0,
+      methodDSamples: [],
+      // 新しい診断情報
+      staffIdInputs: raw.staffIdInputs,
+      nameCollisionCount: raw.nameCollisionCount,
+      withoutPhotoRow: raw.withoutPhotoRow,
     },
   };
 }
-
 function absoluteUrl(src) {
   if (!src) return null;
   if (/^https?:/i.test(src)) return src;
@@ -1470,6 +1148,34 @@ async function scrapeBlogs(page, opts = {}) {
   await page.goto(BLOG_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
+  // ----------------------------------------------------------------
+  // SalonBoard ブログ一覧の DOM 仕様 (確認済み):
+  //
+  //   <table id="blogListArea">
+  //     <thead>...</thead>
+  //     <tbody>
+  //       <!-- 1 ブログ = 連続 2 つの <tr> -->
+  //       <tr class="mod_middle">
+  //         <td><a href="/KLP/blog/blog/?blogId=A116474081">タイトル</a></td>
+  //         <td>カテゴリ</td>
+  //         <td rowspan="2"><img></td>            <!-- 画像 (画像が無いと "-") -->
+  //         <td rowspan="2">投稿者名<br>(本名)</td>
+  //         <td>投稿日 / 更新日</td>
+  //         <td rowspan="2">
+  //           <a class="mod_btn_detail_01">詳細</a>
+  //           <a class="mod_btn_delete_01" href="#A116474081">削除</a>
+  //         </td>
+  //       </tr>
+  //       <tr>
+  //         <td colspan="2">クーポン名 or "-"</td>
+  //         <td>反映済み / 未反映 (ステータス)</td>
+  //       </tr>
+  //     </tbody>
+  //   </table>
+  //
+  // 旧実装は単 tr 想定で blogId を fallback で取っていたが、上記の通り href の
+  // ?blogId=XXX が確定で取れるので、それを起点に確実に抽出する。
+  // ----------------------------------------------------------------
   const raw = await page.evaluate(() => {
     function txt(el) {
       return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
@@ -1477,55 +1183,122 @@ async function scrapeBlogs(page, opts = {}) {
     function attr(el, name) {
       return el ? el.getAttribute(name) : null;
     }
-    // 記事カードは table 行 or .blog-item 系
-    const candidates = Array.from(
-      document.querySelectorAll(
-        'table tbody tr, [class*="blog" i] li, [class*="blogItem" i], article',
-      ),
+    /** "?blogId=A116474081" or "#A116474081" 形式から ID を抽出 */
+    function extractBlogId(s) {
+      if (!s) return null;
+      const m1 = String(s).match(/[?&]blogId=([A-Za-z0-9_-]+)/);
+      if (m1) return m1[1];
+      const m2 = String(s).match(/#([A-Za-z0-9_-]{6,})/);
+      if (m2) return m2[1];
+      const m3 = String(s).match(/articleId=([A-Za-z0-9_-]+)/);
+      if (m3) return m3[1];
+      return null;
+    }
+
+    // タイトル行を見つける: blogId href を持つ tr
+    const titleAnchors = Array.from(
+      document.querySelectorAll('a[href*="blogId="]')
     );
+    const seen = new Set();
     const items = [];
-    for (const node of candidates) {
-      const titleEl =
-        node.querySelector('a[href*="blogDetail"], a[href*="blog/"]') ||
-        node.querySelector('.blog-title, h2, h3, .ttl');
-      const title = txt(titleEl);
-      if (!title || title.length < 2 || title.length > 200) continue;
-      const link =
-        node.querySelector('a[href*="blogDetail"], a[href*="blog/"]') || node.querySelector('a[href]');
-      const dateText =
-        txt(node.querySelector('[class*="date" i], time')) ||
-        (txt(node).match(/(\d{4}[\/\-年]\d{1,2}[\/\-月]\d{1,2})/) || [])[1];
-      const author = txt(node.querySelector('[class*="author" i], [class*="staff" i]'));
-      const cover = node.querySelector('img');
-      const category = txt(node.querySelector('[class*="cat" i], [class*="genre" i]'));
-      const viewText = txt(node).match(/(\d{1,6})\s*view/i);
-      const excerpt = txt(node.querySelector('[class*="excerpt" i], [class*="body" i], p'));
+    let missingPairTr = 0;
+
+    for (const anchor of titleAnchors) {
+      const blogId = extractBlogId(attr(anchor, 'href'));
+      if (!blogId) continue;
+      if (seen.has(blogId)) continue; // 同一ブログの「詳細」リンクも引っかかるので skip
+      seen.add(blogId);
+
+      const titleTr = anchor.closest('tr');
+      if (!titleTr) continue;
+      const pairTr =
+        titleTr.nextElementSibling && titleTr.nextElementSibling.tagName === 'TR'
+          ? titleTr.nextElementSibling
+          : null;
+      if (!pairTr) missingPairTr++;
+
+      const titleTds = Array.from(titleTr.querySelectorAll('td'));
+      const pairTds = pairTr ? Array.from(pairTr.querySelectorAll('td')) : [];
+
+      // タイトル (titleAnchor のテキスト = タイトル)
+      const title = txt(anchor);
+
+      // カテゴリ: titleTr の 2 番目の td (タイトル td の次)
+      // titleAnchor が居る td を起点に「次の td」をカテゴリと判断
+      const titleTd = anchor.closest('td');
+      const titleTdIdx = titleTds.indexOf(titleTd);
+      const category =
+        titleTdIdx >= 0 && titleTds[titleTdIdx + 1]
+          ? txt(titleTds[titleTdIdx + 1])
+          : '';
+
+      // 画像: titleTr 内の img (rowspan="2" で次行に跨る場合あり)
+      const img = titleTr.querySelector('img');
+      const coverUrl = attr(img, 'src') || attr(img, 'data-src') || null;
+      // "-" だけのセルは画像無し
+      const coverIsEmpty = !coverUrl;
+
+      // 投稿者 (rowspan="2"): titleTr 内で img を含まない、(本名) を含む可能性のあるセル
+      // 確実にとるため、「最も長いテキスト + 投稿日らしい文字列を含まない」セルを採用
+      let authorTd = null;
+      for (const td of titleTds) {
+        if (td === titleTd) continue;
+        if (td.querySelector('img')) continue;
+        if (td.querySelector('a.mod_btn_detail_01, a.mod_btn_delete_01')) continue;
+        const t = txt(td);
+        if (!t) continue;
+        if (/^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/.test(t)) continue; // 投稿日
+        if (/^(ビューティー|ファッション|ヘア|ネイル|アイ|エステ|ボディ|食|その他|-)$/.test(t)) continue; // カテゴリ候補
+        if (!authorTd || txt(td).length > txt(authorTd).length) {
+          authorTd = td;
+        }
+      }
+      // 投稿者名は "momoka <br>(土井 孝士郎)" のような形式。最初の改行/(の前を取る
+      const authorRaw = txt(authorTd);
+      const authorName = authorRaw
+        .replace(/[\(（].*?[\)）]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      // 投稿日: titleTr 内で "YYYY/MM/DD" or "YYYY-MM-DD" にマッチするセル
+      let postedAtRaw = null;
+      for (const td of titleTds) {
+        const t = txt(td);
+        const m = t.match(/\d{4}[\/\-年]\d{1,2}[\/\-月]\d{1,2}日?(?:\s+\d{1,2}:\d{2})?/);
+        if (m) {
+          postedAtRaw = m[0];
+          break;
+        }
+      }
+
+      // クーポン名 (pairTr 1番目の td)
+      const couponName = pairTds[0] ? txt(pairTds[0]) : '';
+
+      // ステータス (pairTr 内、最後の td が "反映済み" or "未反映")
+      let statusText = '';
+      for (const td of pairTds) {
+        const t = txt(td);
+        if (/反映済み|未反映|公開中|下書き/.test(t)) {
+          statusText = t;
+          break;
+        }
+      }
+      const isPublished = /反映済み|公開中/.test(statusText);
+
       items.push({
-        external_id:
-          attr(node, 'data-blog-id') ||
-          attr(link, 'data-id') ||
-          (attr(link, 'href') || '').match(/(?:blogId|articleId)=([\w-]+)/)?.[1] ||
-          (attr(link, 'href') || '').match(/blog\/.*?(\d+)/)?.[1] ||
-          title.slice(0, 32),
+        external_id: blogId,
         title,
-        link_href: attr(link, 'href'),
-        body_excerpt: excerpt || null,
-        cover_image_url: attr(cover, 'src') || attr(cover, 'data-src') || null,
-        category: category || null,
-        author_name: author || null,
-        date_raw: dateText || null,
-        view_raw: viewText ? viewText[1] : null,
+        link_href: attr(anchor, 'href'),
+        body_excerpt: couponName && couponName !== '-' ? couponName : null,
+        cover_image_url: coverIsEmpty ? null : coverUrl,
+        category: category && category !== '-' ? category : null,
+        author_name: authorName || null,
+        date_raw: postedAtRaw,
+        view_raw: null, // SalonBoard 一覧には view 数がない
+        is_published: isPublished,
       });
     }
-    // 重複除去
-    const seen = new Set();
-    const unique = [];
-    for (const i of items) {
-      if (seen.has(i.external_id)) continue;
-      seen.add(i.external_id);
-      unique.push(i);
-    }
-    return { items: unique };
+    return { items, missingPairTr, titleAnchors: titleAnchors.length };
   });
 
   const rows = [];
@@ -1540,7 +1313,7 @@ async function scrapeBlogs(page, opts = {}) {
       author_external_id: null,
       author_name: it.author_name,
       posted_at: parseJstDateTime(it.date_raw) ?? null,
-      is_published: true,
+      is_published: it.is_published !== false,
       view_count: it.view_raw ? parseInt(it.view_raw, 10) : null,
       url: it.link_href ? absoluteUrl(it.link_href) : null,
     });
@@ -1607,13 +1380,10 @@ async function scrapeBlogs(page, opts = {}) {
         };
       });
       if (detail?.html) {
-        // 本文 HTML を 200,000 文字でカット (DB 圧縮)
         r.body_html = String(detail.html).slice(0, 200_000);
-        // excerpt が空なら本文先頭を抜粋として保存
         if (!r.body_excerpt && detail.text) {
           r.body_excerpt = String(detail.text).slice(0, 280);
         }
-        // 投稿日時がまだ取れていなければ詳細ページから補う
         if (!r.posted_at && detail.dateHint) {
           const dt = parseJstDateTime(detail.dateHint);
           if (dt) r.posted_at = dt;
@@ -1632,14 +1402,15 @@ async function scrapeBlogs(page, opts = {}) {
     debug: {
       itemsFound: raw.items.length,
       parsed: rows.length,
-      skipped: raw.items.length - rows.length,
+      skipped: 0,
       detailHit,
       detailMiss,
       detailAttempted: targets.length,
+      titleAnchors: raw.titleAnchors,
+      missingPairTr: raw.missingPairTr,
     },
   };
 }
-
 // ----------------- 顧客詳細スクレイパー (Phase 4) -----------------
 
 /**

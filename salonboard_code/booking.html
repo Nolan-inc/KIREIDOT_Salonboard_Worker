@@ -1,0 +1,596 @@
+<div class="contents scheduleContents">
+	
+    <div id="scheduleHeader" class="scheduleHeader jscScheduleHeader">
+<div class="scheduleHeaderBaseInfo cf">
+    <div class="scheduleHeaderController">
+        <div class="mod_column03 cf">
+            <p class="columnBlock mt2 mr2" id="backDayMoveArrow">
+                            <a class="btn_go_last_business_day" href="/KLP/schedule/salonSchedule/?date=20260529"></a>
+                        </p>
+                    <p class="columnBlock mod_font02 mod_txt_02 mt2 ml5 mr5" id="openCalendarLabel">
+                <a href="javascript:void(0)"><b>5月30日（土）</b></a>
+            </p>
+            <p class="columnBlock mt2 mr10" id="nextDayMoveArrow">
+                            <a class="btn_go_next_business_day" href="/KLP/schedule/salonSchedule/?date=20260531"></a>
+                        </p>
+                    <ul class="btnScheduleModeChangeBar" id="changeMode">
+                <li class="jscBtnScheduleModeChangeName btnScheduleModeChangeName">
+            </li></ul>
+            <div class="mod_sel_staff columnBlock mt2 cf">
+                    <select class="columnBlock stockNameList mr5 w135" id="stockNameList"><option value="STAFF_W001161524_20260530">nana</option><option value="STAFF_W001161528_20260530">yui</option><option value="STAFF_W001183833_20260530">miu</option><option value="STAFF_W001216515_20260530">sena</option><option value="STAFF_W001364850_20260530">aika</option><option value="STAFF_W001389345_20260530">miyu</option><option value="STAFF_W001168402_20260530">yuri</option><option value="STAFF_W001170608_20260530">erika</option><option value="STAFF_W001173701_20260530">cobo</option><option value="STAFF_W001179740_20260530">momoka</option><option value="STAFF_W001179741_20260530">saki</option><option value="STAFF_W001180661_20260530">hikari</option><option value="STAFF_W001166561_20260530">Mei</option><option value="STAFF_W001183846_20260530">satsuki</option><option value="STAFF_W001196708_20260530">yukina</option><option value="STAFF_W001210310_20260530">renka</option><option value="STAFF_W001211016_20260530">minori</option><option value="STAFF_W001166562_20260530">cheka</option><option value="EQUIPMENT_EQ00000000394327_20260530">ベッド1</option><option value="EQUIPMENT_EQ00000000394328_20260530">ベッド2</option><option value="EQUIPMENT_EQ00000000394329_20260530">ベッド3</option><option value="EQUIPMENT_EQ00000000394330_20260530">ベッド4</option><option value="EQUIPMENT_EQ00000000425949_20260530">フリー設備</option></select>
+                    <p class="columnBlock mt2 b">を表示</p>
+                </div>
+            </div>
+        </div>
+    <div class="scheduleHeaderNav">
+        <div class="mod_column03 cf">
+            <ul class="columnBlock mr5">
+                <li class="mod_column04 pr5"><a href="#" id="showLegend" class="mod_btn_03">アイコン説明</a></li>
+                <li class="mod_column04">
+                    <a href="/KLP/schedule/printSchedule/?date=20260530" id="schedulePrint" class="mod_btn_04">印刷</a></li>
+            </ul>
+            <div class="columnBlock mr10" id="currentDispArea">
+                <div class="mod_column03 cf">
+                    <p class="columnBlock">
+                        <a href="/KLP/schedule/salonSchedule/?date=20260530" id="showCurrent" class="mod_btn_update_02">最新を表示</a></p>
+                </div>
+            </div>
+            <div class="columnBlock mr40">
+                <div class="mod_column03 cf">
+                    <p class="columnBlock pt1 update01">更新日時：05/30 20:06</p>
+                    <span id="rlastupdate" class="display_none">20260530200622</span>
+                </div>
+            </div>
+            <div class="columnBlock">
+                <p class="btn_help01">
+                    <a href="javascript:void(0);" id="questionManual"><img src="https://imgbp.salonboard.com/KLP/img/btn_help_01.png" width="29" height="29" alt="ヘルプ" class="rollover" id="btn_help"></a>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="display_none" id="display_none_mod_box_complete">
+    </div>
+<div class="mod_box_warning ml15 mr15 display_none">
+    <div id="warningMessageArea" class="cf"></div>
+</div>
+<div class="scheduleTimeTableWrap">
+    <ul class="scheduleTimeTableHeader jscScheduleTimeTableHeader">
+        <li class="scheduleTimeTableReserveTitle">予約数</li>
+    </ul>
+    <div class="scheduleTimeTableFrame jscScheduleTimeTableFrame" style="width: 1059px;"><div class="scheduleClock"><div class="scheduleCurrentTimeHead jscScheduleCurrentTimeHead" style="height: 45px; left: 1334.12px;"></div></div>
+        <div class="scheduleTimeTable jscScheduleTimeTable" id="timeFrameHeaderArea">
+            <ol class="scheduleTimeTableHourList"><li class="scheduleTimeTableHour jscScheduleTimeTableHour">10:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">11:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">12:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">13:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">14:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">15:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">16:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">17:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">18:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">19:00</li><li class="scheduleTimeTableHour jscScheduleTimeTableHour">20:00</li></ol><ol class="scheduleTimeTableReserveCountList"><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">3</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">3</li><li class="scheduleTimeTableReserveCount">1</li><li class="scheduleTimeTableReserveCount">1</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">3</li><li class="scheduleTimeTableReserveCount">3</li><li class="scheduleTimeTableReserveCount">4</li><li class="scheduleTimeTableReserveCount">5</li><li class="scheduleTimeTableReserveCount">6</li><li class="scheduleTimeTableReserveCount">4</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">3</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">2</li><li class="scheduleTimeTableReserveCount">0</li><li class="scheduleTimeTableReserveCount">0</li></ol></div>
+    </div>
+</div>
+</div><div id="schedule" class="scheduleMain jscScheduleMain is5min" data-time-interval="5" style="margin-bottom: 45px;"><div class="scheduleMainHeadFrame jscScheduleMainHeadFrame"><ul class="scheduleMainHeadList jscScheduleMainHeadList isStaff jscScheduleMainHeadListStaff"><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001161524_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="nana"><span class="scheduleLinkInner">nana</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001161528_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="yui"><span class="scheduleLinkInner">yui</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001183833_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="miu"><span class="scheduleLinkInner">miu</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001216515_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="sena"><span class="scheduleLinkInner">sena</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001364850_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="aika"><span class="scheduleLinkInner">aika</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001389345_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="miyu"><span class="scheduleLinkInner">miyu</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001168402_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="yuri"><span class="scheduleLinkInner">yuri</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001170608_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="erika"><span class="scheduleLinkInner">erika</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001173701_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="cobo"><span class="scheduleLinkInner">cobo</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001179740_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="momoka"><span class="scheduleLinkInner">momoka</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001179741_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="saki"><span class="scheduleLinkInner">saki</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001180661_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="hikari"><span class="scheduleLinkInner">hikari</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001166561_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="Mei"><span class="scheduleLinkInner">Mei</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001183846_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="satsuki"><span class="scheduleLinkInner">satsuki</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001196708_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="yukina"><span class="scheduleLinkInner">yukina</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001210310_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="renka"><span class="scheduleLinkInner">renka</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001211016_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="minori"><span class="scheduleLinkInner">minori</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="STAFF_W001166562_20260530" style="height: 74px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="cheka"><span class="scheduleLinkInner">cheka</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li></ul><ul class="scheduleMainHeadList jscScheduleMainHeadList isEquipment jscScheduleMainHeadListEquipment"><li class="scheduleMainHead jscScheduleMainHead" id="EQUIPMENT_EQ00000000394327_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="ベッド1"><span class="scheduleLinkInner">ベッド1</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="EQUIPMENT_EQ00000000394328_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="ベッド2"><span class="scheduleLinkInner">ベッド2</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="EQUIPMENT_EQ00000000394329_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="ベッド3"><span class="scheduleLinkInner">ベッド3</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="EQUIPMENT_EQ00000000394330_20260530" style="height: 73px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="ベッド4"><span class="scheduleLinkInner">ベッド4</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li><li class="scheduleMainHead jscScheduleMainHead" id="EQUIPMENT_EQ00000000425949_20260530" style="height: 74px;">
+    <p class="scheduleLinkWrap">
+        <a class="scheduleLink" title="フリー設備"><span class="scheduleLinkInner">フリー設備</span></a>
+    </p>
+    <p class="scheduleCapacity">受付可能数：1</p>
+</li></ul></div><div class="scheduleMainFrame jscScheduleMainFrame notDragging" style="width: 1059px;"><div class="scheduleClock"><div class="scheduleCurrentTime jscScheduleCurrentTime" style="height: 1691px; left: 1334.12px;"></div></div><div class="scheduleMainTableWrap jscScheduleMainTableWrap" style="width: 1453px;"><ul class="scheduleMainTable jscScheduleMainTable isStaff jscScheduleMainTableStaff"><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell" style="left: 0px;"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 891px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:45", "18:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask ui-draggable ui-draggable-handle ui-resizable" style="left: 0px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["10:00", "11:30"]</p>
+</div>
+<div class="ui-resizable-handle ui-resizable-e" style="z-index: 90;"></div><div class="ui-resizable-handle ui-resizable-w" style="z-index: 90;"></div></div><div class="scheduleToDo jscScheduleToDo staffTask ui-draggable ui-draggable-handle ui-resizable" style="left: 198px; width: 330px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:30", "14:00"]</p>
+</div>
+<div class="ui-resizable-handle ui-resizable-e" style="z-index: 90;"></div><div class="ui-resizable-handle ui-resizable-w" style="z-index: 90;"></div></div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1056px; width: 264px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:00", "20:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1320px; width: 132px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["20:00", "21:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 825px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="但馬花佳 様" style="text-decoration: none;">但馬花佳 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:15", "17:30"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 1155px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="大森桃花 様" style="text-decoration: none;">大森桃花 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:45", "20:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 0px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["10:00", "11:30"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 198px; width: 627px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:30", "16:15"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 990px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["17:30", "19:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1320px; width: 132px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["20:00", "21:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 990px; width: 33px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["17:30", "17:45"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 1122px; width: 33px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:30", "18:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 0px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["10:00", "11:30"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 198px; width: 1122px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:30", "20:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1320px; width: 132px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["20:00", "21:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 132px; width: 33px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:00", "11:15"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 198px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="古谷遥香 様" style="text-decoration: none;">古谷遥香 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:30", "12:45"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 363px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["12:45", "14:00"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 528px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["14:00", "15:15"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 759px; width: 198px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["15:45", "17:15"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 957px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="勝山彩音 様" style="text-decoration: none;">勝山彩音 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["17:15", "18:30"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 264px; width: 99px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["12:00", "12:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 528px; width: 165px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["14:00", "15:15"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1122px; width: 330px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:30", "21:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 0px; width: 198px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["10:00", "11:30"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 198px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="橋本紗花 様" style="text-decoration: none;">橋本紗花 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["11:30", "12:45"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask done" style="left: 528px; width: 264px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">フェイシャル</li><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">ブライダル</li><li class="scheduleReserveIcon" style="background-color: rgb(156, 154, 156);">その他</li><li class="scheduleReserveIcon mod_icon_15_sch">&nbsp;</li><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="五十嵐 彩香 様" style="text-decoration: none;">五十嵐 彩香 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["14:00", "16:00"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 825px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:15", "17:30"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask done" style="left: 1056px; width: 264px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">フェイシャル</li><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">ブライダル</li><li class="scheduleReserveIcon" style="background-color: rgb(156, 154, 156);">その他</li><li class="scheduleReserveIcon mod_icon_15_sch">&nbsp;</li><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="井ノ口 青空 様" style="text-decoration: none;">井ノ口 青空 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:00", "20:00"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 264px; width: 99px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["12:00", "12:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 825px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:15", "17:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1122px; width: 330px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:30", "21:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleToDo jscScheduleToDo staffTask isDayOff" style="height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休日</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["0:00", "29:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 0px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="白井周子 様" style="text-decoration: none;">白井周子 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["10:00", "11:15"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 693px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="ゲスト 様" style="text-decoration: none;">ゲスト 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["15:15", "16:30"]</p>
+</div>
+</div><div class="scheduleReservation jscScheduleReservation staffTask" style="left: 858px; width: 165px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="柴沼花乃 様" style="text-decoration: none;">柴沼花乃 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:30", "17:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 528px; width: 165px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["14:00", "15:15"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 825px; width: 198px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">休憩</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["16:15", "17:45"]</p>
+</div>
+</div><div class="scheduleToDo jscScheduleToDo staffTask" style="left: 1122px; width: 330px; height: 73px; top: 0px;">
+<div class="scheduleToDoInner">
+    <span class="todoTitle">ＰＯＳシフト</span><span class="todoMemo"></span>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["18:30", "21:00"]</p>
+</div>
+</div></div></li></ul><ul class="scheduleMainTable jscScheduleMainTable isEquipment jscScheduleMainTableEquipment"><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div><div class="scheduleReservation jscScheduleReservation equipmentTask done" style="left: 528px; width: 264px; height: 58px;">
+<div class="scheduleReservationInner">
+    <ul class="scheduleReserveIconList"><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">フェイシャル</li><li class="scheduleReserveIcon" style="background-color: rgb(196, 155, 194);">ブライダル</li><li class="scheduleReserveIcon" style="background-color: rgb(156, 154, 156);">その他</li><li class="scheduleReserveIcon mod_icon_15_sch">&nbsp;</li><li class="scheduleReserveIcon info">i</li></ul>
+    <ul class="scheduleReserveIconList">
+        
+    <li class="scheduleReserveIcon customerNew">新</li><li class="scheduleReserveName" title="五十嵐 彩香 様" style="text-decoration: none;">五十嵐 彩香 様</li></ul>
+    <p class="scheduleTimeZoneSetting jscScheduleTimeZoneSetting">["14:00", "16:00"]</p>
+</div>
+</div></div></li><li class="scheduleMainTableLine jscScheduleMainTableLine"><ol class="scheduleTimeList jscScheduleTimeList"><li class="scheduleTime">10:00</li><li class="scheduleTime">11:00</li><li class="scheduleTime">12:00</li><li class="scheduleTime">13:00</li><li class="scheduleTime">14:00</li><li class="scheduleTime">15:00</li><li class="scheduleTime">16:00</li><li class="scheduleTime">17:00</li><li class="scheduleTime">18:00</li><li class="scheduleTime">19:00</li><li class="scheduleTime">20:00</li></ol><div class="scheduleSetArea jscScheduleSetArea jscChangeCellColor ui-droppable"><div class="emulateCell jscEmulateCell"></div><div class="emulateCurrentCell jscEmulateCurrentCell"></div></div></li></ul></div></div></div><div class="mod_popup_02 js_calendar w564 cf" id="calendarArea" style="display: none;"></div>
+<div id="scheduleFooter" class="scheduleNavBar cf jscScheduleFooter isFollow">
+<div class="scheduleScrollFrame jscScheduleScrollFrame" style="width: 1059px;">
+    <div class="scheduleScrollBar jscScheduleScrollBar" style="width: 1473px;"></div>
+</div>
+<ul class="scheduleCalenderBtnList cf">
+    <li id="openCalendarPanel" class="scheduleCalenderBtn"><a href="#" class="mod_btn_calendar_01">カレンダーを表示</a></li>
+    <li class="scheduleCalenderBtn">
+<a class="mod_btn_calendar_02" href="/KLP/schedule/salonSchedule/?date=20260530">今日に移動</a>
+</li>
+</ul>
+<div class="scheduleCalenderPager">
+    <ul class="scheduleCalenderPagerNavList">
+        <li class="scheduleCalenderPagerNav scheduleCalenderPagerPrev">
+<a class="mod_btn_calendar_03" href="/KLP/schedule/salonSchedule/?date=20260529">前の日</a>
+    </li>
+        <li class="scheduleCalenderPagerNav scheduleCalenderPagerNext">
+<a class="mod_btn_calendar_04" href="/KLP/schedule/salonSchedule/?date=20260531">次の日</a>
+    </li>
+    </ul>
+    <ol class="scheduleCalenderDayList cf">
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260528">28</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260529">29</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav isToday" href="/KLP/schedule/salonSchedule/?date=20260530">30</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav isSun" href="/KLP/schedule/salonSchedule/?date=20260531">31</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260601">1</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260602">2</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260603">3</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260604">4</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260605">5</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav isSat" href="/KLP/schedule/salonSchedule/?date=20260606">6</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav isSun" href="/KLP/schedule/salonSchedule/?date=20260607">7</a>
+        </li>
+<li class="scheduleCalenderDay">
+    <a class="scheduleCalenderDayNav " href="/KLP/schedule/salonSchedule/?date=20260608">8</a>
+        </li>
+</ol>
+</div>
+<div class="newPlanWrap scheduleNewPlanMaker">
+    <div id="newPlan" class="jscNewPlan mod_btn_schedule ui-draggable ui-draggable-handle">
+    </div>
+    <div class="newPlanTooltip">
+        スケジュールにドラッグ&amp;ドロップすると<br>
+        予定を登録することができます
+        <span class="newPlanTooltipArrow"></span>
+    </div>
+</div>
+<ul class="scheduleSettingBtnList cf">
+<li class="scheduleSettingBtn">
+        <a href="/KLP/set/shiftSetup/?date=202605" id="setupShift"><span class="msg mod_btn_shift">シフト</span></a>
+    </li>
+<li class="scheduleSettingBtn">
+<a href="https://beauty.hotpepper.jp/CSP/kr/reserve/?storeId=H000738520" id="frontView" class="columnBlock mod_btn_reserve ml10 mr10">カスタマ予約TOP</a></li>
+    <li class="scheduleSettingBtn">
+        <a href="javascript:void(0)" id="scheduleSetting"><span class="msg mod_btn_setup" id="scheduleSettingBtn">設定</span></a>
+    </li>
+</ul>
+</div>
+<ul class="scheduleTimePeriodList jscScheduleTimePeriodModal"><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1000">10:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1005">10:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1010">10:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1015">10:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1020">10:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1025">10:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1030">10:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1035">10:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1040">10:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1045">10:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1050">10:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1055">10:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1100">11:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1105">11:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1110">11:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1115">11:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1120">11:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1125">11:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1130">11:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1135">11:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1140">11:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1145">11:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1150">11:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1155">11:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1200">12:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1205">12:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1210">12:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1215">12:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1220">12:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1225">12:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1230">12:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1235">12:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1240">12:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1245">12:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1250">12:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1255">12:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1300">13:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1305">13:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1310">13:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1315">13:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1320">13:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1325">13:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1330">13:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1335">13:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1340">13:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1345">13:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1350">13:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1355">13:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1400">14:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1405">14:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1410">14:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1415">14:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1420">14:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1425">14:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1430">14:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1435">14:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1440">14:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1445">14:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1450">14:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1455">14:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1500">15:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1505">15:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1510">15:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1515">15:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1520">15:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1525">15:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1530">15:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1535">15:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1540">15:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1545">15:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1550">15:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1555">15:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1600">16:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1605">16:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1610">16:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1615">16:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1620">16:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1625">16:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1630">16:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1635">16:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1640">16:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1645">16:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1650">16:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1655">16:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1700">17:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1705">17:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1710">17:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1715">17:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1720">17:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1725">17:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1730">17:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1735">17:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1740">17:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1745">17:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1750">17:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1755">17:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1800">18:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1805">18:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1810">18:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1815">18:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1820">18:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1825">18:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1830">18:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1835">18:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1840">18:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1845">18:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1850">18:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1855">18:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1900">19:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1905">19:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1910">19:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1915">19:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1920">19:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1925">19:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1930">19:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1935">19:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1940">19:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1945">19:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1950">19:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="1955">19:55</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2000">20:00</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2005">20:05</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2010">20:10</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2015">20:15</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2020">20:20</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2025">20:25</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2030">20:30</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2035">20:35</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2040">20:40</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2045">20:45</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2050">20:50</a></li><li class="scheduleTimePeriod jscScheduleTimePeriod"><a class="scheduleTimePeriodLink" data-start-time="2055">20:55</a></li></ul></div>
+
+
+
+
+
+##予約詳細
+<div class="contents_center_top w560">
+    <div class="mod_column02 mod_line_btm_02 ml15 mr15 cf">
+        <div class="columnBlock01 mt2 wFull" id="reserveItemName"><div class="fl b mb5 mod_font01 schedulePanelReturn reserveCustomerName w450"><span class="reserveCustomerNew"></span>但馬花佳（ヨヤク アリ） 様</div></div>
+        <div class="mod_sch_clear_left"></div>
+        <div class="mod_font04" id="reserveItemNameDiff"></div>
+        <div class="columnBlock02" id="reserveItemCheck"><ul class="mod_column03 cf mt2 mod_sch_display_inline"><li class="columnBlock mr5"><a class="accepted unCheck enable" id="reserveItemUketsuke" href="javascript:void(0);">受付チェック</a></li><li class="columnBlock"><a class="treated unCheck enable" id="reserveItemTreatment" href="javascript:void(0);">施術終了</a></li></ul></div>
+    </div>
+    <div class="mt10 ml15 mr15" id="reserveItemBody">
+    <dl class="mod_column03 mb5 cf"><dt class="columnBlock w85">予約経路</dt><dd class="columnBlock info">：電話(自社)</dd></dl><dl class="mod_column03 mb5 cf"><dt class="columnBlock w85">ステータス</dt><dd class="columnBlock info">：<span class="reservePanelIcon statusWaitIcon">&nbsp;</span>受付待ち</dd></dl><dl class="mod_column03 mb5 cf rsvMemoArea jscRsvMemoEditTrigger"><dt class="columnBlock w85">予約時メモ</dt><dd class="columnBlock infoMemo">&nbsp;<div class="rsvMemoAreaInner rsvMemoAreaSummaryWrap cf"><div id="jsiRsvMemoEditTarget" class="rsvMemoSummary"><span class="reservePanelIcon mod_icon_19 fl"></span>id:39711912 time:2026-05-22T23:13:45+09:00</div><div class="rsvMemoEditSubscr rsvMemoIcon">編集</div></div></dd></dl><dl class="mod_column03 mb5 cf rsvMemoArea rsvMemoEditorArea jscRsvMemoEditFunc"><dt class="columnBlock w85">予約時メモ</dt><dd class="columnBlock infoMemo">&nbsp;<div class="rsvMemoAreaInner"><textarea maxlength="200" id="jsiRsvMemoEditTextarea" class="rsvMemoEditor">id:39711912 time:2026-05-22T23:13:45+09:00</textarea><span id="jsiRsvMemoCounter" class="rsvMemoCounter">&nbsp;</span><div class="rsvMemoEditBtnwrap"><ul class="rsvMemoEditBtnArea cf"><li class="rsvMemoEditBtnAreaItem rsvMemoEditBtnSubmit jscRsvMemoEditSubmit"></li><li class="rsvMemoEditBtnAreaItem rsvMemoEditBtnCancel"></li></ul></div></div></dd></dl><dl class="mod_column02 cf"><div class="columnBlock02"><a class="mod_btn_121" href="javascript:void(0);">予約コピー</a></div></dl></div>
+</div>

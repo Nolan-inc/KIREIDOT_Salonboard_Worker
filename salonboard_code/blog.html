@@ -1,0 +1,1338 @@
+<div class="contents">
+	<!-- section -->
+	<div class="section">
+		<!-- mod_title01 -->
+		<div class="mod_title01_02 cf">
+			<h1 class="ttl">ブログ一覧</h1>
+			<p class="btn_help01"><a href="javascript:void(0);" id="questionManual"><img src="https://imgbp.salonboard.com/KLP/img/btn_help_01.png" width="29" height="29" alt="ヘルプ" class="rollover" id="btn_help"></a></p>
+		</div>
+		<!-- /mod_title01 -->
+
+		<ul class="mt15">
+		<li>ブログ機能は、NRプラン以上でご利用いただけます。</li>
+		<li>ブログは「掲載管理TOP」画面から「掲載変更を反映する」を押さなくても、ブログ投稿完了するとそのまま反映されます。</li>
+		<li><b class="mod_color_e50000">ブログを投稿したスタッフが非掲載の場合、ブログも一緒に非掲載になります。</b></li>
+		</ul>
+		<!-- mod_column03 -->
+		<form id="blogList" method="post" action="/KLP/blog/blogList/" class="mod_column03 cf" autocomplete="off"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="fef6b33ea1bc70d2bd74cacb2f89bbfd"></div><input type="hidden" name="storeIdForMultipleTabCheck" value="3f40b9cb253112020db234ee8e5b19b0"><!-- mod_line_btm_01 -->
+		<div class="mod_line_btm_01 mt20 cf">
+			<!-- mod_column02 -->
+			<div class="mod_column02 cf">
+				<!-- columnBlock01 -->
+				<div class="columnBlock01">
+					<!-- mod_column03 -->
+					<div class="mod_column03 cf">
+						<a href="/KLP/blog/blog/" id="newPosts" class="columnBlock mod_btn_entry_02 mr10">新規登録</a>
+						<a href="/KLP/blog/blogSubmitterSetup/?cameFromWhere=1" id="addBlogSubmitter" class="columnBlock mod_btn_edit_01">投稿者追加・編集</a>
+					</div>
+					<!-- /mod_column03 -->
+				</div>
+				<!-- /columnBlock01 -->
+
+				<!-- columnBlock02 -->
+				<div class="columnBlock02 mt5">
+						<!-- columnBlock -->
+						<div class="columnBlock mt2 mr5">
+							<select name="contributionId" id="contributionId" class="w240"><option value=""></option><option value="W001161524">nana</option>
+<option value="W001161528">yui(非掲載)</option>
+<option value="W001183833">miu</option>
+<option value="W001216515">sena</option>
+<option value="W001364850">aika</option>
+<option value="W001389345">miyu</option>
+<option value="W001168402">yuri(非掲載)</option>
+<option value="W001170608">erika(非掲載)</option>
+<option value="W001173701">cobo(非掲載)</option>
+<option value="W001179740">momoka</option>
+<option value="W001179741">saki(非掲載)</option>
+<option value="W001180661">hikari</option>
+<option value="W001166561">Mei(非掲載)</option>
+<option value="W001183846">satsuki(非掲載)</option>
+<option value="W001196708">yukina(非掲載)</option>
+<option value="W001210310">renka</option>
+<option value="W001211016">minori(非掲載)</option>
+<option value="W001166562">cheka</option>
+<option value="0000000000">未設定</option></select></div>
+						<!-- /columnBlock -->
+
+						<!-- columnBlock -->
+						<div class="columnBlock">
+							<!-- mod_column03 -->
+							<div class="mod_column03 cf">
+								<a href="#" id="filter" class="columnBlock mod_btn_submit_01 mr5">絞込み</a>
+								<a href="#" id="filterReset" class="columnBlock mod_btn_reset_01">絞込み解除</a>
+							</div>
+							<!-- /mod_column03 -->
+						</div>
+						<!-- /columnBlock -->
+					<!-- /mod_column03 -->
+				</div>
+				<!-- /columnBlock02 -->
+			</div>
+			<!-- /mod_column02 -->
+		</div>
+		<!-- /mod_line_btm_01 -->
+
+		<!-- mod_column02 -->
+		<div class="mod_column02 mt20 cf">
+			<div class="columnBlock01"><p class="ttl mod_font01">該当するブログが<b class="mod_color_e50000 ml10 mr10">370</b>件あります。</p></div>
+			<div class="columnBlock02">
+				<div class="paging cf">
+				<!-- paging -->
+<div class="paging">
+<p class="prev_disable"><span>前へ</span></p>
+<p class="page mod_font01">1/8ページ</p>
+<p class="next"><a href="/KLP/blog/blogList/?pn=2">次へ</a></p>
+</div>
+<!-- /paging -->
+</div>
+			</div>
+		</div>
+		<!-- /mod_column02 -->
+
+		<!-- mod_table03 -->
+		<table class="mod_table03 integrateTbl w980">
+		<tbody>
+		<tr class="mod_middle">
+		<th class="w400" colspan="2">タイトル/カテゴリ<br>クーポン</th>
+		<th class="w110">画像(1枚目)</th>
+		<th class="w147">投稿者<br>(最終更新者)</th>
+		<th class="w151">初回反映日時(最終更新日)<br>ステータス</th>
+		<th class="w60">詳細<br>削除</th>
+		</tr>
+		</tbody>
+		</table>
+		<table class="mod_table03 integrateTbl w980 mb15 mtN1" id="blogListArea">
+		<tbody>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116474081">お肌が揺らぎやすい時期におすすめ！美容液！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/22 14:50)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116474081" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116474081" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116472847">肌診断機をやりました！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/83/37/I157568337/I157568337.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/22 14:36)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116472847" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116472847" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116464251">hikariの想い</a></td>
+		<td class="break_all w119">プライベート</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/72/03/I157557203/I157557203.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			hikari <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/22 13:09)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116464251" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116464251" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【hikari限定】ちゅるん肌を目指したい方へ！オーダーメイド肌質改善</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116175724">オススメクリーム！part2</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/80/25/I157178025/I157178025.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/18 13:14)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116175724" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116175724" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116174927">オススメクリームをご紹介！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/69/90/I157176990/I157176990.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/18 13:05)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116174927" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116174927" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116115203">ファムケア紹介第二弾！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/17 13:27)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116115203" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116115203" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116114797">ファムケア紹介第一弾！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/17 13:19)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116114797" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116114797" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116012897">《ILLON》クリーム紹介</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/15 19:25)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116012897" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116012897" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116012002">《ILLON》アンプル紹介</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/15 19:05)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116012002" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116012002" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116001118">インナーケア大事！（プロテインver）</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/15 16:36)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116001118" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116001118" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116000573">インナーケア大事！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/15 18:19)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116000573" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116000573" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115942276">夏だ！紫外線だ！日焼け対策だ！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		-<br>(2026/05/15 16:22)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115942276" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115942276" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116608524">紫外線予防大事！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/73/99/I157747399/I157747399.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/28 17:18<br>(2026/05/28 17:18)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116608524" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116608524" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116663535">お肌治していきたいと思っているお客様へ。miyuの想い</a></td>
+		<td class="break_all w119">プライベート</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/86/07/I157818607/I157818607.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/25 14:38<br>(2026/05/25 14:38)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116663535" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116663535" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116474699">クリスタル毛穴クレンジングをやりました！</a></td>
+		<td class="break_all w119">おすすめメニュー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/08/93/I157570893/I157570893.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/24 16:49<br>(2026/05/24 16:49)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116474699" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116474699" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116553682">なんば店OPEN記念クーポン！</a></td>
+		<td class="break_all w119">おすすめメニュー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/58/73/I157675873/I157675873.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			renka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/23 18:26<br>(2026/05/23 18:26)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116553682" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116553682" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116553350">プロテイン始めてみませんか？</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/51/09/I157675109/I157675109.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			renka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/23 18:19<br>(2026/05/23 18:19)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116553350" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116553350" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116174089">朝の時短に！超オススメBBクリーム！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/49/06/I157174906/I157174906.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/22 21:13<br>(2026/05/22 21:13)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116174089" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116174089" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116463810">初めまして！代官山店hikariです！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/51/37/I157555137/I157555137.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			hikari <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/22 13:05<br>(2026/05/22 13:05)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116463810" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116463810" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115939113">アイテム紹介</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/32/10/I157303210/I157303210.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/19 18:49<br>(2026/05/19 18:49)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115939113" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115939113" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【スキンケア相談】物販購入のお客様※施術無</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A116016437">改めまして、momokaです！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/80/69/I156968069/I156968069.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/18 12:40<br>(2026/05/18 12:40)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A116016437" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A116016437" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【momoka限定】自信の持てるお肌へ！オーダーメイド肌質改善メニュー</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115927176">初めまして！代官山店のチェカです！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/66/39/I157096639/I157096639.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/17 13:11<br>(2026/05/17 13:11)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115927176" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115927176" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115929987">メニュー紹介（cheka限定クーポンの説明も！）</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			
+				-
+			</td>
+		<td class="break_all w147" rowspan="2">
+			cheka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/16 18:19<br>(2026/05/16 18:19)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115929987" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115929987" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【cheka限定】すっぴんでも自信のつく素肌へ！綺麗を育てたい人は要チェック</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115990202">ビフォアフをお見せします～！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/29/25/I156932925/I156932925.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/15 14:32<br>(2026/05/15 14:32)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115990202" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115990202" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115929734">同期との日常！</a></td>
+		<td class="break_all w119">プライベート</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/26/20/I156852620/I156852620.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			momoka <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/14 17:11<br>(2026/05/14 18:59)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115929734" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115929734" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115851447">赤みや繰り返すニキビの方のビフォーアフター</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/07/95/I156750795/I156750795.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/13 16:18<br>(2026/05/14 14:45)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115851447" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115851447" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				未反映 </td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115774317">お客様のビフォーアフター</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/94/26/I156649426/I156649426.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/12 15:33<br>(2026/05/12 15:33)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115774317" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115774317" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115692787">6月のスケージュール♪</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/07/30/I156540730/I156540730.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/11 13:07<br>(2026/05/11 13:07)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115692787" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115692787" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115631399">お客様のビフォーアフター</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/00/23/I156460023/I156460023.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/10 13:39<br>(2026/05/10 13:39)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115631399" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115631399" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115575393">お客様のビフォーアフター</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/65/67/I156386567/I156386567.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/09 15:59<br>(2026/05/09 15:59)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115575393" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115575393" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115508119">miyuのニキビ跡ビフォーアフター！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/80/15/I156298015/I156298015.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/08 16:54<br>(2026/05/08 16:54)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115508119" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115508119" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115342508">ニキビ跡改善！ビフォーアフター</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/10/99/I156081099/I156081099.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/06 13:08<br>(2026/05/06 13:08)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115342508" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115342508" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115274762">肌質改善ビフォーアフター</a></td>
+		<td class="break_all w119">おすすめメニュー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/94/56/I155989456/I155989456.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/05 12:05<br>(2026/05/05 12:05)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115274762" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115274762" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115213596">ニキビ改善！ビフォーアフター</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/05/24/I155910524/I155910524.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/04 11:31<br>(2026/05/04 11:31)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115213596" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115213596" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115115376">フォロワー1万人記念キャンペーン！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/38/03/I155783803/I155783803.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/02 19:12<br>(2026/05/02 19:12)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115115376" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115115376" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">-</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A115016056">5月スタート♪</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/20/30/I155652030/I155652030.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/05/01 12:11<br>(2026/05/01 12:11)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A115016056" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A115016056" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114956527">ニキビの経過♪</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/57/72/I155575772/I155575772.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/30 15:51<br>(2026/04/30 15:51)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114956527" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114956527" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114862915">赤み改善1ヶ月の変化</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/33/21/I155453321/I155453321.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/29 10:10<br>(2026/04/29 10:10)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114862915" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114862915" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114812052">ホルモンを整える＝肌質改善！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/52/62/I155385262/I155385262.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/28 13:01<br>(2026/04/28 13:01)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114812052" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114812052" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miu限定】徹底肌質改善！！完全オーダーメイドプランニング</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114684965">リフレッシュ♪</a></td>
+		<td class="break_all w119">プライベート</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/77/33/I155217733/I155217733.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/26 12:03<br>(2026/04/26 12:03)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114684965" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114684965" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114618165">運動を習慣に！ジム活！</a></td>
+		<td class="break_all w119">プライベート</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/91/88/I155129188/I155129188.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/25 10:25<br>(2026/04/25 10:25)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114618165" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114618165" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miu限定】徹底肌質改善！！完全オーダーメイドプランニング</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114477176">インナーケアしていますか？</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/76/37/I154947637/I154947637.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			aika <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/23 11:23<br>(2026/04/23 11:23)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114477176" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114477176" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114348699">日中の紫外線ケア！</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/89/03/I154778903/I154778903.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/21 13:42<br>(2026/04/21 13:42)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114348699" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114348699" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miu限定】徹底肌質改善！！完全オーダーメイドプランニング</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114298202">潜在的なシミを見つけ出す肌診断機！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/23/33/I154712333/I154712333.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/20 16:58<br>(2026/04/20 16:58)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114298202" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114298202" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114209544">カウンセリング♪</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/65/73/I154596573/I154596573.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/19 10:30<br>(2026/04/19 10:30)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114209544" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114209544" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114160061">フェムケア</a></td>
+		<td class="break_all w119">ビューティー</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/17/24/I154531724/I154531724.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/18 12:04<br>(2026/04/18 12:04)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114160061" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114160061" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114115632">フェムパッチって何？？</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/48/77/I154474877/I154474877.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/17 16:42<br>(2026/04/17 16:42)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114115632" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114115632" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A114045979">ハーブピーリングでデトックス！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/35/32/I154383532/I154383532.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/16 17:16<br>(2026/04/16 17:16)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A114045979" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A114045979" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A113887842">ガチャガチャ</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/46/83/I154174683/I154174683.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			sena <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/14 14:37<br>(2026/04/14 14:37)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A113887842" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A113887842" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【sena限定】肌質改善で垢抜けたい方必見！初心者さん向けメニュー〇</td>
+			<td>
+				反映済み</td>
+		</tr>
+<tr class="mod_middle">
+		<td class="mod_left break_all customerInfoTbl w260"><a href="/KLP/blog/blog/?blogId=A113825413">Tiktokやってます！</a></td>
+		<td class="break_all w119">サロンのNEWS</td>
+		<td class="mod_middle w110" rowspan="2">
+			<img class="img-resize60" src="https://imgbp.salonboard.com/KLP/img/blog_org/32/67/I154093267/I154093267.jpg?impolicy=SB_policy_default&amp;w=60&amp;h=60" alt="ブログ画像">
+			</td>
+		<td class="break_all w147" rowspan="2">
+			miyu <br>
+				
+						(土井　孝士郎)
+					</td>
+		<td class="w151">
+		2026/04/13 15:36<br>(2026/04/13 15:36)
+			</td>
+		<td class="w60" rowspan="2">
+			<div style="margin:0px 0px 0px 2px"><a href="/KLP/blog/blog/?blogId=A113825413" class="mod_btn_detail_01 blogDetail">詳細</a></div>
+			<div style="margin:4px 0px 0px 2px"><a href="#A113825413" class="mod_btn_delete_01">削除</a></div>
+		</td>
+		</tr>
+		<tr>
+			<td class="mod_left break_all" colspan="2">【miyu限定】ニキビ・肌荒れ直したい方！あなた専用プラン！</td>
+			<td>
+				反映済み</td>
+		</tr>
+</tbody>
+		</table>
+		<!-- /mod_table03 -->
+
+		<!-- paging -->
+		<div class="paging mb50 cf">
+			<!-- paging -->
+<div class="paging">
+<p class="prev_disable"><span>前へ</span></p>
+<p class="page mod_font01">1/8ページ</p>
+<p class="next"><a href="/KLP/blog/blogList/?pn=2">次へ</a></p>
+</div>
+<!-- /paging -->
+</div>
+		<!-- /paging -->
+
+		<!-- mod_pagetop01 -->
+		<div class="mod_pagetop01 cf">
+			<a href="#top">ページのトップへ</a>
+		</div>
+		<!-- /mod_pagetop01 -->
+    <input type="hidden" name="blogId" value=""></form></div>
+	<!-- /section -->
+</div>
