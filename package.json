@@ -1,6 +1,6 @@
 {
   "name": "kireidot-salondesk",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "private": true,
   "description": "KIREIDOT サロンデスク — サロン業務 (予約・スタッフ・シフト・ブログ) を一元管理する Electron デスクトップアプリ",
   "type": "module",
@@ -16,11 +16,14 @@
     "worker:once": "tsx worker.ts --once",
     "worker:dry-run": "DRY_RUN=1 tsx worker.ts",
     "worker:inspect": "tsx inspect.ts",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac --publish never",
-    "dist:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish never",
+    "playwright:install": "npx playwright install chromium chromium-headless-shell",
+    "playwright:copy": "node build-resources/copy-playwright-browsers.cjs",
+    "prebuild:dist": "npm run playwright:install && npm run playwright:copy",
+    "dist": "npm run prebuild:dist && npm run build && electron-builder",
+    "dist:mac": "npm run prebuild:dist && npm run build && electron-builder --mac --publish never",
+    "dist:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish never",
     "dist:mac:nosign": "SKIP_NOTARIZE=1 npm run dist:mac:arm64",
-    "publish:mac:arm64": "npm run build && electron-builder --mac --arm64 --publish always",
+    "publish:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish always",
     "verify:mac": "bash build-resources/verify-mac.sh"
   },
   "dependencies": {
@@ -64,6 +67,15 @@
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build-resources/playwright-browsers",
+        "to": "playwright-browsers",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "category": "public.app-category.business",

@@ -7,8 +7,43 @@
 
 const { app, BrowserWindow, shell, ipcMain, utilityProcess } = require('electron');
 const path = require('node:path');
+const fs = require('node:fs');
 const { initAutoUpdater, quitAndInstall, manualCheck } = require('./updater.cjs');
 const deviceConfig = require('./device-config.cjs');
+
+// ---------------------------------------------------------------------
+// Playwright Chromium のパス設定 (v0.2.7)
+//
+// 配布された .app は extraResources で同梱された
+// Resources/playwright-browsers/ を使う。dev 時 (= !app.isPackaged) は
+// 開発機のシステムキャッシュ ~/Library/Caches/ms-playwright をそのまま使うので
+// PLAYWRIGHT_BROWSERS_PATH は設定しない。
+//
+// この env は process.env 経由で utilityProcess (worker-process.cjs) にも
+// 継承される。
+// ---------------------------------------------------------------------
+if (app.isPackaged) {
+  try {
+    const bundledBrowsersPath = path.join(
+      process.resourcesPath,
+      'playwright-browsers',
+    );
+    if (fs.existsSync(bundledBrowsersPath)) {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = bundledBrowsersPath;
+      // 起動ログだけ残す (token 等は出していないので OK)
+      console.log(
+        `[main] PLAYWRIGHT_BROWSERS_PATH=${bundledBrowsersPath}`,
+      );
+    } else {
+      console.warn(
+        `[main] bundled playwright-browsers not found at ${bundledBrowsersPath}; ` +
+          'falling back to system cache (may fail on user PC)',
+      );
+    }
+  } catch (e) {
+    console.warn('[main] failed to set PLAYWRIGHT_BROWSERS_PATH:', e?.message ?? e);
+  }
+}
 
 // ---------------------------------------------------------------------
 // Worker (utilityProcess) — マルチ店舗スクレイピングのバックグラウンド実行
