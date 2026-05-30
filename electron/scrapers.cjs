@@ -1257,47 +1257,48 @@ async function scrapeStaff(page) {
       });
     }
 
-    // --- 方式 D: img tr 起点で同 tbody 内の text td から名前を拾う (v0.2.11) ---
-    // SalonBoard 「スタッフ掲載情報一覧」が「スタッフ 1 人 = 1 個の <tbody>」で、
-    // tbody 内に「順番行」「写真行」「氏名行」「キャッチ行」など複数 <tr> で
-    // 構成されている可能性がある (totalRows=40 で 1 件しか抽出できなかった事象)。
-    // この場合、img を持つ <tr> を起点に、同じ <tbody> 内の全 <tr> から
-    // 「氏名 / 職種 / キャッチ」を探す。
+    // --- 方式 D (v0.2.12 改): img を持つ <tr> ごとに直接 name/職種/キャッチを抽出 ---
+    // v0.2.11 では「同 tbody を 1 回だけ」処理する制限があり、
+    // 全スタッフが 1 つの大きな共通 tbody に並ぶ構造だと 1 件しか抽出できなかった。
+    // v0.2.12 では tbody スコープを廃止し、imgTr ごとに同 tr 内 (+ 直前/直後の tr) を見る。
     const imgTrs = Array.from(document.querySelectorAll('tr')).filter(
       (tr) => tr.querySelector('img'),
     );
     let methodDCount = 0;
-    const seenTbody = new Set();
-    for (const imgTr of imgTrs) {
-      // 行 group のスコープ。先に同じ tbody、次に table。
-      const tbody = imgTr.closest('tbody') || imgTr.closest('table');
-      if (!tbody) continue;
-      if (seenTbody.has(tbody)) continue;
-      seenTbody.add(tbody);
-
-      const groupText = txt(tbody);
-      if (!groupText) continue;
-      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(groupText)) continue;
-      // 1 つの table がたまたま「全スタッフを含む大きな表」だった場合は方式 B で
-      // 既に拾えているので skip
-      if (
-        tbody.querySelectorAll('tr').length > 10 &&
-        tbody.querySelectorAll('img').length > 2
-      ) {
-        continue;
-      }
-
-      // external_id
-      let extId = null;
-      for (const a of tbody.querySelectorAll('a[href]')) {
-        const id = extractStaffId(attr(a, 'href') || '');
-        if (id) {
-          extId = id;
-          break;
+    // 名前 dump 用 (debug 出力)
+    const methodDSamples = [];
+    for (let idx = 0; idx < imgTrs.length; idx++) {
+      const imgTr = imgTrs[idx];
+      // group = imgTr 自身 + 直後 2 行 (氏名/キャッチが別 tr に分かれている構造に対応)
+      const group = [imgTr];
+      let nextEl = imgTr.nextElementSibling;
+      let added = 0;
+      while (nextEl && added < 2) {
+        if (nextEl.tagName === 'TR' && !nextEl.querySelector('img')) {
+          group.push(nextEl);
+          added++;
+        } else if (nextEl.tagName === 'TR' && nextEl.querySelector('img')) {
+          break; // 次のスタッフ写真行に到達したら終了
         }
+        nextEl = nextEl.nextElementSibling;
       }
-      if (!extId) {
-        for (const inp of tbody.querySelectorAll(
+      const groupText = group.map(txt).join(' ');
+      if (!groupText) continue;
+      // ヘッダ行除外
+      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(groupText)) continue;
+
+      // external_id 探索
+      let extId = null;
+      for (const tr of group) {
+        for (const a of tr.querySelectorAll('a[href]')) {
+          const id = extractStaffId(attr(a, 'href') || '');
+          if (id) {
+            extId = id;
+            break;
+          }
+        }
+        if (extId) break;
+        for (const inp of tr.querySelectorAll(
           'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
         )) {
           const id =
@@ -1308,69 +1309,90 @@ async function scrapeStaff(page) {
             break;
           }
         }
+        if (extId) break;
       }
       if (!extId) extId = extractStaffId(groupText);
 
-      // 名前/職種/キャッチ:
-      // group 内の全 td を走査して、img を含まずボタンも含まずテキストがあるもの
-      // を「テキスト td」として収集。最も多くの行を持つテキスト td を採用。
-      const textTds = Array.from(tbody.querySelectorAll('td')).filter((td) => {
-        if (td.querySelector('img')) return false;
-        if (
-          td.querySelector(
-            'button, input[type="button"], input[type="submit"], a.btn'
+      // 名前/職種/キャッチ抽出:
+      // group の中の全 td を走査して、img/ボタンを含まないテキスト td を集める。
+      // <br> 区切りで複数行を持っていれば最優先で採用。
+      const textTds = [];
+      for (const tr of group) {
+        for (const td of tr.querySelectorAll('td')) {
+          if (td.querySelector('img')) continue;
+          if (
+            td.querySelector(
+              'button, input[type="button"], input[type="submit"], a.btn'
+            )
           )
-        )
-          return false;
-        const tt = txt(td);
-        if (!tt) return false;
-        if (/^No\.?\s*\d*$/.test(tt)) return false;
-        if (/^\s*\d+\s*$/.test(tt)) return false;
-        if (/^(PickUp|詳細|非掲載にする|削除する|要確認|変更内容を登録する)$/.test(tt))
-          return false;
-        return true;
-      });
-
-      let best = null;
-      let bestLineCount = 0;
-      for (const td of textTds) {
-        const blocks = Array.from(td.querySelectorAll('div, p, span, br'))
-          .map((el) => (el.tagName === 'BR' ? '\n' : txt(el)));
-        const joined = blocks.filter(Boolean).join('\n') || txt(td);
-        const lc = joined.split(/[\n\r]+/).filter(Boolean).length;
-        if (lc > bestLineCount) {
-          best = td;
-          bestLineCount = lc;
+            continue;
+          const tt = txt(td);
+          if (!tt) continue;
+          if (/^No\.?\s*\d*$/.test(tt)) continue;
+          if (/^\s*\d+\s*$/.test(tt)) continue;
+          if (
+            /^(PickUp|詳細|非掲載にする|削除する|要確認|変更内容を登録する)$/.test(tt)
+          )
+            continue;
+          textTds.push(td);
         }
       }
-      let name = '';
-      let position = '';
-      let catchPhrase = '';
-      if (best) {
-        const tdText = txt(best);
-        // <br> を改行とみなして lines を作る (innerHTML から取り出す簡易版)
-        const html = best.innerHTML || '';
-        const linesFromHtml = html
+
+      // 各 textTd を「<br> で分解した lines」のリストに変換し、最大行数のものを採用
+      function tdToLines(td) {
+        const html = td.innerHTML || '';
+        const lines = html
           .replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<[^>]+>/g, '\n')
+          .replace(/<\/(div|p|li)>/gi, '\n')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&nbsp;/g, ' ')
           .split('\n')
           .map((s) => s.trim().replace(/\s+/g, ' '))
           .filter(Boolean);
-        const lines = linesFromHtml.length > 0 ? linesFromHtml : [tdText];
+        if (lines.length > 0) return lines;
+        const t = txt(td);
+        return t ? [t] : [];
+      }
+      let bestLines = [];
+      for (const td of textTds) {
+        const lines = tdToLines(td);
+        if (lines.length > bestLines.length) bestLines = lines;
+      }
 
-        if (lines.length > 0) name = lines[0];
-        if (lines.length >= 2) position = lines[1];
-        if (lines.length >= 3) catchPhrase = lines.slice(2).join(' ');
+      let name = '';
+      let position = '';
+      let catchPhrase = '';
+      if (bestLines.length > 0) {
+        name = bestLines[0];
+        if (bestLines.length >= 2) position = bestLines[1];
+        if (bestLines.length >= 3) catchPhrase = bestLines.slice(2).join(' ');
+      } else if (textTds.length > 0) {
+        // bestLines が取れなかったケース: 最初の textTd のテキストを name に
+        name = txt(textTds[0]);
       }
 
       name = String(name || '')
         .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
         .replace(/^\s*No\.\s*/i, '')
         .trim();
+
+      // 診断用に最初の 3 件はサンプルを残す (HTML/構造のヒント)
+      if (idx < 3) {
+        methodDSamples.push({
+          idx,
+          groupTrCount: group.length,
+          textTdCount: textTds.length,
+          name,
+          bestLinesCount: bestLines.length,
+          bestLinesPreview: bestLines.slice(0, 3),
+          extId,
+        });
+      }
+
       if (!name) continue;
       if (SKIP_NAME_PATTERNS.test(name)) continue;
 
-      const photo = imgTr.querySelector('img') || tbody.querySelector('img');
+      const photo = imgTr.querySelector('img');
       const feeText = (groupText.match(/指名料\s*([¥\d,]+)/) || [])[1];
 
       methodDCount++;
@@ -1391,6 +1413,7 @@ async function scrapeStaff(page) {
       methodCContainers: seenContainers.size,
       methodDImgTrs: imgTrs.length,
       methodDExtracted: methodDCount,
+      methodDSamples,
     };
   });
 
@@ -1422,6 +1445,7 @@ async function scrapeStaff(page) {
       methodCContainers: raw.methodCContainers ?? 0,
       methodDImgTrs: raw.methodDImgTrs ?? 0,
       methodDExtracted: raw.methodDExtracted ?? 0,
+      methodDSamples: raw.methodDSamples ?? [],
     },
   };
 }

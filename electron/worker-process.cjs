@@ -763,6 +763,21 @@ async function processShop(target, channels, runId, opts = {}) {
             `methodD=${debug?.methodDExtracted ?? 0}/${debug?.methodDImgTrs ?? 0}`,
           at: new Date().toISOString(),
         });
+        // v0.2.12: サンプル (最初の 3 件の方式 D 出力) を診断ログに残す
+        if (Array.isArray(debug?.methodDSamples)) {
+          for (const s of debug.methodDSamples) {
+            emit('log', {
+              level: 'info',
+              msg:
+                `[${shopId.slice(0, 8)}] staff sample#${s.idx}: ` +
+                `trCount=${s.groupTrCount} textTds=${s.textTdCount} ` +
+                `bestLines=${s.bestLinesCount} name="${(s.name || '').slice(0, 40)}" ` +
+                `ext=${s.extId ?? '-'} ` +
+                `lines=[${(s.bestLinesPreview || []).map((l) => '"' + String(l).slice(0, 30) + '"').join(', ')}]`,
+              at: new Date().toISOString(),
+            });
+          }
+        }
         emit('shop:progress', { shopId, step: 'staff', msg: `スタッフ ${sent} 件保存` });
       } catch (e) {
         emit('log', {
