@@ -52,6 +52,15 @@ contextBridge.exposeInMainWorld('kireidotApp', {
     return () => ipcRenderer.removeListener('worker:event', listener);
   },
 
+  // auth-storage (v0.2.9): Supabase セッションを userData に永続化する。
+  // 本番ビルドの file:// では localStorage が消えるため、userData/auth-storage.json に
+  // 同期的なフロントで読み書きできるよう Promise を返す API として expose する。
+  authStorage: {
+    getItem: (key) => ipcRenderer.invoke('auth-storage:get', key),
+    setItem: (key, value) => ipcRenderer.invoke('auth-storage:set', key, value),
+    removeItem: (key) => ipcRenderer.invoke('auth-storage:remove', key),
+  },
+
   // device 設定 (v0.2.5): 店舗 PC ごとの device_id / device_token を
   // userData に保存。get はマスク済み (token last4 のみ) を返す。
   deviceConfig: {

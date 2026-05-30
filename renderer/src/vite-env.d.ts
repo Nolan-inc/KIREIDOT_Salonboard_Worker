@@ -126,6 +126,17 @@ interface Window {
     onWorkerEvent: (handler: (msg: WorkerEvent) => void) => () => void;
 
     /**
+     * Supabase Auth セッション永続化用ストレージ (v0.2.9)。
+     * 本番ビルドの file:// で localStorage が失われる問題への対処として
+     * userData/auth-storage.json に保存する。
+     */
+    authStorage: {
+      getItem: (key: string) => Promise<string | null>;
+      setItem: (key: string, value: string) => Promise<{ ok: boolean }>;
+      removeItem: (key: string) => Promise<{ ok: boolean }>;
+    };
+
+    /**
      * device 設定 (v0.2.5)。店舗 PC ごとの device_id / device_token を
      * userData に保存する。token は get では last4 のみ返す。
      */

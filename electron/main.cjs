@@ -10,6 +10,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { initAutoUpdater, quitAndInstall, manualCheck } = require('./updater.cjs');
 const deviceConfig = require('./device-config.cjs');
+const authStorage = require('./auth-storage.cjs');
 
 // ---------------------------------------------------------------------
 // Playwright Chromium のパス設定 (v0.2.7)
@@ -211,6 +212,30 @@ ipcMain.handle('updater:quit-and-install', async () => {
 // renderer の「アップデートを今すぐ確認」ボタンから呼ばれる。
 ipcMain.handle('updater:check', async () => {
   return await manualCheck();
+});
+
+// ---------------------------------------------------------------------
+// auth-storage IPC (v0.2.9)
+//
+// 本番ビルドの file:// オリジンでは localStorage が起動ごとに失われ、
+// Supabase セッションが消えて毎回ログアウトされていた。
+// userData 配下に JSON で保存することで永続化する。
+//
+// renderer 側 supabase client の storage オプションに preload 経由で繋ぐ。
+// ---------------------------------------------------------------------
+ipcMain.handle('auth-storage:get', async (_event, key) => {
+  if (typeof key !== 'string' || !key) return null;
+  return authStorage.getItem(app, key);
+});
+ipcMain.handle('auth-storage:set', async (_event, key, value) => {
+  if (typeof key !== 'string' || !key) return { ok: false };
+  authStorage.setItem(app, key, value);
+  return { ok: true };
+});
+ipcMain.handle('auth-storage:remove', async (_event, key) => {
+  if (typeof key !== 'string' || !key) return { ok: false };
+  authStorage.removeItem(app, key);
+  return { ok: true };
 });
 
 // ---------------------------------------------------------------------
