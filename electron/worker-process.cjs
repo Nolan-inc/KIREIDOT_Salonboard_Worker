@@ -747,10 +747,21 @@ async function processShop(target, channels, runId, opts = {}) {
     if (channelSet.has('staff')) {
       try {
         emit('shop:progress', { shopId, step: 'staff', msg: 'スタッフ一覧を取得中…' });
-        const { rows } = await scrapeStaff(page);
+        const { rows, debug } = await scrapeStaff(page);
         const sent = await sendStaff(shopId, rows);
         counts.staff = sent;
-        summary.push(`スタッフ ${sent} 件`);
+        summary.push(`スタッフ ${sent} 件 (検出${rows.length})`);
+        // v0.2.10: 取得状況を診断ログで残す (件数が想定と合わないとき切り分け用)
+        emit('log', {
+          level: 'info',
+          msg:
+            `[${shopId.slice(0, 8)}] staff scrape: ` +
+            `parsed=${debug?.parsed ?? 0} sent=${sent} ` +
+            `totalLinks=${debug?.totalLinks ?? 0} ` +
+            `totalRows=${debug?.totalRows ?? 0} ` +
+            `methodC=${debug?.methodCContainers ?? 0}`,
+          at: new Date().toISOString(),
+        });
         emit('shop:progress', { shopId, step: 'staff', msg: `スタッフ ${sent} 件保存` });
       } catch (e) {
         emit('log', {

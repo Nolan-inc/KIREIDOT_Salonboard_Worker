@@ -1114,10 +1114,154 @@ async function scrapeStaff(page) {
       });
     }
 
+    // --- 方式 C: 「No.X」テキスト起点で行 container を見つけて抽出 ---
+    // SalonBoard 「スタッフ掲載情報一覧」は、各スタッフ行が独立した <table> で
+    // 構成されているケースがある (方式 B では最初の 1 行しか拾えない場合がある)。
+    // 方式 C では DOM 全体を text walk して "No. 1", "No. 2" ... を見つけ、
+    // その親要素を「行 container」として img / 名前 / 職種 / キャッチ を抜き出す。
+    const allNodes = document.querySelectorAll('*');
+    const seenContainers = new Set();
+    for (const node of allNodes) {
+      // 直接テキストノードに "No. <数字>" が含まれているかチェック (子の合計でない)
+      let hasNo = false;
+      for (const c of node.childNodes) {
+        if (c.nodeType === 3 /* TEXT_NODE */) {
+          const t = (c.nodeValue || '').trim();
+          if (/^No\.\s*\d+$/.test(t)) {
+            hasNo = true;
+            break;
+          }
+        }
+      }
+      if (!hasNo) continue;
+
+      // 行 container を上方向に探す (img を含む or 同一行を構成するレベル)
+      let row = node;
+      for (let depth = 0; depth < 8; depth++) {
+        if (!row.parentElement) break;
+        row = row.parentElement;
+        if (row.querySelector('img')) break;
+        const rt = txt(row);
+        if (rt.length > 30) break;
+      }
+      if (seenContainers.has(row)) continue;
+      seenContainers.add(row);
+
+      const rowText = txt(row);
+      if (!rowText) continue;
+      // ヘッダ container を除外
+      if (/順番.*PickUp.*スタッフ写真|氏名.*職種.*キャッチ/.test(rowText)) continue;
+
+      // external_id を探す (方式 B と同じロジック)
+      let extId = null;
+      for (const a of row.querySelectorAll('a[href]')) {
+        const id = extractStaffId(attr(a, 'href') || '');
+        if (id) {
+          extId = id;
+          break;
+        }
+      }
+      if (!extId) {
+        for (const inp of row.querySelectorAll(
+          'input[type="hidden"], input[name*="staff" i], input[name*="stylist" i]'
+        )) {
+          const id =
+            extractStaffId(attr(inp, 'value') || '') ||
+            extractStaffId(attr(inp, 'name') || '');
+          if (id) {
+            extId = id;
+            break;
+          }
+        }
+      }
+      if (!extId) {
+        const dataAttrs = [
+          attr(row, 'data-staff-id'),
+          attr(row, 'data-staffid'),
+          attr(row, 'id'),
+        ]
+          .filter(Boolean)
+          .join(' ');
+        extId = extractStaffId(dataAttrs);
+      }
+      if (!extId) extId = extractStaffId(rowText);
+
+      // 名前 / 職種 / キャッチ を抽出
+      // 「氏名/職種/キャッチキャッチ」 セル相当の領域 = img を含まずボタンも含まない
+      // テキスト要素。row 全体から候補となる td / div を走査する。
+      let name = '';
+      let position = '';
+      let catchPhrase = '';
+
+      const textCandidates = Array.from(
+        row.querySelectorAll('td, .info, .staff-info, [class*="info"]')
+      ).filter((el) => {
+        if (el.querySelector('img')) return false;
+        if (
+          el.querySelector('button, input[type="button"], input[type="submit"]')
+        )
+          return false;
+        const tt = txt(el);
+        if (!tt) return false;
+        if (/^No\.\s*\d+$/.test(tt)) return false;
+        if (/^\s*\d+\s*$/.test(tt)) return false;
+        if (/^(PickUp|詳細|非掲載にする|削除する|要確認)$/.test(tt)) return false;
+        return true;
+      });
+
+      // 最も「複数行を持つ」候補を選ぶ (氏名/職種/キャッチが入っているはず)
+      let best = null;
+      let bestLineCount = 0;
+      for (const cand of textCandidates) {
+        const blocks = Array.from(cand.querySelectorAll('div, p, span'))
+          .map(txt)
+          .filter(Boolean);
+        const lc = blocks.length || (txt(cand).split(/[\n\r]+/).length);
+        if (lc > bestLineCount) {
+          best = cand;
+          bestLineCount = lc;
+        }
+      }
+      if (best) {
+        const blocks = Array.from(best.querySelectorAll('div, p, span'))
+          .map(txt)
+          .filter(Boolean);
+        const lines = blocks.length
+          ? blocks
+          : txt(best).split(/[\n\r]+/).map((s) => s.trim()).filter(Boolean);
+        if (lines.length > 0) {
+          name = lines[0];
+          if (lines.length >= 2) position = lines[1];
+          if (lines.length >= 3) catchPhrase = lines.slice(2).join(' ');
+        }
+      }
+
+      name = String(name || '')
+        .replace(/\s*(?:要確認|サブスク中|新人|指名料.*)$/u, '')
+        .replace(/^\s*No\.\s*/i, '')
+        .replace(/^\s*\d+\s*[\.\)]?\s*/, '')
+        .trim();
+      if (!name) continue;
+      if (SKIP_NAME_PATTERNS.test(name)) continue;
+
+      const photo = row.querySelector('img');
+      const feeText = (rowText.match(/指名料\s*([¥\d,]+)/) || [])[1];
+
+      pushItem({
+        external_id: extId,
+        name,
+        position,
+        catch_phrase: catchPhrase,
+        photo_url: attr(photo, 'src') || attr(photo, 'data-src') || null,
+        designation_fee_raw: feeText || null,
+      });
+    }
+
     return {
       items,
       totalLinks: links.length,
       totalRows: trAll.length,
+      methodCContainers: seenContainers.size,
     };
   });
 
@@ -1146,6 +1290,7 @@ async function scrapeStaff(page) {
       skipped: 0,
       totalLinks: raw.totalLinks,
       totalRows: raw.totalRows,
+      methodCContainers: raw.methodCContainers ?? 0,
     },
   };
 }
