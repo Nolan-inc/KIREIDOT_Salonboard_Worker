@@ -262,8 +262,9 @@ function PushTestPanel() {
     });
   }, [bridge]);
 
+  // メニューは任意 (SalonBoard 予約フォームでは未選択でも登録可能)。
   const canRun =
-    !!scope?.shopId && !!staffExt && !!menuName.trim() && /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{1,2}:\d{2}$/.test(time) && !running;
+    !!scope?.shopId && !!staffExt && /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{1,2}:\d{2}$/.test(time) && !running;
 
   const run = async () => {
     if (!scope?.shopId || !bridge?.workerTestPush) return;
@@ -343,11 +344,12 @@ function PushTestPanel() {
                 )}
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] uppercase tracking-wide text-muted">メニュー</span>
+                <span className="text-[10px] uppercase tracking-wide text-muted">メニュー (任意)</span>
                 {menus.length === 0 ? (
-                  <input type="text" value={menuName} onChange={(e) => setMenuName(e.target.value)} placeholder="メニュー名 (手入力)" className={ic} />
+                  <input type="text" value={menuName} onChange={(e) => setMenuName(e.target.value)} placeholder="メニュー名 (任意・空でOK)" className={ic} />
                 ) : (
                   <select value={menuName} onChange={(e) => setMenuName(e.target.value)} className={ic}>
+                    <option value="">（メニューなし）</option>
                     {menus.map((m) => (
                       <option key={m.id} value={m.name}>{m.category ? `[${m.category}] ` : ''}{m.name}</option>
                     ))}

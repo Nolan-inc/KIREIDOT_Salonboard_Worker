@@ -1137,10 +1137,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   if (!p.salonboard_staff_external_id) {
     return fail('SalonBoard スタッフ external_id が未指定です', 'STAFF_MAPPING_NOT_FOUND', true);
   }
-  const menuTarget = p.salonboard_menu_name || p.menu_name || p.coupon_name;
-  if (!menuTarget) {
-    return fail('SalonBoard メニュー/クーポン名が解決できません', 'MENU_MAPPING_NOT_FOUND', true);
-  }
+  // メニューは任意。SalonBoard 予約フォームの netCouponId は未選択(-)でも登録可能。
+  // 指定があれば選び、無ければスキップする (まずメニュー無しで予約を通す方針)。
+  const menuTarget = p.salonboard_menu_name || p.menu_name || p.coupon_name || null;
   const kireidotRef = p.kireidot_ref || `KIREIDOT予約ID: ${p.booking_id}`;
 
   const startHH = String(when.hour).padStart(2, '0');
@@ -1215,25 +1214,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   await page.locator('select#jsiRsvTermMinute').first()
     .selectOption({ value: String(durMin % 60).padStart(2, '0') }).catch(() => {});
 
-  // メニュー = ネット予約クーポン。label 完全一致 → 部分一致。
-  let menuFilled = false;
-  const menuSel = page.locator("select[name='netCouponId']").first();
-  if ((await menuSel.count().catch(() => 0)) > 0) {
-    await menuSel.selectOption({ label: menuTarget }).then(() => { menuFilled = true; }).catch(() => {});
-    if (!menuFilled) {
-      const val = await menuSel.evaluate((el, target) => {
-        const opt = Array.from(el.options).find((o) => (o.textContent || '').includes(target));
-        return opt ? opt.value : null;
-      }, menuTarget).catch(() => null);
-      if (val) await menuSel.selectOption({ value: val }).then(() => { menuFilled = true; }).catch(() => {});
+  // メニュー = ネット予約クーポン (任意)。menuTarget があれば label 完全一致 →
+  // 部分一致で選ぶ。見つからなくても予約自体は続行する (メニュー無しで登録)。
+  if (menuTarget) {
+    const menuSel = page.locator("select[name='netCouponId']").first();
+    if ((await menuSel.count().catch(() => 0)) > 0) {
+      let menuFilled = false;
+      await menuSel.selectOption({ label: menuTarget }).then(() => { menuFilled = true; }).catch(() => {});
+      if (!menuFilled) {
+        const val = await menuSel.evaluate((el, target) => {
+          const opt = Array.from(el.options).find((o) => (o.textContent || '').includes(target));
+          return opt ? opt.value : null;
+        }, menuTarget).catch(() => null);
+        if (val) await menuSel.selectOption({ value: val }).catch(() => {});
+      }
+      // 見つからなくてもエラーにせず続行 (メニュー無し予約)
     }
-  }
-  if (!menuFilled) {
-    return fail(
-      `SalonBoardメニュー/クーポンが見つかりません: ${menuTarget}。メニュー管理で紐付けてください。`,
-      'MENU_MAPPING_NOT_FOUND',
-      true,
-    );
   }
 
   // 顧客名 (姓名分割)
