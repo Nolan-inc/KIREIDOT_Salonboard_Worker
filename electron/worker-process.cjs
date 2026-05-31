@@ -1799,7 +1799,8 @@ async function runTestPush(payload) {
     step('done', { ok: false, error: `認証情報の取得に失敗: ${e?.message ?? e}` });
     return;
   }
-  const baseUrl = creds.base_url || 'https://salonboard.com/';
+  // revealCredentials は { loginId, password, baseUrl } (camelCase) を返す。
+  const baseUrl = creds.baseUrl || 'https://salonboard.com/login/';
 
   let browser = null;
   try {
@@ -1824,7 +1825,8 @@ async function runTestPush(payload) {
     let auth = await isLoggedIn(page, baseUrl);
     if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
     if (auth !== 'logged_in') {
-      const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password });
+      // creds は { loginId, password, baseUrl }。tryLogin はこの形をそのまま受け取る。
+      const lr = await tryLogin(page, creds);
       if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
       await saveStorageState(ctx, ssPath);
     }
