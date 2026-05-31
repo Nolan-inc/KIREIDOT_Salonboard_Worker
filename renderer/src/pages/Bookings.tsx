@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchRecentBookings, fetchStaffList, type BookingRow, type StaffRow } from '../lib/data';
+import { fetchRecentBookings, fetchStaffList, fetchMenuList, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 import { createBookingViaDevice } from '../lib/salonboard';
 
@@ -353,6 +353,8 @@ function NewBookingModal({
   const scope = useEffectiveScope();
   const [staffLoading, setStaffLoading] = useState(true);
   const [staff, setStaff] = useState<StaffRow[]>([]);
+  const [menus, setMenus] = useState<MenuRow[]>([]);
+  const [menuLoading, setMenuLoading] = useState(true);
   const [date, setDate] = useState(todayStr());
   const [time, setTime] = useState('10:00');
   const [duration, setDuration] = useState('60');
@@ -383,9 +385,31 @@ function NewBookingModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope?.shopId]);
 
+  // メニュー一覧 (salonboard_menu_imports。メニュー同期で投入される)
+  useEffect(() => {
+    if (!scope) return;
+    let cancelled = false;
+    setMenuLoading(true);
+    fetchMenuList(scope)
+      .then((rows) => {
+        if (cancelled) return;
+        setMenus(rows);
+        if (rows.length > 0 && !menuName) setMenuName(rows[0].name);
+      })
+      .finally(() => !cancelled && setMenuLoading(false));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
+
   const selectedStaff = useMemo(
     () => staff.find((s) => s.external_id === staffExternalId) ?? null,
     [staff, staffExternalId],
+  );
+  const selectedMenu = useMemo(
+    () => menus.find((m) => m.name === menuName) ?? null,
+    [menus, menuName],
   );
 
   const canSubmit =
@@ -513,14 +537,51 @@ function NewBookingModal({
                 )}
               </Field>
 
-              <Field label="メニュー名 (SalonBoard 上の表示名と一致させる)">
-                <input
-                  type="text"
-                  value={menuName}
-                  onChange={(e) => setMenuName(e.target.value)}
-                  placeholder="例: カット"
-                  className={inputCls}
-                />
+              <Field label="メニュー (SalonBoard)">
+                {menuLoading ? (
+                  <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> メニュー読み込み中…
+                  </div>
+                ) : menus.length > 0 ? (
+                  <>
+                    <select
+                      value={menuName}
+                      onChange={(e) => {
+                        setMenuName(e.target.value);
+                        // メニュー選択で所要時間を自動補完 (空でなければ尊重)
+                        const m = menus.find((x) => x.name === e.target.value);
+                        if (m?.duration_min) setDuration(String(m.duration_min));
+                      }}
+                      className={inputCls}
+                    >
+                      {menus.map((m) => (
+                        <option key={m.id} value={m.name}>
+                          {m.category ? `[${m.category}] ` : ''}{m.name}
+                          {m.price ? ` (¥${m.price.toLocaleString()})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedMenu && (
+                      <span className="mt-1 text-[10px] text-muted">
+                        {selectedMenu.duration_min ? `${selectedMenu.duration_min}分` : ''}
+                        {selectedMenu.price ? ` / ¥${selectedMenu.price.toLocaleString()}` : ''}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={menuName}
+                      onChange={(e) => setMenuName(e.target.value)}
+                      placeholder="例: カット (SalonBoard 上の表示名と一致させる)"
+                      className={inputCls}
+                    />
+                    <span className="mt-1 text-[10px] text-amber-700">
+                      メニュー未同期です。「メニュー」を同期すると一覧から選べます (今は手入力)。
+                    </span>
+                  </>
+                )}
               </Field>
 
               <div className="grid grid-cols-2 gap-3">

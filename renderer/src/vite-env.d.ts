@@ -20,7 +20,7 @@ type UpdaterStatus =
   | { type: 'error'; message: string };
 
 // utilityProcess (electron/worker-process.cjs) からのイベント。
-type WorkerChannel = 'bookings' | 'staff' | 'shifts' | 'blog' | 'customers';
+type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'shifts' | 'blog' | 'customers';
 type WorkerEvent =
   | { type: 'boot'; payload: { pid: number; at: string } }
   | { type: 'ready'; payload: { ok: boolean } }
@@ -156,6 +156,24 @@ interface Window {
         apiUrl: string;
         workerId?: string;
       }) => Promise<DeviceConfigTestResult>;
+      /** 予約を作成し SalonBoard へ push (保存済み設定の apiUrl/token を使用) */
+      createBooking: (payload: {
+        shopId: string;
+        scheduledAt: string;
+        staffExternalId: string;
+        staffName?: string | null;
+        menuName?: string | null;
+        durationMin?: number;
+        amount?: number;
+        customerName?: string | null;
+        notes?: string | null;
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        status?: number;
+        bookingId?: string;
+        syncStatus?: 'pending_push' | 'not_enqueued';
+      }>;
     };
   };
 }

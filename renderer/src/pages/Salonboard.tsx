@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  BookOpen,
   Building2,
   CalendarClock,
   CalendarRange,
@@ -269,6 +270,16 @@ export function SalonboardPage() {
               icon={<Users className="h-3 w-3" />}
               label="スタッフ"
               channel="staff"
+              shopIds={orgShopIds}
+              disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
+              onSync={(ch, opts) =>
+                sync.syncShops(orgShopIds, [ch], { showBrowser: !!opts?.showBrowser })
+              }
+            />
+            <ChannelSyncButton
+              icon={<BookOpen className="h-3 w-3" />}
+              label="メニュー"
+              channel="menus"
               shopIds={orgShopIds}
               disabled={!sync.ready || sync.isRunning || orgShopIds.length === 0}
               onSync={(ch, opts) =>
@@ -783,6 +794,7 @@ function ShopCredentialCard({
             [
               { ch: 'bookings' as const, label: '予約', icon: <CalendarRange className="h-2.5 w-2.5" /> },
               { ch: 'staff' as const, label: 'スタッフ', icon: <Users className="h-2.5 w-2.5" /> },
+              { ch: 'menus' as const, label: 'メニュー', icon: <BookOpen className="h-2.5 w-2.5" /> },
               { ch: 'shifts' as const, label: 'シフト', icon: <CalendarClock className="h-2.5 w-2.5" /> },
               { ch: 'blog' as const, label: 'ブログ', icon: <Newspaper className="h-2.5 w-2.5" /> },
             ]

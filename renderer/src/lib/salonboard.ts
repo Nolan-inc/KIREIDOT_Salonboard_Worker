@@ -210,57 +210,38 @@ export type CreateBookingViaDeviceResult =
 export async function createBookingViaDevice(
   args: CreateBookingViaDeviceArgs,
 ): Promise<CreateBookingViaDeviceResult> {
-  const base = adminApiBase();
-  const headers = deviceAuthHeaders();
-  if (!base) {
-    return { ok: false, error: 'Admin API URL (VITE_KIREIDOT_API_URL) が未設定です' };
-  }
-  if (!headers) {
+  // 認証情報 (apiUrl / token) は userData の device 設定にあり、renderer から
+  // 直接は読めない。main プロセス (window.kireidotApp.deviceConfig.createBooking)
+  // 経由で Admin API を叩く。VITE_ 環境変数には依存しない。
+  const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+  if (!bridge?.deviceConfig?.createBooking) {
     return {
       ok: false,
-      error:
-        'device 認証情報が未設定です (VITE_SALONBOARD_DEVICE_ID / VITE_SALONBOARD_DEVICE_TOKEN)',
+      error: 'この機能はデスクトップアプリでのみ利用できます (ブラウザ版では不可)',
     };
   }
   try {
-    const res = await fetch(`${base}/api/salonboard/device/bookings/create`, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        shop_id: args.shopId,
-        scheduled_at: args.scheduledAt,
-        staff_external_id: args.staffExternalId,
-        staff_name: args.staffName ?? null,
-        menu_name: args.menuName ?? null,
-        duration_min: args.durationMin ?? 60,
-        amount: args.amount ?? 0,
-        customer_name: args.customerName ?? null,
-        notes: args.notes ?? null,
-      }),
+    const r = await bridge.deviceConfig.createBooking({
+      shopId: args.shopId,
+      scheduledAt: args.scheduledAt,
+      staffExternalId: args.staffExternalId,
+      staffName: args.staffName ?? null,
+      menuName: args.menuName ?? null,
+      durationMin: args.durationMin ?? 60,
+      amount: args.amount ?? 0,
+      customerName: args.customerName ?? null,
+      notes: args.notes ?? null,
     });
-    let body: any = null;
-    try {
-      body = await res.json();
-    } catch {
-      /* ignore */
-    }
-    if (!res.ok) {
-      const msg =
-        (body && (body.message || body.error)) || `HTTP ${res.status}`;
-      return { ok: false, error: String(msg), status: res.status };
+    if (!r.ok) {
+      return { ok: false, error: r.error ?? '予約の作成に失敗しました', status: r.status };
     }
     return {
       ok: true,
-      bookingId: String(body?.booking_id ?? ''),
-      syncStatus: body?.salonboard_sync_status === 'pending_push'
-        ? 'pending_push'
-        : 'not_enqueued',
+      bookingId: r.bookingId ?? '',
+      syncStatus: r.syncStatus === 'pending_push' ? 'pending_push' : 'not_enqueued',
     };
   } catch (e: any) {
-    return {
-      ok: false,
-      error: `Admin API に接続できません: ${e?.message ?? String(e)}`,
-    };
+    return { ok: false, error: e?.message ?? String(e) };
   }
 }
 

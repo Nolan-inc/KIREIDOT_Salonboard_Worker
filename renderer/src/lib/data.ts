@@ -160,6 +160,42 @@ export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
 }
 
 // =========================
+// メニュー (サロンボード由来) — 予約作成時の選択用
+// salonboard_menu_imports を読む (メニュー同期で投入される)。
+// =========================
+export type MenuRow = {
+  id: string;
+  external_id: string;
+  name: string;
+  category: string | null;
+  price: number | null;
+  duration_min: number | null;
+};
+
+export async function fetchMenuList(scope: StaffScope): Promise<MenuRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_menu_imports')
+    .select('id, external_id, name, category, price, duration_min, is_active')
+    .eq('shop_id', scope.shopId)
+    .eq('is_active', true)
+    .order('category', { nullsFirst: false })
+    .order('name');
+  if (error) {
+    console.warn('[data] fetchMenuList error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    external_id: r.external_id,
+    name: r.name,
+    category: r.category ?? null,
+    price: r.price ?? null,
+    duration_min: r.duration_min ?? null,
+  })) as MenuRow[];
+}
+
+// =========================
 // シフト (サロンボード由来)
 //
 // `salonboard_shift_imports` を読む。1行 = 1スタッフ × 1日 (date + time)。

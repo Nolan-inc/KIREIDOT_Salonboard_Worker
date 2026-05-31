@@ -306,6 +306,62 @@ ipcMain.handle('device:test', async (_event, payload) => {
   };
 });
 
+// 予約を作成し SalonBoard へ push_booking ジョブを積む。
+// renderer は VITE_ 環境変数を持たないため、保存済み device 設定 (userData) の
+// apiUrl / token を使って main プロセスから Admin API を叩く。
+// deviceId がある場合のみ X-Device-Id を付ける (無ければ global token モード)。
+ipcMain.handle('device:create-booking', async (_event, payload) => {
+  const cfg = deviceConfig.readDeviceConfig(app);
+  if (!cfg || !cfg.apiUrl || !cfg.deviceToken) {
+    return { ok: false, error: 'SalonBoard 連携が未設定です (設定画面で API URL と Worker Token を登録してください)' };
+  }
+  const base = String(cfg.apiUrl).replace(/\/+$/, '');
+  const headers = {
+    Authorization: `Bearer ${cfg.deviceToken}`,
+    'Content-Type': 'application/json',
+    'X-Worker-Id': cfg.workerId || 'electron-worker',
+    'X-Platform': process.platform,
+    ...(cfg.deviceId ? { 'X-Device-Id': cfg.deviceId } : {}),
+  };
+  try {
+    const res = await fetch(`${base}/api/salonboard/device/bookings/create`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        shop_id: payload?.shopId,
+        scheduled_at: payload?.scheduledAt,
+        staff_external_id: payload?.staffExternalId,
+        staff_name: payload?.staffName ?? null,
+        menu_name: payload?.menuName ?? null,
+        duration_min: payload?.durationMin ?? 60,
+        amount: payload?.amount ?? 0,
+        customer_name: payload?.customerName ?? null,
+        notes: payload?.notes ?? null,
+      }),
+    });
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (_e) {
+      /* ignore */
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: (body && (body.message || body.error)) || `HTTP ${res.status}`,
+        status: res.status,
+      };
+    }
+    return {
+      ok: true,
+      bookingId: String(body?.booking_id ?? ''),
+      syncStatus: body?.salonboard_sync_status === 'pending_push' ? 'pending_push' : 'not_enqueued',
+    };
+  } catch (e) {
+    return { ok: false, error: `Admin API に接続できません: ${e instanceof Error ? e.message : String(e)}` };
+  }
+});
+
 // ---------------------------------------------------------------------
 // Worker 操作系 IPC (renderer → main → utilityProcess)
 // ---------------------------------------------------------------------

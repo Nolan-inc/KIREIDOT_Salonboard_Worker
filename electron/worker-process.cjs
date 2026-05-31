@@ -28,6 +28,7 @@ const WebSocket = require('ws');
 const {
   scrapeBookings,
   scrapeStaff,
+  scrapeMenus,
   scrapeBlogs,
   scrapeShifts,
   scrapeCustomerDetails,
@@ -775,6 +776,23 @@ async function processShop(target, channels, runId, opts = {}) {
       }
     }
 
+    if (channelSet.has('menus')) {
+      try {
+        emit('shop:progress', { shopId, step: 'menus', msg: 'メニュー一覧を取得中…' });
+        const { rows, debug } = await scrapeMenus(page);
+        const sent = await sendMenus(shopId, rows);
+        counts.menus = sent;
+        summary.push(`メニュー ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
+        emit('shop:progress', { shopId, step: 'menus', msg: `メニュー ${sent} 件保存` });
+      } catch (e) {
+        emit('log', {
+          level: 'warn',
+          msg: `[${shopId.slice(0, 8)}] menu scrape error: ${e instanceof Error ? e.message : e}`,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
     if (channelSet.has('blog')) {
       try {
         emit('shop:progress', { shopId, step: 'blog', msg: 'ブログを取得中…' });
@@ -1300,6 +1318,25 @@ async function sendStaff(shopId, rows) {
     emit('log', {
       level: 'error',
       msg: `bulk_upsert_staff: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
+async function sendMenus(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const valid = rows.filter((r) => r.external_id && r.name);
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_menus', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_menus: ${error.message}`,
       at: new Date().toISOString(),
     });
     return 0;

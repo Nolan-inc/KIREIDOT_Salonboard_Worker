@@ -1023,6 +1023,72 @@ function cleanText(s) {
   return t === '' ? null : t;
 }
 
+// ----------------- メニュー一覧 (menuEdit) -----------------
+
+const MENU_EDIT_URL = 'https://salonboard.com/CNK/draft/menuEdit';
+
+/**
+ * SalonBoard のメニュー編集画面からメニュー一覧を取得する。
+ * 実 DOM (menu.html) より、各メニューは
+ *   <textarea name="frmMenuEditMenuDetailList[N].menuName">メニュー名</textarea>
+ *   <input    name="frmMenuEditMenuDetailList[N].price" value="...">
+ *   <input    name="frmMenuEditMenuDetailList[N].menuId" value="...">
+ *   <input    name="frmMenuEditMenuDetailList[N].menuCategoryName" value="...">
+ *   <input    name="frmMenuEditMenuDetailList[N].sejyutsuAimTime" value="...">  (施術時間/分)
+ * の連番フィールドで構成される。属性順に依存しないよう DOM の .value を読む。
+ */
+async function scrapeMenus(page) {
+  await page.goto(MENU_EDIT_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+  const raw = await page.evaluate(() => {
+    // name="frmMenuEditMenuDetailList[N].field" の N とフィールドを引く
+    const re = /^frmMenuEditMenuDetailList\[(\d+)\]\.(.+)$/;
+    const byIndex = {};
+    const els = document.querySelectorAll(
+      'input[name^="frmMenuEditMenuDetailList"], textarea[name^="frmMenuEditMenuDetailList"], select[name^="frmMenuEditMenuDetailList"]',
+    );
+    for (const el of els) {
+      const m = (el.name || '').match(re);
+      if (!m) continue;
+      const idx = m[1];
+      const field = m[2];
+      let val = '';
+      if (el.tagName.toLowerCase() === 'textarea') val = el.value ?? el.textContent ?? '';
+      else val = el.value ?? '';
+      byIndex[idx] = byIndex[idx] || {};
+      // 同名が複数あるとき (radio 等) は最初の非空を優先
+      if (byIndex[idx][field] == null || byIndex[idx][field] === '') {
+        byIndex[idx][field] = (val || '').trim();
+      }
+    }
+    const items = [];
+    for (const idx of Object.keys(byIndex)) {
+      const f = byIndex[idx];
+      const name = (f.menuName || '').trim();
+      if (!name) continue; // 空欄プレースホルダは捨てる
+      items.push({
+        external_id: (f.menuId || '').trim() || `idx_${idx}`,
+        name,
+        category: (f.menuCategoryName || f.genreName || '').trim() || null,
+        price: (f.price || '').replace(/[^\d]/g, '') || null,
+        duration_min: (f.sejyutsuAimTime || '').replace(/[^\d]/g, '') || null,
+      });
+    }
+    return { items, total: Object.keys(byIndex).length };
+  });
+
+  const rows = (raw.items ?? []).map((it) => ({
+    external_id: it.external_id,
+    name: it.name,
+    category: it.category,
+    price: it.price ? Number(it.price) : null,
+    duration_min: it.duration_min ? Number(it.duration_min) : null,
+    is_active: true,
+  }));
+  return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
+}
+
 // ----------------- スタッフ一覧 (staffList) -----------------
 
 const STAFF_LIST_URL = 'https://salonboard.com/CNK/draft/staffList';
@@ -1807,6 +1873,7 @@ async function scrapeShifts(page) {
 module.exports = {
   scrapeBookings,
   scrapeStaff,
+  scrapeMenus,
   scrapeBlogs,
   scrapeShifts,
   scrapeCustomerDetails,
