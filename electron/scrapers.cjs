@@ -1146,12 +1146,33 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
 
-  // 登録フォームを URL 直開き
+  // --- 重要 ---
+  // 登録フォームは rlastupdate (スケジュール画面に埋め込まれたタイムスタンプ) を
+  // 付けないと "情報が一部失われています (KPCL017V01)" エラーになる。
+  // よって (1) 対象日のスケジュール画面を開き #rlastupdate を取得 →
+  //         (2) それを付けて登録フォームを開く。
+  let rlastupdate = '';
+  try {
+    const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+    schedUrl.searchParams.set('date', when.yyyymmdd);
+    await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    rlastupdate = (await page
+      .locator('#rlastupdate')
+      .first()
+      .textContent()
+      .catch(() => ''))?.trim() || '';
+  } catch (e) {
+    return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+
+  // 登録フォームを URL で開く (rlastupdate を付与)
   const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
   u.searchParams.set('staffId', p.salonboard_staff_external_id);
   u.searchParams.set('date', when.yyyymmdd);
   u.searchParams.set('rsvHour', startHH);
   u.searchParams.set('rsvMinute', startMM);
+  if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
@@ -1171,7 +1192,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       return { url: location.href, title: document.title, forms, body };
     }).catch(() => ({ url: page.url(), title: '?', forms: [], body: '?' }));
     return fail(
-      `予約登録フォームに到達できませんでした。url=${diag.url} title="${diag.title}" forms=[${(diag.forms || []).join(',')}] body="${diag.body}"`,
+      `予約登録フォームに到達できませんでした (rlastupdate=${rlastupdate || 'なし'})。url=${diag.url} title="${diag.title}" forms=[${(diag.forms || []).join(',')}] body="${diag.body}"`,
       'CONFIRMATION_MISMATCH',
       true,
     );
