@@ -1197,13 +1197,37 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
 
-  // スタッフ (URL で初期選択されるが明示)
-  const staffSel = page.locator("select#salonStaffList").first();
+  // スタッフ指定。フォームには
+  //   - 表示用セレクト select#salonStaffList (value=external_id)
+  //   - 実際に送信される hidden input#staffId (value=external_id)
+  //   - staffIdList (担当割当)
+  // があり、これらを揃えないと「どのスタッフを選んでも URL/既定のスタッフに入る」
+  // という不整合が起きる。external_id で select を選び、change を発火させ、
+  // さらに hidden staffId / staffIdList も明示的に同じ値へ更新する。
+  const staffExt = p.salonboard_staff_external_id;
+  const staffSel = page.locator('select#salonStaffList').first();
   if ((await staffSel.count().catch(() => 0)) > 0) {
-    await staffSel.selectOption({ value: p.salonboard_staff_external_id }).catch(async () => {
+    await staffSel.selectOption({ value: staffExt }).catch(async () => {
       if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
     });
   }
+  // hidden / 関連 select を JS で強制的に揃える + change を発火 (SB 側ハンドラ対策)。
+  await page.evaluate((ext) => {
+    const setVal = (el, v) => {
+      if (!el) return;
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    // hidden staffId
+    setVal(document.getElementById('staffId'), ext);
+    document.querySelectorAll('input[name="staffId"]').forEach((el) => setVal(el, ext));
+    // salonStaffList / staffIdList セレクトも option が一致すれば選ぶ
+    for (const name of ['salonStaffList', 'staffIdList']) {
+      const sel = document.querySelector(`select[name="${name}"]`);
+      if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
+    }
+  }, staffExt).catch(() => {});
   // 開始 時/分
   await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
   await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});

@@ -85,9 +85,17 @@ export async function fetchTodayBookings(scope: StaffScope): Promise<BookingRow[
   return (data ?? []) as BookingRow[];
 }
 
-export async function fetchRecentBookings(scope: StaffScope, days = 7): Promise<BookingRow[]> {
+/**
+ * @param days 取得日数 (既定 7)
+ * @param offsetDays 今日からの開始オフセット日数 (週送り用。+7 で翌週、-7 で先週)
+ */
+export async function fetchRecentBookings(
+  scope: StaffScope,
+  days = 7,
+  offsetDays = 0,
+): Promise<BookingRow[]> {
   const start = new Date();
-  start.setDate(start.getDate() - 0);
+  start.setDate(start.getDate() + offsetDays);
   start.setHours(0, 0, 0, 0);
   const end = new Date(start);
   end.setDate(end.getDate() + days);

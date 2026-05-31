@@ -75,6 +75,8 @@ export function Bookings() {
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // 週送り (0=今週, +7=翌週, -7=先週 …)
+  const [weekOffset, setWeekOffset] = useState(0);
 
   // --- 行ごと「サロンボードに挿入」 ---
   const [staffOptions, setStaffOptions] = useState<StaffRow[]>([]);
@@ -88,7 +90,7 @@ export function Bookings() {
     if (!scope) return;
     let cancelled = false;
     setLoading(true);
-    fetchRecentBookings(scope, 7)
+    fetchRecentBookings(scope, 7, weekOffset)
       .then((data) => {
         if (cancelled) return;
         setBookings(data);
@@ -101,7 +103,7 @@ export function Bookings() {
     return () => {
       cancelled = true;
     };
-  }, [scope?.shopId, scope?.organizationId, reloadKey]);
+  }, [scope?.shopId, scope?.organizationId, reloadKey, weekOffset]);
 
   // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する
   useEffect(() => {
@@ -205,20 +207,45 @@ export function Bookings() {
     return { all: bookings.length, salonboard, synced, notSynced };
   }, [bookings]);
 
+  // 表示中の週の開始日 (今日 + weekOffset 日)
+  const weekStart = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + weekOffset);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  })();
+  const weekLabel =
+    weekOffset === 0 ? '今週' : weekOffset > 0 ? `${weekOffset / 7} 週後` : `${-weekOffset / 7} 週前`;
+
   return (
     <div className="flex flex-col gap-5 pt-4">
       <div className="flex flex-col items-stretch gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-2">
-          <button type="button" className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50">
+          <button
+            type="button"
+            onClick={() => setWeekOffset((w) => w - 7)}
+            title="前の7日間"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50"
+          >
             <ChevronLeft className="h-4 w-4" />
           </button>
-          <div className="rounded-[12px] border border-hairline bg-white/85 px-4 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-muted">今週</div>
+          <button
+            type="button"
+            onClick={() => setWeekOffset(0)}
+            title="今週に戻る"
+            className="rounded-[12px] border border-hairline bg-white/85 px-4 py-2 text-left hover:bg-brand-light/30"
+          >
+            <div className="text-[10px] uppercase tracking-wider text-muted">{weekLabel}</div>
             <div className="font-serif text-[16px] font-bold text-ink">
-              {new Date().toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })} から 7 日
+              {weekStart.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })} から 7 日
             </div>
-          </div>
-          <button type="button" className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50">
+          </button>
+          <button
+            type="button"
+            onClick={() => setWeekOffset((w) => w + 7)}
+            title="次の7日間"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50"
+          >
             <ChevronRight className="h-4 w-4" />
           </button>
         </div>
