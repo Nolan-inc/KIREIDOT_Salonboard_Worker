@@ -196,6 +196,80 @@ export async function fetchMenuList(scope: StaffScope): Promise<MenuRow[]> {
 }
 
 // =========================
+// メニュー統合一覧 (SalonBoard取得 + KIREIDOT) — 出所付きで両方表示
+// =========================
+export type MergedMenuRow = {
+  id: string;
+  name: string;
+  category: string | null;
+  price: number | null;
+  duration_min: number | null;
+  /** 'salonboard' = SB 取込 / 'kireidot' = KIREIDOT 登録 */
+  source: 'salonboard' | 'kireidot';
+  /** SB メニューが KIREIDOT メニューと紐付いているか (source=salonboard のみ) */
+  linked?: boolean;
+  /** 割引率 (kireidot のみ) */
+  discount_rate?: number | null;
+  is_active: boolean;
+};
+
+/**
+ * SalonBoard 取込メニュー (salonboard_menu_imports, shop 単位) と
+ * KIREIDOT メニュー (menus, organization 単位) を 1 つのリストに統合して返す。
+ * UI 側で source バッジで区別する。
+ */
+export async function fetchMenusMerged(scope: StaffScope): Promise<MergedMenuRow[]> {
+  const out: MergedMenuRow[] = [];
+
+  // SalonBoard 取込メニュー (店舗単位)
+  if (scope.shopId) {
+    const { data, error } = await supabase
+      .from('salonboard_menu_imports')
+      .select('id, name, category, price, duration_min, matched_menu_id, is_active')
+      .eq('shop_id', scope.shopId)
+      .order('category', { nullsFirst: false })
+      .order('name');
+    if (error) console.warn('[data] fetchMenusMerged (sb) error:', error.message);
+    for (const r of (data ?? []) as any[]) {
+      out.push({
+        id: `sb_${r.id}`,
+        name: r.name,
+        category: r.category ?? null,
+        price: r.price ?? null,
+        duration_min: r.duration_min ?? null,
+        source: 'salonboard',
+        linked: !!r.matched_menu_id,
+        is_active: r.is_active ?? true,
+      });
+    }
+  }
+
+  // KIREIDOT メニュー (組織単位)
+  if (scope.organizationId) {
+    const { data, error } = await supabase
+      .from('menus')
+      .select('id, name, price, duration_minutes, discount_rate, is_active, organization_id')
+      .eq('organization_id', scope.organizationId)
+      .order('name');
+    if (error) console.warn('[data] fetchMenusMerged (kireidot) error:', error.message);
+    for (const r of (data ?? []) as any[]) {
+      out.push({
+        id: `kd_${r.id}`,
+        name: r.name,
+        category: null,
+        price: r.price ?? null,
+        duration_min: r.duration_minutes ?? null,
+        source: 'kireidot',
+        discount_rate: r.discount_rate ?? null,
+        is_active: r.is_active ?? true,
+      });
+    }
+  }
+
+  return out;
+}
+
+// =========================
 // シフト (サロンボード由来)
 //
 // `salonboard_shift_imports` を読む。1行 = 1スタッフ × 1日 (date + time)。

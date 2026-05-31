@@ -4,6 +4,7 @@ import { UpdaterToast } from './components/UpdaterToast';
 import { Dashboard } from './pages/Dashboard';
 import { Bookings } from './pages/Bookings';
 import { Staff } from './pages/Staff';
+import { Menus } from './pages/Menus';
 import { Shifts } from './pages/Shifts';
 import { Blog } from './pages/Blog';
 import { Settings } from './pages/Settings';
@@ -47,6 +48,7 @@ function Routes() {
       {active === 'dashboard' && selectedShopId && <Dashboard onNavigate={setActive} />}
       {active === 'bookings' && selectedShopId && <Bookings />}
       {active === 'staff' && selectedShopId && <Staff />}
+      {active === 'menus' && selectedShopId && <Menus />}
       {active === 'shifts' && selectedShopId && <Shifts />}
       {active === 'blog' && selectedShopId && <Blog />}
       {active === 'salonboard' && <SalonboardPage />}

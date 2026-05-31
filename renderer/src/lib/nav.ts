@@ -4,6 +4,7 @@ import {
   Users,
   CalendarClock,
   Newspaper,
+  BookOpen,
   Link2,
   Settings as SettingsIcon,
   Store,
@@ -15,6 +16,7 @@ export type NavKey =
   | 'dashboard'
   | 'bookings'
   | 'staff'
+  | 'menus'
   | 'shifts'
   | 'blog'
   | 'salonboard'
@@ -59,6 +61,12 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Users,
   },
   {
+    key: 'menus',
+    label: 'メニュー',
+    description: 'SalonBoard取得・KIREIDOT登録のメニュー一覧',
+    icon: BookOpen,
+  },
+  {
     key: 'shifts',
     label: 'シフト',
     description: 'シフトの確認・登録',
@@ -83,6 +91,7 @@ const SHOP_SCOPED_KEYS: ReadonlySet<NavKey> = new Set<NavKey>([
   'dashboard',
   'bookings',
   'staff',
+  'menus',
   'shifts',
   'blog',
 ]);
