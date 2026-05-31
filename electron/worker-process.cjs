@@ -1514,12 +1514,18 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
 async function runPushJobs({ showBrowser } = {}) {
   const headers = buildDeviceHeaders();
   if (!headers) {
-    log('push: 認証情報が未設定のため push_booking をスキップ', 'warn');
+    log('予約書き込み: 認証情報が未設定のためスキップしました', 'warn');
     return;
   }
   const enablePush = !!deviceAuth.enablePush;
-  const MAX_JOBS = 20; // 1 回の同期で処理する上限 (暴走防止)
+  // 開始を必ずログに出す (ユーザーが「実行されたか」を確認できるように)。
+  log(
+    `予約書き込み(push_booking)チェック開始 — 実登録(SalonBoardへ書込)=${enablePush ? 'ON' : 'OFF (確認のみ)'}`,
+    'info',
+  );
+  const MAX_JOBS = 30; // 1 回の同期で処理する上限 (暴走防止)
   let processed = 0;
+  let drainedOther = 0;
 
   for (let i = 0; i < MAX_JOBS; i++) {
     if (abortRequested) break;
@@ -1531,29 +1537,30 @@ async function runPushJobs({ showBrowser } = {}) {
         headers,
       });
       if (!res.ok) {
-        log(`push: jobs fetch 失敗 ${res.status}`, 'warn');
+        log(`予約書き込み: ジョブ取得失敗 ${res.status}`, 'warn');
         break;
       }
       const json = await res.json();
       const jobs = Array.isArray(json.jobs) ? json.jobs : [];
-      // push_booking 以外 (cancel_booking 等) は今は対象外。来たら即 not_implemented で返す。
-      job = jobs.find((j) => j.job_type === 'push_booking');
-      if (!job) {
-        // push_booking が無ければ終了 (他種別ジョブは別経路)
-        // ただし claim された別種別があれば retry で戻す
-        for (const other of jobs) {
-          if (other.job_type !== 'push_booking') {
-            await postCallback({
-              job_id: other.id,
-              status: 'cancelled',
-              error: `worker (desktop) は ${other.job_type} を処理しません`,
-            });
-          }
-        }
+      if (jobs.length === 0) {
+        // キューが空 = 処理対象なし
         break;
       }
+      const claimed = jobs[0];
+      if (claimed.job_type !== 'push_booking') {
+        // desktop worker が扱わない種別 (cancel_booking 等) は cancelled で返して
+        // 次のジョブへ進む (break しない = push_booking が後ろにあっても到達できる)。
+        await postCallback({
+          job_id: claimed.id,
+          status: 'cancelled',
+          error: `worker (desktop) は ${claimed.job_type} を処理しません (MVP は push_booking のみ)`,
+        });
+        drainedOther++;
+        continue;
+      }
+      job = claimed;
     } catch (e) {
-      log(`push: jobs fetch error: ${e?.message ?? e}`, 'warn');
+      log(`予約書き込み: ジョブ取得エラー: ${e?.message ?? e}`, 'warn');
       break;
     }
 
@@ -1661,7 +1668,13 @@ async function runPushJobs({ showBrowser } = {}) {
       await browser?.close().catch(() => {});
     }
   }
-  if (processed > 0) log(`push: ${processed} 件の予約書き込みジョブを処理`, 'info');
+  // 終了サマリを必ず出す (0件でも「実行されたが対象なし」が分かるように)。
+  log(
+    `予約書き込みチェック完了 — 書込ジョブ処理 ${processed} 件` +
+      (drainedOther > 0 ? ` / 対象外ジョブ整理 ${drainedOther} 件 (cancel等)` : '') +
+      (processed === 0 && drainedOther === 0 ? ' (キューに対象なし)' : ''),
+    'info',
+  );
 }
 
 /** /api/salonboard/callback に結果を POST する。 */
