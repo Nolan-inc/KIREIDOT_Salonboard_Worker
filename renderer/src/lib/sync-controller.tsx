@@ -114,9 +114,19 @@ const AUTO_SYNC_TICK_MS = 60_000; // 60 秒に 1 回判定
 
 /** 「予約のみ」自動同期 ON/OFF を localStorage に保存するキー */
 const BOOKINGS_AUTO_SYNC_KEY = 'salondesk.bookingsAutoSyncEnabled';
-/** 「予約のみ」自動同期の実行間隔 (5 分) */
-const BOOKINGS_AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
-/** 「予約のみ」自動同期の判定周期 (30 秒) */
+/**
+ * 「予約のみ」自動同期の実行間隔。
+ * 固定間隔だと SalonBoard 側のアクセスパターン検知 (BAN) を招きやすいため、
+ * 毎回 1〜10 分の範囲でランダムに選ぶ (実行のたびに再抽選)。
+ */
+const BOOKINGS_AUTO_SYNC_MIN_MS = 1 * 60_000; // 下限 1 分
+const BOOKINGS_AUTO_SYNC_MAX_MS = 10 * 60_000; // 上限 10 分
+/** 1〜10 分のランダムな間隔 (ms) を返す。 */
+function randomBookingsIntervalMs(): number {
+  const span = BOOKINGS_AUTO_SYNC_MAX_MS - BOOKINGS_AUTO_SYNC_MIN_MS;
+  return BOOKINGS_AUTO_SYNC_MIN_MS + Math.floor(Math.random() * (span + 1));
+}
+/** 「予約のみ」自動同期の判定周期 (30 秒)。実行間隔ではなく「実行可否を判定する周期」。 */
 const BOOKINGS_AUTO_SYNC_TICK_MS = 30_000;
 
 export function SyncControllerProvider({ children }: { children: ReactNode }) {
@@ -170,6 +180,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const lastBookingsAutoSyncAtRef = useRef<number>(0);
+  /** 次回「予約のみ」同期までの間隔 (ms)。1〜10 分でランダムに決め、実行のたびに再抽選。 */
+  const nextBookingsIntervalRef = useRef<number>(randomBookingsIntervalMs());
   const [lastBookingsAutoSyncAt, setLastBookingsAutoSyncAt] = useState<number | null>(
     null,
   );
@@ -578,7 +590,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       // 既に同期が走っているならスキップ (全チャネル同期と競合させない)
       if (runningRef.current) return;
       const elapsed = Date.now() - lastBookingsAutoSyncAtRef.current;
-      if (elapsed < BOOKINGS_AUTO_SYNC_INTERVAL_MS) return;
+      // 固定間隔だと BAN されやすいので、毎回 1〜10 分のランダム間隔で実行する。
+      if (elapsed < nextBookingsIntervalRef.current) return;
 
       // 対象店舗: 認証情報があり enabled な店舗の shop_id 一覧
       // v0.2.5: device 設定 (userData) 経由で overview を取得 (main 経由)
@@ -602,6 +615,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
 
       lastBookingsAutoSyncAtRef.current = Date.now();
       setLastBookingsAutoSyncAt(lastBookingsAutoSyncAtRef.current);
+      // 次回の間隔を 1〜10 分で再抽選 (アクセス間隔を一定にしない)。
+      nextBookingsIntervalRef.current = randomBookingsIntervalMs();
       await bridge.workerSync({ shopIds, channels: ['bookings'] });
     };
 
