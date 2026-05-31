@@ -1091,11 +1091,36 @@ async function isLoggedIn(page, baseUrl) {
       .count();
     if (loginInputCount > 0) return 'needs_login';
     if (/login/i.test(page.url())) return 'needs_login';
-    const expiredCount = await page
-      .locator('text=/再ログイン|セッション|タイムアウト|ログインしてください/')
-      .first()
-      .count();
-    if (expiredCount > 0) return 'needs_login';
+
+    // セッション切れ / エラー画面の検出。
+    // SalonBoard のセッション切れは title="SALON BOARD : エラー"、本文に
+    // 「一定時間操作されなかったため、ログインの有効期限が切れました。
+    //   再度ログインしなおしてください。」「ログインへ」というリンクが出る。
+    // パスワード欄が無く URL も /login じゃないので、本文/タイトルで判定する。
+    // (旧実装は「再ログイン|ログインしてください」しか見ておらず、この文言を取り逃していた)
+    const expired = await page.evaluate(() => {
+      const title = document.title || '';
+      const body = (document.body?.innerText || '').replace(/\s+/g, '');
+      const hasLoginLink = Array.from(document.querySelectorAll('a')).some((a) =>
+        /ログインへ|ログイン画面/.test(a.textContent || ''),
+      );
+      const errorTitle = /エラー|ERROR/i.test(title);
+      const expiredText =
+        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|再ログイン|セッション|タイムアウト|ログインしてください|操作されなかった/.test(
+          body,
+        );
+      // 「予約一覧/管理画面に居る」と言えるための前向きな手がかり (どれも無ければ不確実)
+      const looksLikeApp =
+        !!document.getElementById('resultList') ||
+        document.querySelectorAll('input, select, textarea').length > 0 ||
+        /予約|スタッフ|シフト|メニュー|売上|店舗/.test(body);
+      return { errorTitle, expiredText, hasLoginLink, looksLikeApp };
+    });
+    if (expired.expiredText || (expired.errorTitle && expired.hasLoginLink)) {
+      return 'needs_login';
+    }
+    // エラー画面でなくても、管理画面らしさが全く無ければ未ログイン扱い (安全側)
+    if (!expired.looksLikeApp) return 'needs_login';
     return 'logged_in';
   }
   return 'unknown';
@@ -1219,6 +1244,22 @@ async function tryLogin(page, c) {
     (await pwInput.count()) > 0 || /login/i.test(page.url());
   if (stillOnLogin) {
     return { status: 'failed', reason: 'still on login page' };
+  }
+  // ログイン直後にセッション切れ/エラー画面に居ないか確認 (誤って成功扱いしない)。
+  try {
+    const errPage = await page.evaluate(() => {
+      const title = document.title || '';
+      const body = (document.body?.innerText || '').replace(/\s+/g, '');
+      return (
+        /エラー|ERROR/i.test(title) &&
+        /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(body)
+      );
+    });
+    if (errPage) {
+      return { status: 'failed', reason: 'landed on session-expired/error page after login' };
+    }
+  } catch (_e) {
+    /* 判定失敗は成功扱いを妨げない */
   }
   return { status: 'ok' };
 }
