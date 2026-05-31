@@ -1232,12 +1232,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
-  // 顧客名 (姓名分割)
-  if (p.customer_name) {
-    const parts = String(p.customer_name).trim().split(/[\s　]+/);
-    await page.locator('input#nmSei').first().fill(parts[0] ?? p.customer_name, { timeout: 6_000 }).catch(() => {});
-    const mei = parts.slice(1).join(' ');
-    if (mei) await page.locator('input#nmMei').first().fill(mei, { timeout: 6_000 }).catch(() => {});
+  // 顧客名。SalonBoard は「氏名(カナ)」が必須 (赤●)。漢字からは読みを生成できない
+  // ため、カナは「元の名前がカタカナならそれ、そうでなければ汎用カナ」を必ず入れる。
+  {
+    const name = (p.customer_name && String(p.customer_name).trim()) || 'ゲスト 予約';
+    const parts = name.split(/[\s　]+/);
+    const sei = parts[0] || name;
+    const mei = parts.slice(1).join(' ') || '様'; // 名が無ければダミー
+    // カタカナ判定 (全角カタカナ + 長音)
+    const isKatakana = (s) => /^[゠-ヿー]+$/.test(s);
+    const toKana = (s, fallback) => (isKatakana(s) ? s : fallback);
+
+    await page.locator('input#nmSei').first().fill(sei, { timeout: 6_000 }).catch(() => {});
+    await page.locator('input#nmMei').first().fill(mei, { timeout: 6_000 }).catch(() => {});
+    // カナ (必須) — 読み不明な漢字には汎用カナを入れて必須チェックを通す
+    await page.locator('input#nmSeiKana').first().fill(toKana(sei, 'ヨヤク'), { timeout: 6_000 }).catch(() => {});
+    await page.locator('input#nmMeiKana').first().fill(toKana(mei, 'キャクサマ'), { timeout: 6_000 }).catch(() => {});
   }
   if (p.customer_phone) {
     await page.locator('input#tel').first().fill(String(p.customer_phone), { timeout: 6_000 }).catch(() => {});
