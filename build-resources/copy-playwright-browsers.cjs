@@ -88,10 +88,10 @@ function findChromiumDirs() {
       return bv - av;
     });
 
-  // 配布物サイズ削減のため、デフォルトでは chromium_headless_shell だけ同梱する。
-  // showBrowser=true (UI から有効化する debug モード) で必要な完全版 chromium も
-  // 入れたい場合は環境変数 INCLUDE_FULL_CHROMIUM=1 で同梱を有効化する。
-  const includeFull = /^(1|true|yes)$/i.test(process.env.INCLUDE_FULL_CHROMIUM ?? '');
+  // showBrowser=true / 予約書き込みテスト (headed Chromium) で完全版 chromium が
+  // 必要なため、デフォルトで完全版も同梱する。サイズ削減したい場合のみ
+  // INCLUDE_FULL_CHROMIUM=0 で headless_shell だけにできる。
+  const includeFull = !/^(0|false|no)$/i.test(process.env.INCLUDE_FULL_CHROMIUM ?? '1');
   const headless = dirs.find((d) => d.startsWith('chromium_headless_shell-'));
   const full = dirs.find((d) => d.startsWith('chromium-') && !d.startsWith('chromium_headless_shell-'));
   const result = [];

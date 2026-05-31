@@ -1572,15 +1572,17 @@ async function runPushJobs({ showBrowser } = {}) {
 
     let browser = null;
     try {
-      browser = await chromium.launch({
-        headless: !showBrowser,
-        slowMo: showBrowser ? 250 : 0,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--no-sandbox',
-          '--disable-features=IsolateOrigins,site-per-process',
-        ],
-      });
+      const pushArgs = [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-features=IsolateOrigins,site-per-process',
+      ];
+      try {
+        browser = await chromium.launch({ headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs });
+      } catch (e) {
+        // 完全版 Chromium が無い等で headed 起動に失敗したら headless で続行
+        browser = await chromium.launch({ headless: true, args: pushArgs });
+      }
       const ssPath = storageStatePathFor(job.shop_id);
       const ctx = await browser.newContext({
         ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
@@ -1802,11 +1804,14 @@ async function runTestPush(payload) {
   let browser = null;
   try {
     step('launch', { msg: 'ブラウザ起動 (画面表示)' });
-    browser = await chromium.launch({
-      headless: false, // テストは必ず画面表示 (目視確認用)
-      slowMo: 250,
-      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'],
-    });
+    const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
+    try {
+      // テストは画面表示 (目視確認用)。完全版 Chromium が無ければ headless に自動フォールバック。
+      browser = await chromium.launch({ headless: false, slowMo: 250, args: launchArgs });
+    } catch (e) {
+      step('launch', { msg: `画面表示の起動に失敗 (${e?.message?.split('\n')[0] ?? e})。headless で続行します` });
+      browser = await chromium.launch({ headless: true, args: launchArgs });
+    }
     const ssPath = storageStatePathFor(p.shopId);
     const ctx = await browser.newContext({
       ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
