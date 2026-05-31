@@ -44,6 +44,8 @@ export type BookingRow = {
   menu_id: string | null;
   /** サロンボード由来の表示用フィールド */
   salonboard_staff_name?: string | null;
+  /** SalonBoard スタッフ external_id (W001...)。書き込み時のスタッフ特定に使う */
+  salonboard_staff_external_id?: string | null;
   external_booking_id?: string | null;
   /** 予約の出所: 'salonboard' = SB から取得 / 'kireidot' = KIREIDOT で作成 */
   source?: string | null;
@@ -68,7 +70,7 @@ export async function fetchTodayBookings(scope: StaffScope): Promise<BookingRow[
   let q: any = supabase
     .from('bookings')
     .select(
-      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
+      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, salonboard_staff_external_id, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
     )
     .gte('scheduled_at', start.toISOString())
     .lt('scheduled_at', end.toISOString())
@@ -93,7 +95,7 @@ export async function fetchRecentBookings(scope: StaffScope, days = 7): Promise<
   let q: any = supabase
     .from('bookings')
     .select(
-      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
+      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, salonboard_staff_external_id, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
     )
     .gte('scheduled_at', start.toISOString())
     .lt('scheduled_at', end.toISOString())

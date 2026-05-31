@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
 import { fetchRecentBookings, fetchStaffList, fetchMenuList, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
@@ -76,6 +76,14 @@ export function Bookings() {
   const [modalOpen, setModalOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
+  // --- 行ごと「サロンボードに挿入」 ---
+  const [staffOptions, setStaffOptions] = useState<StaffRow[]>([]);
+  const [insertingId, setInsertingId] = useState<string | null>(null);
+  // bookingId -> { ok, msg }
+  const [insertResults, setInsertResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  // スタッフ未紐付けの予約をどのスタッフで入れるか選ばせる対象 booking
+  const [staffPickFor, setStaffPickFor] = useState<BookingRow | null>(null);
+
   useEffect(() => {
     if (!scope) return;
     let cancelled = false;
@@ -86,10 +94,74 @@ export function Bookings() {
         setBookings(data);
       })
       .finally(() => !cancelled && setLoading(false));
+    // スタッフ候補 (external_id 付き) も取得しておく
+    fetchStaffList(scope)
+      .then((rows) => !cancelled && setStaffOptions(rows.filter((s) => !!s.external_id)))
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [scope?.shopId, scope?.organizationId, reloadKey]);
+
+  // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する
+  useEffect(() => {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.onWorkerEvent) return;
+    return bridge.onWorkerEvent((msg) => {
+      if (msg.type !== 'push:test') return;
+      const p = msg.payload;
+      if (p.step !== 'done') return;
+      setInsertingId((cur) => {
+        const target = cur;
+        if (target) {
+          setInsertResults((r) => ({
+            ...r,
+            [target]: {
+              ok: !!p.ok,
+              msg: p.ok
+                ? (p.registered ? `✅ SalonBoardに登録しました${p.externalId ? ` (ID: ${p.externalId})` : ''}` : '入力のみ完了 (実登録OFF)')
+                : `失敗: ${p.error || p.errorCode || 'unknown'}`,
+            },
+          }));
+          if (p.ok && p.registered) {
+            // 成功したら少し後に一覧を更新 (sync状態反映)
+            setTimeout(() => setReloadKey((k) => k + 1), 2000);
+          }
+        }
+        return null;
+      });
+    });
+  }, []);
+
+  // 実際に1件 SalonBoard へ挿入する。staffExt が無ければスタッフ選択モーダルを出す。
+  function insertToSalonboard(b: BookingRow, staffExtOverride?: string, staffNameOverride?: string) {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.workerTestPush || !scope?.shopId) return;
+    const staffExt = staffExtOverride || b.salonboard_staff_external_id || '';
+    if (!staffExt) {
+      // スタッフ未紐付け → 選択モーダルを出す
+      setStaffPickFor(b);
+      return;
+    }
+    setStaffPickFor(null);
+    setInsertingId(b.id);
+    setInsertResults((r) => {
+      const { [b.id]: _omit, ...rest } = r;
+      return rest;
+    });
+    void bridge.workerTestPush({
+      shopId: scope.shopId,
+      staffExternalId: staffExt,
+      staffName: staffNameOverride || b.salonboard_staff_name || null,
+      menuName: '', // メニューは入れない (時間と内容のみ)
+      scheduledAt: b.scheduled_at,
+      durationMin: b.duration_min ?? 60,
+      customerName: displayName(b) === 'ゲスト' ? null : displayName(b),
+      enablePush: true, // 行から挿入 = 実登録
+    });
+    // 安全網: 90秒で in-flight 解除
+    setTimeout(() => setInsertingId((cur) => (cur === b.id ? null : cur)), 90_000);
+  }
 
   const displayName = (b: BookingRow) =>
     b.customers?.full_name ??
@@ -241,6 +313,7 @@ export function Bookings() {
                 <th className="px-3 py-3">SalonBoard</th>
                 <th className="px-3 py-3 text-right">金額</th>
                 <th className="px-3 py-3">状態</th>
+                <th className="px-3 py-3">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-hairline/60">
@@ -300,6 +373,48 @@ export function Bookings() {
                     <td className="px-3 py-3">
                       <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${status.cls}`}>{status.label}</span>
                     </td>
+                    <td className="px-3 py-3">
+                      {(() => {
+                        const badge = classifySbSync(b);
+                        const res = insertResults[b.id];
+                        // SalonBoard 取得 / 同期済みは挿入不要
+                        if (badge.kind === 'salonboard' || badge.inSalonboard) {
+                          return <span className="text-[10px] text-muted">—</span>;
+                        }
+                        if (res) {
+                          return (
+                            <span className={`text-[10px] font-semibold ${res.ok ? 'text-emerald-700' : 'text-red-600'}`}>
+                              {res.msg}
+                              {!res.ok && (
+                                <button
+                                  type="button"
+                                  onClick={() => insertToSalonboard(b)}
+                                  className="ml-1 underline hover:no-underline"
+                                >
+                                  再挿入
+                                </button>
+                              )}
+                            </span>
+                          );
+                        }
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => insertToSalonboard(b)}
+                            disabled={insertingId === b.id || (!!insertingId && insertingId !== b.id)}
+                            title="この予約を SalonBoard に登録する"
+                            className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[10px] font-semibold text-white shadow-brand-sm disabled:opacity-40"
+                          >
+                            {insertingId === b.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <UploadCloud className="h-3 w-3" />
+                            )}
+                            {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+                          </button>
+                        );
+                      })()}
+                    </td>
                   </tr>
                 );
               })}
@@ -318,6 +433,85 @@ export function Bookings() {
           }}
         />
       )}
+
+      {/* スタッフ未紐付け予約の挿入時: SalonBoard スタッフを選ばせる */}
+      {staffPickFor && (
+        <StaffPickModal
+          booking={staffPickFor}
+          staff={staffOptions}
+          onClose={() => setStaffPickFor(null)}
+          onPick={(ext, name) => insertToSalonboard(staffPickFor, ext, name)}
+        />
+      )}
+    </div>
+  );
+}
+
+// 担当スタッフが SalonBoard と紐付いていない予約を挿入するとき、
+// その店舗の SalonBoard スタッフから 1 人選ばせる小モーダル。
+function StaffPickModal({
+  booking,
+  staff,
+  onClose,
+  onPick,
+}: {
+  booking: BookingRow;
+  staff: StaffRow[];
+  onClose: () => void;
+  onPick: (ext: string, name: string) => void;
+}) {
+  const [sel, setSel] = useState(staff[0]?.external_id ?? '');
+  const when = new Date(booking.scheduled_at);
+  const dt = `${when.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })} ${when.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}`;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-md rounded-[18px] border border-hairline bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-hairline/70 px-5 py-4">
+          <h2 className="font-serif text-[16px] font-bold text-ink">SalonBoard に挿入 — 担当スタッフを選択</h2>
+          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-soft hover:bg-brand-light/50">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="px-5 py-4">
+          <p className="mb-3 text-[12px] text-ink-soft">
+            {dt}・{booking.duration_min ?? 60}分 の予約を SalonBoard に登録します。<br />
+            この予約はスタッフが SalonBoard と紐付いていないため、登録先スタッフを選んでください。
+          </p>
+          {staff.length === 0 ? (
+            <p className="rounded-[10px] bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+              external_id 付きスタッフが見つかりません。先に「スタッフ」を同期してください。
+            </p>
+          ) : (
+            <select
+              value={sel}
+              onChange={(e) => setSel(e.target.value)}
+              className="h-10 w-full rounded-[10px] border border-hairline bg-white px-3 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20"
+            >
+              {staff.map((s) => (
+                <option key={s.id} value={s.external_id ?? ''}>
+                  {s.full_name}（{s.external_id}）
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="inline-flex h-10 items-center rounded-[12px] border border-hairline bg-white px-4 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40">
+              キャンセル
+            </button>
+            <button
+              type="button"
+              disabled={!sel}
+              onClick={() => {
+                const s = staff.find((x) => x.external_id === sel);
+                onPick(sel, s?.full_name ?? '');
+              }}
+              className="inline-flex h-10 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-5 text-[13px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+            >
+              <UploadCloud className="h-3.5 w-3.5" /> このスタッフで挿入
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
