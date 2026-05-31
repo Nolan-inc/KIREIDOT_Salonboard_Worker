@@ -1853,9 +1853,11 @@ async function runTestPush(payload) {
     }
     step('login_ok', { msg: 'ログイン成功' });
 
+    // 予約一覧からの挿入では本物の booking_id が来る。テストパネルからは未指定。
+    const realBookingId = p.bookingId || null;
     step('form', { msg: '登録フォームを開いて入力中' });
     const result = await pushBookingViaForm(page, {
-      booking_id: `test-${Date.now()}`,
+      booking_id: realBookingId || `test-${Date.now()}`,
       scheduled_at: p.scheduledAt,
       duration_min: p.durationMin || 60,
       salonboard_staff_external_id: p.staffExternalId,
@@ -1863,11 +1865,30 @@ async function runTestPush(payload) {
       salonboard_menu_name: p.menuName,
       customer_name: p.customerName || 'テスト 予約',
       notes: null,
-      kireidot_ref: 'KIREIDOT予約ID: TEST',
+      kireidot_ref: realBookingId ? `KIREIDOT予約ID: ${realBookingId}` : 'KIREIDOT予約ID: TEST',
     }, { baseUrl, enablePush: !!p.enablePush });
 
     if (result.status === 'ok') {
-      step('done', { ok: true, registered: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null, msg: `✅ 登録完了 external_id=${result.externalId ?? '?'}` });
+      // 本物の予約なら DB の同期状態を synced に更新 (バッジが「SB同期済み」になる)。
+      if (realBookingId) {
+        try {
+          await supabase
+            .from('bookings')
+            .update({
+              salonboard_sync_status: 'synced',
+              external_booking_id: result.externalId ?? null,
+              salonboard_detail_url: result.detailUrl ?? null,
+              salonboard_pushed_at: new Date().toISOString(),
+              salonboard_last_push_error: null,
+              salonboard_staff_external_id: p.staffExternalId,
+              salonboard_staff_name: p.staffName || null,
+            })
+            .eq('id', realBookingId);
+        } catch (e) {
+          log(`booking同期状態の更新に失敗: ${e?.message ?? e}`, 'warn');
+        }
+      }
+      step('done', { ok: true, registered: true, bookingId: realBookingId, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null, msg: `✅ 登録完了 external_id=${result.externalId ?? '?'}` });
     } else if (result.status === 'confirm_only') {
       step('done', { ok: true, registered: false, msg: '🟡 入力まで成功 (実登録OFFのため登録ボタンは押していません)。ON にすると登録します。' });
     } else {

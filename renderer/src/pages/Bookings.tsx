@@ -158,6 +158,7 @@ export function Bookings() {
       durationMin: b.duration_min ?? 60,
       customerName: displayName(b) === 'ゲスト' ? null : displayName(b),
       enablePush: true, // 行から挿入 = 実登録
+      bookingId: b.id, // 成功時に DB の同期状態を synced に更新する
     });
     // 安全網: 90秒で in-flight 解除
     setTimeout(() => setInsertingId((cur) => (cur === b.id ? null : cur)), 90_000);

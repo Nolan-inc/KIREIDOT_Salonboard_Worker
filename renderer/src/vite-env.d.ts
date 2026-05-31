@@ -144,11 +144,13 @@ interface Window {
       shopId: string;
       staffExternalId: string;
       staffName?: string | null;
-      menuName: string;
+      menuName?: string;
       scheduledAt: string;
       durationMin?: number;
       customerName?: string | null;
       enablePush?: boolean;
+      /** 予約一覧からの挿入時に渡す本物の予約ID (成功時に同期状態を synced に更新) */
+      bookingId?: string;
     }) => Promise<{ ok: boolean }>;
     /** worker からの全イベントを購読。返値は解除関数 */
     onWorkerEvent: (handler: (msg: WorkerEvent) => void) => () => void;
