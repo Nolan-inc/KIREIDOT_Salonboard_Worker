@@ -32,6 +32,7 @@ const {
   scrapeBlogs,
   scrapeShifts,
   scrapeCustomerDetails,
+  pushBookingViaForm,
 } = require('./scrapers.cjs');
 
 let supabase = null;
@@ -130,6 +131,7 @@ async function initSupabase({
   deviceToken,
   workerId,
   appVersion,
+  enablePush,
 }) {
   if (!url || !anonKey) {
     throw new Error('Supabase URL / anon key が空です。.env.local の VITE_SUPABASE_URL を確認してください');
@@ -161,6 +163,8 @@ async function initSupabase({
     workerId: workerId || 'electron-worker',
     appVersion: appVersion || null,
     platform: process.platform,
+    // 実登録 (登録ボタンを押す) を許可するか。設定画面のトグル → main → ここへ。
+    enablePush: !!enablePush,
   };
   if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceToken) {
     log(
@@ -1497,10 +1501,195 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
   }
 }
 
-async function runSync({ shopIds, channels, source, showBrowser }) {
+/**
+ * push_booking ジョブを Admin の /api/salonboard/jobs から claim して実行する。
+ * 各ジョブは shop_id + credentials + payload を含む。ブラウザを起動しログイン後、
+ * pushBookingViaForm で登録フォームを操作し、/api/salonboard/callback に結果を返す。
+ *
+ * 実登録 (登録ボタンを押す) は enablePush=true のときだけ。false の間は入力まで
+ * 進めて confirm_only → callback で manual_required に倒す (誤登録防止)。
+ *
+ * @param showBrowser ブラウザ画面を表示するか
+ */
+async function runPushJobs({ showBrowser } = {}) {
+  const headers = buildDeviceHeaders();
+  if (!headers) {
+    log('push: 認証情報が未設定のため push_booking をスキップ', 'warn');
+    return;
+  }
+  const enablePush = !!deviceAuth.enablePush;
+  const MAX_JOBS = 20; // 1 回の同期で処理する上限 (暴走防止)
+  let processed = 0;
+
+  for (let i = 0; i < MAX_JOBS; i++) {
+    if (abortRequested) break;
+    // 1 件 claim
+    let job;
+    try {
+      const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/jobs?limit=1`, {
+        method: 'GET',
+        headers,
+      });
+      if (!res.ok) {
+        log(`push: jobs fetch 失敗 ${res.status}`, 'warn');
+        break;
+      }
+      const json = await res.json();
+      const jobs = Array.isArray(json.jobs) ? json.jobs : [];
+      // push_booking 以外 (cancel_booking 等) は今は対象外。来たら即 not_implemented で返す。
+      job = jobs.find((j) => j.job_type === 'push_booking');
+      if (!job) {
+        // push_booking が無ければ終了 (他種別ジョブは別経路)
+        // ただし claim された別種別があれば retry で戻す
+        for (const other of jobs) {
+          if (other.job_type !== 'push_booking') {
+            await postCallback({
+              job_id: other.id,
+              status: 'cancelled',
+              error: `worker (desktop) は ${other.job_type} を処理しません`,
+            });
+          }
+        }
+        break;
+      }
+    } catch (e) {
+      log(`push: jobs fetch error: ${e?.message ?? e}`, 'warn');
+      break;
+    }
+
+    const payload = job.payload || {};
+    const creds = job.credentials || {};
+    const baseUrl = creds.base_url || 'https://salonboard.com/';
+    const tag = `push ${String(job.id).slice(0, 8)} booking=${String(payload.booking_id || '').slice(0, 8)}`;
+    emit('log', { level: 'info', msg: `[${tag}] 開始 (enablePush=${enablePush})`, at: new Date().toISOString() });
+
+    let browser = null;
+    try {
+      browser = await chromium.launch({
+        headless: !showBrowser,
+        slowMo: showBrowser ? 250 : 0,
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--no-sandbox',
+          '--disable-features=IsolateOrigins,site-per-process',
+        ],
+      });
+      const ssPath = storageStatePathFor(job.shop_id);
+      const ctx = await browser.newContext({
+        ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
+        userAgent:
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        locale: 'ja-JP',
+        timezoneId: 'Asia/Tokyo',
+        viewport: { width: 1366, height: 900 },
+      });
+      const page = await ctx.newPage();
+
+      // ログイン (セッション切れなら再ログイン)
+      let auth = await isLoggedIn(page, baseUrl);
+      if (auth === 'captcha') {
+        await postCallback({
+          job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id,
+          error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at landing', manual_required: true,
+        });
+        await browser.close().catch(() => {});
+        continue;
+      }
+      if (auth !== 'logged_in') {
+        const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password });
+        if (lr.status === 'captcha') {
+          await postCallback({ job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id, error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at login', manual_required: true });
+          await browser.close().catch(() => {});
+          continue;
+        }
+        if (lr.status === 'failed') {
+          await postCallback({ job_id: job.id, status: 'login_required', booking_id: payload.booking_id, error_code: 'LOGIN_FAILED', error: lr.reason || 'login failed', manual_required: true });
+          await browser.close().catch(() => {});
+          continue;
+        }
+        await saveStorageState(ctx, ssPath);
+      }
+
+      // 登録フォーム実行
+      const result = await pushBookingViaForm(page, payload, { baseUrl, enablePush });
+
+      if (result.status === 'ok') {
+        await postCallback({
+          job_id: job.id, job_type: 'push_booking', status: 'succeeded',
+          booking_id: payload.booking_id,
+          external_booking_id: result.externalId ?? null,
+          salonboard_detail_url: result.detailUrl ?? null,
+          result_payload: result.confirmed,
+          summary: `push_booking 登録完了 (external_id=${result.externalId ?? '?'})`,
+        });
+        emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}`, at: new Date().toISOString() });
+        emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
+      } else if (result.status === 'confirm_only') {
+        await postCallback({
+          job_id: job.id, job_type: 'push_booking', status: 'manual_required',
+          booking_id: payload.booking_id, error_code: 'PUSH_DISABLED',
+          error: '入力まで成功しましたが、実登録 (SALONBOARD_ENABLE_PUSH) が無効のため登録ボタンを押していません。設定で有効化してください。',
+          manual_required: true, result_payload: result.confirmed,
+        });
+        emit('log', { level: 'warn', msg: `[${tag}] 🟡 入力のみ (実登録OFF)`, at: new Date().toISOString() });
+        emit('push:done', { bookingId: payload.booking_id, ok: false, reason: 'push_disabled' });
+      } else {
+        const cap = job.max_attempts || 3;
+        const exhausted = (job.attempts || 0) + 1 >= cap;
+        const toManual = result.manualRequired || exhausted;
+        const isCaptcha = result.errorCode === 'RECAPTCHA_REQUIRED';
+        await postCallback({
+          job_id: job.id, job_type: 'push_booking',
+          status: isCaptcha ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+          booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason,
+          manual_required: toManual,
+        });
+        emit('log', { level: 'warn', msg: `[${tag}] 🔴 失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+        emit('push:done', { bookingId: payload.booking_id, ok: false, reason: result.reason, errorCode: result.errorCode });
+      }
+      await browser.close().catch(() => {});
+      processed++;
+    } catch (e) {
+      log(`push: job ${String(job.id).slice(0, 8)} 例外: ${e?.message ?? e}`, 'error');
+      try {
+        await postCallback({
+          job_id: job.id, job_type: 'push_booking', status: 'retryable_failed',
+          booking_id: payload.booking_id, error_code: 'UNKNOWN_ERROR',
+          error: `worker exception: ${e?.message ?? e}`, manual_required: false,
+        });
+      } catch (_e) { /* ignore */ }
+      await browser?.close().catch(() => {});
+    }
+  }
+  if (processed > 0) log(`push: ${processed} 件の予約書き込みジョブを処理`, 'info');
+}
+
+/** /api/salonboard/callback に結果を POST する。 */
+async function postCallback(body) {
+  const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
+  if (!headers) return;
+  try {
+    const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/callback`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      log(`callback non-2xx: ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`, 'warn');
+    }
+  } catch (e) {
+    log(`callback error: ${e?.message ?? e}`, 'warn');
+  }
+}
+
+async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
   if (running) {
     emit('error', { msg: '同期は既に実行中です' });
     return;
+  }
+  // 同期ごとに渡される実登録トグルの最新値を反映 (init 後の変更も効く)。
+  if (enablePush !== undefined && deviceAuth) {
+    deviceAuth.enablePush = !!enablePush;
   }
   running = true;
   abortRequested = false;
@@ -1528,6 +1717,16 @@ async function runSync({ shopIds, channels, source, showBrowser }) {
       }
       const r = await processShop(t, channels, runId, { showBrowser: !!showBrowser });
       if (r.ok) okCount++; else ngCount++;
+    }
+
+    // スクレイピング後、KIREIDOT→SalonBoard の予約書き込み (push_booking) ジョブも処理。
+    // 失敗してもスクレイピング結果には影響させない。
+    if (!abortRequested) {
+      try {
+        await runPushJobs({ showBrowser: !!showBrowser });
+      } catch (e) {
+        emit('log', { level: 'warn', msg: `push jobs error: ${e?.message ?? e}`, at: new Date().toISOString() });
+      }
     }
 
     // run の終了を記録

@@ -40,6 +40,8 @@ function readDeviceConfig(app) {
       apiUrl: typeof json.apiUrl === 'string' ? json.apiUrl : null,
       deviceName: typeof json.deviceName === 'string' ? json.deviceName : null,
       workerId: typeof json.workerId === 'string' ? json.workerId : null,
+      // 実登録 (SalonBoard へ書き込み = 登録ボタンを押す) を許可するか
+      enablePush: json.enablePush === true,
       configuredAt: json.configuredAt ?? null,
       lastVerifiedAt: json.lastVerifiedAt ?? null,
     };
@@ -61,6 +63,8 @@ function writeDeviceConfig(app, cfg) {
     apiUrl: cfg.apiUrl ?? existing?.apiUrl ?? null,
     deviceName: cfg.deviceName ?? existing?.deviceName ?? null,
     workerId: cfg.workerId ?? existing?.workerId ?? null,
+    enablePush:
+      cfg.enablePush !== undefined ? !!cfg.enablePush : existing?.enablePush ?? false,
     configuredAt: existing?.configuredAt ?? new Date().toISOString(),
     lastVerifiedAt:
       cfg.lastVerifiedAt !== undefined
@@ -103,6 +107,7 @@ function getMaskedDeviceConfig(app) {
     deviceName: cfg.deviceName,
     apiUrl: cfg.apiUrl,
     workerId: cfg.workerId,
+    enablePush: cfg.enablePush === true,
     configuredAt: cfg.configuredAt,
     lastVerifiedAt: cfg.lastVerifiedAt,
     tokenLast4: cfg.deviceToken ? cfg.deviceToken.slice(-4) : null,

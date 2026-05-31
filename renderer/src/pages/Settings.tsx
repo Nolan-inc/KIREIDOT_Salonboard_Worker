@@ -435,6 +435,7 @@ function DeviceConfigSection() {
   const [editing, setEditing] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  const [enablePush, setEnablePush] = useState(false);
   const [result, setResult] = useState<{
     ok: boolean;
     code: string;
@@ -452,11 +453,19 @@ function DeviceConfigSection() {
     }
     const c = await bridge.deviceConfig.get();
     setConfig(c);
+    setEnablePush(c.enablePush === true);
     if (c.configured) {
       setApiUrl(c.apiUrl ?? DEFAULT_API_URL);
       setName(c.deviceName ?? '');
     }
     setLoading(false);
+  };
+
+  const onToggleEnablePush = async (next: boolean) => {
+    if (!bridge?.deviceConfig?.setEnablePush) return;
+    setEnablePush(next); // 楽観更新
+    const r = await bridge.deviceConfig.setEnablePush(next);
+    if (r?.config) setConfig(r.config);
   };
 
   useEffect(() => {
@@ -580,6 +589,45 @@ function DeviceConfigSection() {
                     「Worker Token」に登録してください。この 1 つで全サロンを同期します。
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* 実登録トグル (SalonBoard へ実際に書き込むか) */}
+            {configured && (
+              <div className="flex items-start gap-3 rounded-[12px] border border-hairline bg-white/85 p-3">
+                <div className="flex-1">
+                  <div className="text-[12px] font-semibold text-ink">
+                    SalonBoard へ実際に予約を書き込む
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-ink-soft leading-relaxed">
+                    ON: KIREIDOT で作成した予約を SalonBoard の登録フォームに入力し
+                    「登録する」まで実行します。<br />
+                    OFF: 入力できるところまで確認し、登録ボタンは押しません (誤登録防止)。
+                  </div>
+                  <div className="mt-1 text-[10px] font-bold text-amber-700">
+                    {enablePush
+                      ? '⚠️ ON: 同期のたびに未登録の予約が SalonBoard に実際に登録されます'
+                      : 'OFF: SalonBoard には書き込まれません'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onToggleEnablePush(!enablePush)}
+                  aria-pressed={enablePush}
+                  className={
+                    enablePush
+                      ? 'inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full bg-brand p-0.5'
+                      : 'inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full bg-hairline p-0.5'
+                  }
+                >
+                  <span
+                    className={
+                      enablePush
+                        ? 'inline-block h-5 w-5 translate-x-5 rounded-full bg-white shadow-sm transition'
+                        : 'inline-block h-5 w-5 rounded-full bg-white shadow-sm transition'
+                    }
+                  />
+                </button>
               </div>
             )}
 

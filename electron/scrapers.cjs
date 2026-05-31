@@ -1089,6 +1089,200 @@ async function scrapeMenus(page) {
   return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
 }
 
+// ----------------- 予約書き込み (push_booking) -----------------
+//
+// 実登録フォーム (booking_create.html / form#extReserveRegist) に対応。
+// URL 直開き可: /KLP/reserve/ext/extReserveRegist/?staffId=&date=&rsvHour=&rsvMinute=
+// 確認画面を挟まない 1 ページ構成。enablePush=true のときのみ「登録する」を押す。
+//
+// payload (PushBookingPayload 相当):
+//   booking_id, scheduled_at(ISO+09:00), duration_min,
+//   salonboard_staff_external_id, staff_name,
+//   salonboard_menu_name / menu_name / coupon_name (どれかメニュー名),
+//   customer_name, customer_phone, notes, kireidot_ref
+//
+// 戻り値:
+//   { status:'ok', externalId, detailUrl, confirmed }
+//   { status:'confirm_only', confirmed }                 // enablePush=false
+//   { status:'failed', reason, errorCode, manualRequired }
+
+function parseJstPartsForPush(iso) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const jst = new Date(t + 9 * 3600_000);
+  return {
+    yyyymmdd: `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, '0')}${String(jst.getUTCDate()).padStart(2, '0')}`,
+    hour: jst.getUTCHours(),
+    minute: jst.getUTCMinutes(),
+    hhmm: `${String(jst.getUTCHours()).padStart(2, '0')}:${String(jst.getUTCMinutes()).padStart(2, '0')}`,
+  };
+}
+
+async function pushBookingViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({
+    status: 'failed',
+    reason,
+    errorCode,
+    manualRequired,
+  });
+
+  if (!p.booking_id || !p.scheduled_at) {
+    return fail('payload missing booking_id or scheduled_at', 'UNKNOWN_ERROR', true);
+  }
+  const when = parseJstPartsForPush(p.scheduled_at);
+  if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  if (!p.salonboard_staff_external_id) {
+    return fail('SalonBoard スタッフ external_id が未指定です', 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+  const menuTarget = p.salonboard_menu_name || p.menu_name || p.coupon_name;
+  if (!menuTarget) {
+    return fail('SalonBoard メニュー/クーポン名が解決できません', 'MENU_MAPPING_NOT_FOUND', true);
+  }
+  const kireidotRef = p.kireidot_ref || `KIREIDOT予約ID: ${p.booking_id}`;
+
+  const startHH = String(when.hour).padStart(2, '0');
+  const startMM = String(when.minute).padStart(2, '0');
+
+  // 登録フォームを URL 直開き
+  const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
+  u.searchParams.set('staffId', p.salonboard_staff_external_id);
+  u.searchParams.set('date', when.yyyymmdd);
+  u.searchParams.set('rsvHour', startHH);
+  u.searchParams.set('rsvMinute', startMM);
+  try {
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  } catch (e) {
+    return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA on register form', 'RECAPTCHA_REQUIRED', true);
+  }
+  const formReady =
+    (await page.locator('form#extReserveRegist, #regist, textarea#rsvEtc').first().count().catch(() => 0)) > 0;
+  if (!formReady) {
+    return fail('予約登録フォームに到達できませんでした (ログイン切れ/画面変更)', 'CONFIRMATION_MISMATCH', true);
+  }
+
+  // スタッフ (URL で初期選択されるが明示)
+  const staffSel = page.locator("select#salonStaffList").first();
+  if ((await staffSel.count().catch(() => 0)) > 0) {
+    await staffSel.selectOption({ value: p.salonboard_staff_external_id }).catch(async () => {
+      if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+    });
+  }
+  // 開始 時/分
+  await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
+  await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
+  // 所要 (rsvTermHour の value は分換算: 60=1時間)
+  const durMin = p.duration_min || 60;
+  await page.locator('select#jsiRsvTermHour').first()
+    .selectOption({ value: String(Math.floor(durMin / 60) * 60) }).catch(() => {});
+  await page.locator('select#jsiRsvTermMinute').first()
+    .selectOption({ value: String(durMin % 60).padStart(2, '0') }).catch(() => {});
+
+  // メニュー = ネット予約クーポン。label 完全一致 → 部分一致。
+  let menuFilled = false;
+  const menuSel = page.locator("select[name='netCouponId']").first();
+  if ((await menuSel.count().catch(() => 0)) > 0) {
+    await menuSel.selectOption({ label: menuTarget }).then(() => { menuFilled = true; }).catch(() => {});
+    if (!menuFilled) {
+      const val = await menuSel.evaluate((el, target) => {
+        const opt = Array.from(el.options).find((o) => (o.textContent || '').includes(target));
+        return opt ? opt.value : null;
+      }, menuTarget).catch(() => null);
+      if (val) await menuSel.selectOption({ value: val }).then(() => { menuFilled = true; }).catch(() => {});
+    }
+  }
+  if (!menuFilled) {
+    return fail(
+      `SalonBoardメニュー/クーポンが見つかりません: ${menuTarget}。メニュー管理で紐付けてください。`,
+      'MENU_MAPPING_NOT_FOUND',
+      true,
+    );
+  }
+
+  // 顧客名 (姓名分割)
+  if (p.customer_name) {
+    const parts = String(p.customer_name).trim().split(/[\s　]+/);
+    await page.locator('input#nmSei').first().fill(parts[0] ?? p.customer_name, { timeout: 6_000 }).catch(() => {});
+    const mei = parts.slice(1).join(' ');
+    if (mei) await page.locator('input#nmMei').first().fill(mei, { timeout: 6_000 }).catch(() => {});
+  }
+  if (p.customer_phone) {
+    await page.locator('input#tel').first().fill(String(p.customer_phone), { timeout: 6_000 }).catch(() => {});
+  }
+  // 備考 (KIREIDOT予約ID を必ず入れる)
+  {
+    const notesText =
+      p.notes && String(p.notes).includes(kireidotRef)
+        ? p.notes
+        : `${p.notes ? p.notes + '\n' : ''}${kireidotRef}`;
+    await page.locator('textarea#rsvEtc').first().fill(notesText, { timeout: 6_000 }).catch(() => {});
+  }
+
+  // 空き枠/重複エラー検出
+  const slotError = await page.locator('text=/予約できません|空いて|満員|埋ま|重複/').count().catch(() => 0);
+  if (slotError > 0) {
+    return fail('SalonBoard側で対象時間が空いていません', 'SLOT_NOT_AVAILABLE', false);
+  }
+
+  const confirmed = {
+    confirmed_customer_name: p.customer_name ?? null,
+    confirmed_staff_name: p.staff_name ?? null,
+    confirmed_menu_name: menuTarget,
+    confirmed_scheduled_at: p.scheduled_at,
+  };
+
+  if (!enablePush) {
+    return { status: 'confirm_only', confirmed };
+  }
+
+  // 「登録する」を押す
+  const registerBtn = page.locator('a#regist').first();
+  if ((await registerBtn.count().catch(() => 0)) === 0) {
+    return fail('登録ボタン (登録する) が見つかりません', 'UNKNOWN_ERROR', true);
+  }
+  const beforeUrl = page.url();
+  await Promise.all([
+    page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
+    registerBtn.click({ timeout: 15_000 }),
+  ]).catch(() => {});
+  await page.waitForTimeout(1500);
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('登録後に reCAPTCHA が表示され成否判定不能', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // 完了画面から reserveId / detail_url
+  const afterUrl = page.url();
+  let externalId = null;
+  let detailUrl = null;
+  const detailLink = await page
+    .locator("a[href*='extReserveDetail'][href*='reserveId=']")
+    .first()
+    .getAttribute('href')
+    .catch(() => null);
+  if (detailLink) {
+    detailUrl = detailLink.startsWith('http') ? detailLink : new URL(detailLink, baseUrl).toString();
+    const m = detailLink.match(/reserveId=([A-Za-z0-9]+)/);
+    if (m) externalId = m[1];
+  }
+  const doneText = await page.locator('text=/完了|受け付け|登録しました|予約を登録/').count().catch(() => 0);
+  const looksDone = doneText > 0 || afterUrl !== beforeUrl;
+  if (!looksDone) {
+    return fail(
+      '登録ボタンを押しましたが完了画面を確認できませんでした。SalonBoard で登録状況を確認してください。',
+      'UNKNOWN_ERROR',
+      true,
+    );
+  }
+  return { status: 'ok', externalId, detailUrl, confirmed };
+}
+
 // ----------------- スタッフ一覧 (staffList) -----------------
 
 const STAFF_LIST_URL = 'https://salonboard.com/CNK/draft/staffList';
@@ -1877,6 +2071,7 @@ module.exports = {
   scrapeBlogs,
   scrapeShifts,
   scrapeCustomerDetails,
+  pushBookingViaForm,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

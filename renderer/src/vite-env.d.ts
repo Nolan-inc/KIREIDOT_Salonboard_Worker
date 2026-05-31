@@ -148,6 +148,7 @@ interface Window {
         apiUrl: string;
         deviceName?: string;
         workerId?: string;
+        enablePush?: boolean;
       }) => Promise<DeviceConfigTestResult & { config: DeviceConfigMasked }>;
       clear: () => Promise<{ ok: boolean }>;
       test: (payload?: {
@@ -174,6 +175,10 @@ interface Window {
         bookingId?: string;
         syncStatus?: 'pending_push' | 'not_enqueued';
       }>;
+      /** 実登録トグルのみ更新 */
+      setEnablePush: (
+        enablePush: boolean,
+      ) => Promise<{ ok: boolean; config?: DeviceConfigMasked }>;
     };
   };
 }
@@ -185,6 +190,7 @@ type DeviceConfigMasked = {
   deviceName?: string | null;
   apiUrl?: string | null;
   workerId?: string | null;
+  enablePush?: boolean;
   configuredAt?: string | null;
   lastVerifiedAt?: string | null;
   tokenLast4?: string | null;

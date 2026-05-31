@@ -256,6 +256,7 @@ ipcMain.handle('device:save', async (_event, payload) => {
     apiUrl: String(payload?.apiUrl ?? '').trim(),
     deviceName: String(payload?.deviceName ?? '').trim() || null,
     workerId: String(payload?.workerId ?? '').trim() || null,
+    ...(payload?.enablePush !== undefined ? { enablePush: !!payload.enablePush } : {}),
   };
   // global token 運用: API URL + Token は必須。Device ID は任意 (空なら全店舗モード)。
   if (!cfg.deviceToken || !cfg.apiUrl) {
@@ -280,6 +281,12 @@ ipcMain.handle('device:save', async (_event, payload) => {
 ipcMain.handle('device:clear', async () => {
   deviceConfig.clearDeviceConfig(app);
   return { ok: true };
+});
+
+// 実登録トグルだけを更新 (token を再入力させずに切り替えられる)。
+ipcMain.handle('device:set-enable-push', async (_event, payload) => {
+  deviceConfig.writeDeviceConfig(app, { enablePush: !!payload?.enablePush });
+  return { ok: true, config: deviceConfig.getMaskedDeviceConfig(app) };
 });
 
 ipcMain.handle('device:test', async (_event, payload) => {
@@ -378,6 +385,7 @@ ipcMain.handle('worker:init', async (_event, payload) => {
           deviceId: dev.deviceId ?? null,
           deviceToken: dev.deviceToken ?? null,
           workerId: dev.workerId ?? payload?.workerId ?? 'electron-worker',
+          enablePush: dev.enablePush === true,
         }
       : {}),
   };
@@ -385,7 +393,10 @@ ipcMain.handle('worker:init', async (_event, payload) => {
   return { ok };
 });
 ipcMain.handle('worker:sync', async (_event, payload) => {
-  const ok = postToWorker({ type: 'sync', payload });
+  // 実登録トグルの最新値を毎回の同期に同梱する (init 後に変更しても反映されるよう)。
+  const dev = deviceConfig.readDeviceConfig(app);
+  const merged = { ...(payload ?? {}), enablePush: dev?.enablePush === true };
+  const ok = postToWorker({ type: 'sync', payload: merged });
   return { ok };
 });
 ipcMain.handle('worker:abort', async () => {
