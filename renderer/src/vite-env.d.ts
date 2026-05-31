@@ -143,7 +143,7 @@ interface Window {
     deviceConfig: {
       get: () => Promise<DeviceConfigMasked>;
       save: (payload: {
-        deviceId: string;
+        deviceId?: string;
         deviceToken: string;
         apiUrl: string;
         deviceName?: string;
@@ -151,7 +151,7 @@ interface Window {
       }) => Promise<DeviceConfigTestResult & { config: DeviceConfigMasked }>;
       clear: () => Promise<{ ok: boolean }>;
       test: (payload?: {
-        deviceId: string;
+        deviceId?: string;
         deviceToken: string;
         apiUrl: string;
         workerId?: string;

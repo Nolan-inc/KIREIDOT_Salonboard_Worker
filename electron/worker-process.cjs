@@ -161,9 +161,9 @@ async function initSupabase({
     appVersion: appVersion || null,
     platform: process.platform,
   };
-  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceToken) {
     log(
-      'device 認証情報が未設定です (apiBaseUrl/deviceId/deviceToken)。credential 取得に失敗します。',
+      '認証情報が未設定です (apiBaseUrl/token)。credential 取得に失敗します。設定画面で API URL と Worker Token を登録してください。',
       'warn',
     );
   }
@@ -187,12 +187,15 @@ async function ensureReady() {
  * deviceAuth が未設定なら null を返し、呼び出し側に「device 未設定」を分からせる。
  */
 function buildDeviceHeaders(extra) {
-  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceId || !deviceAuth.deviceToken) {
+  // global token 運用: apiBaseUrl + token があればよい (deviceId は任意)。
+  if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceToken) {
     return null;
   }
   return {
     Authorization: `Bearer ${deviceAuth.deviceToken}`,
-    'X-Device-Id': deviceAuth.deviceId,
+    // deviceId があるときだけ X-Device-Id を付ける。
+    // 無ければ global token モード (Admin 側で全店舗スコープになる)。
+    ...(deviceAuth.deviceId ? { 'X-Device-Id': deviceAuth.deviceId } : {}),
     'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
     ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
     'X-Platform': deviceAuth.platform ?? process.platform,

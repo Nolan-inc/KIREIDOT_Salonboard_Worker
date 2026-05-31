@@ -257,8 +257,9 @@ ipcMain.handle('device:save', async (_event, payload) => {
     deviceName: String(payload?.deviceName ?? '').trim() || null,
     workerId: String(payload?.workerId ?? '').trim() || null,
   };
-  if (!cfg.deviceId || !cfg.deviceToken || !cfg.apiUrl) {
-    return { ok: false, code: 'invalid_input', message: 'API URL / Device ID / Device Token は必須です' };
+  // global token 運用: API URL + Token は必須。Device ID は任意 (空なら全店舗モード)。
+  if (!cfg.deviceToken || !cfg.apiUrl) {
+    return { ok: false, code: 'invalid_input', message: 'API URL と Worker Token は必須です' };
   }
   const test = await deviceConfig.testDeviceConfig(app, cfg);
   // 接続成功時は lastVerifiedAt を更新して保存。失敗時も保存はするが lastVerifiedAt は null。

@@ -170,6 +170,100 @@ export async function fetchDeviceOverview(): Promise<DeviceOverviewResult> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// device 認証経由の「新規予約作成 → SalonBoard 書き戻し」
+//
+// 予約同期くんの画面から予約を作る。Worker は顧客マスタや Admin の
+// menu_id / staff_id を持たないため、SalonBoard 解決済みの値
+// (スタッフ external_id・メニュー名・顧客名手入力) を Admin API に渡す。
+// Admin 側で bookings 挿入 + push_booking ジョブ投入まで行う。
+//
+//   POST /api/salonboard/device/bookings/create
+// ---------------------------------------------------------------------------
+
+export type CreateBookingViaDeviceArgs = {
+  shopId: string;
+  scheduledAt: string; // JST オフセット付き ISO (例 2026-06-05T10:00:00+09:00)
+  staffExternalId: string; // W001######
+  staffName?: string | null;
+  menuName?: string | null; // SalonBoard メニュー名
+  durationMin?: number;
+  amount?: number;
+  customerName?: string | null;
+  notes?: string | null;
+};
+
+export type CreateBookingViaDeviceResult =
+  | {
+      ok: true;
+      bookingId: string;
+      /** "pending_push" = push ジョブ投入済み / "not_enqueued" = 連携無効等で未投入 */
+      syncStatus: 'pending_push' | 'not_enqueued';
+    }
+  | { ok: false; error: string; status?: number };
+
+/**
+ * 予約を作成し、SalonBoard への push_booking ジョブまで積む。
+ * device token が無い / Admin API URL 未設定なら ok:false を返す。
+ * エラーは UI でそのまま表示できるよう、原因を文字列で返す。
+ */
+export async function createBookingViaDevice(
+  args: CreateBookingViaDeviceArgs,
+): Promise<CreateBookingViaDeviceResult> {
+  const base = adminApiBase();
+  const headers = deviceAuthHeaders();
+  if (!base) {
+    return { ok: false, error: 'Admin API URL (VITE_KIREIDOT_API_URL) が未設定です' };
+  }
+  if (!headers) {
+    return {
+      ok: false,
+      error:
+        'device 認証情報が未設定です (VITE_SALONBOARD_DEVICE_ID / VITE_SALONBOARD_DEVICE_TOKEN)',
+    };
+  }
+  try {
+    const res = await fetch(`${base}/api/salonboard/device/bookings/create`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shop_id: args.shopId,
+        scheduled_at: args.scheduledAt,
+        staff_external_id: args.staffExternalId,
+        staff_name: args.staffName ?? null,
+        menu_name: args.menuName ?? null,
+        duration_min: args.durationMin ?? 60,
+        amount: args.amount ?? 0,
+        customer_name: args.customerName ?? null,
+        notes: args.notes ?? null,
+      }),
+    });
+    let body: any = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* ignore */
+    }
+    if (!res.ok) {
+      const msg =
+        (body && (body.message || body.error)) || `HTTP ${res.status}`;
+      return { ok: false, error: String(msg), status: res.status };
+    }
+    return {
+      ok: true,
+      bookingId: String(body?.booking_id ?? ''),
+      syncStatus: body?.salonboard_sync_status === 'pending_push'
+        ? 'pending_push'
+        : 'not_enqueued',
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: `Admin API に接続できません: ${e?.message ?? String(e)}`,
+    };
+  }
+}
+
 /**
  * 認証情報を upsert する。
  * - shop_id ごとに 1 行 (UNIQUE(shop_id))

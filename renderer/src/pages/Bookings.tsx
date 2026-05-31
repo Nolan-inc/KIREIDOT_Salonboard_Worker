@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchRecentBookings, type BookingRow } from '../lib/data';
+import { fetchRecentBookings, fetchStaffList, type BookingRow, type StaffRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
+import { createBookingViaDevice } from '../lib/salonboard';
 
 const FILTERS = ['すべて', 'confirmed', 'pending', 'completed', 'cancelled'] as const;
 const FILTER_LABELS: Record<(typeof FILTERS)[number], string> = {
@@ -20,6 +21,8 @@ export function Bookings() {
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [search, setSearch] = useState('');
+  const [modalOpen, setModalOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!scope) return;
@@ -34,7 +37,7 @@ export function Bookings() {
     return () => {
       cancelled = true;
     };
-  }, [scope?.shopId, scope?.organizationId]);
+  }, [scope?.shopId, scope?.organizationId, reloadKey]);
 
   const displayName = (b: BookingRow) =>
     b.customers?.full_name ??
@@ -86,7 +89,13 @@ export function Bookings() {
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-3 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
             <Filter className="h-3.5 w-3.5" /> 絞り込み
           </button>
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            disabled={!scope?.shopId}
+            title={scope?.shopId ? '新規予約を作成' : '先に店舗を選択してください'}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand disabled:opacity-50"
+          >
             <Plus className="h-3.5 w-3.5" /> 新規予約
           </button>
         </div>
@@ -169,6 +178,306 @@ export function Bookings() {
           </table>
         )}
       </Card>
+
+      {modalOpen && scope?.shopId && (
+        <NewBookingModal
+          shopId={scope.shopId}
+          onClose={() => setModalOpen(false)}
+          onCreated={() => {
+            setModalOpen(false);
+            setReloadKey((k) => k + 1);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// =====================================================================
+// 新規予約モーダル
+//
+// 日付・担当スタッフ (SalonBoard external_id) ・メニュー名・時刻・所要・顧客名を
+// 入力して予約を作成し、SalonBoard への push_booking ジョブまで積む。
+// 成功・失敗・原因をモーダル内にすべて表示する。
+// =====================================================================
+type SubmitState =
+  | { kind: 'idle' }
+  | { kind: 'submitting' }
+  | { kind: 'success'; bookingId: string; syncStatus: 'pending_push' | 'not_enqueued' }
+  | { kind: 'error'; message: string; status?: number };
+
+function todayStr(): string {
+  const d = new Date();
+  const jst = new Date(d.getTime() + 9 * 3600_000);
+  return jst.toISOString().slice(0, 10);
+}
+
+function NewBookingModal({
+  shopId,
+  onClose,
+  onCreated,
+}: {
+  shopId: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const scope = useEffectiveScope();
+  const [staffLoading, setStaffLoading] = useState(true);
+  const [staff, setStaff] = useState<StaffRow[]>([]);
+  const [date, setDate] = useState(todayStr());
+  const [time, setTime] = useState('10:00');
+  const [duration, setDuration] = useState('60');
+  const [staffExternalId, setStaffExternalId] = useState('');
+  const [menuName, setMenuName] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [notes, setNotes] = useState('');
+  const [state, setState] = useState<SubmitState>({ kind: 'idle' });
+
+  // スタッフ一覧 (salonboard_staff_imports。external_id を持つもののみ選択肢に)
+  useEffect(() => {
+    if (!scope) return;
+    let cancelled = false;
+    setStaffLoading(true);
+    fetchStaffList(scope)
+      .then((rows) => {
+        if (cancelled) return;
+        const withExt = rows.filter((r) => !!r.external_id);
+        setStaff(withExt);
+        if (withExt.length > 0 && !staffExternalId) {
+          setStaffExternalId(withExt[0].external_id ?? '');
+        }
+      })
+      .finally(() => !cancelled && setStaffLoading(false));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
+
+  const selectedStaff = useMemo(
+    () => staff.find((s) => s.external_id === staffExternalId) ?? null,
+    [staff, staffExternalId],
+  );
+
+  const canSubmit =
+    !!date &&
+    /^\d{1,2}:\d{2}$/.test(time) &&
+    !!staffExternalId &&
+    !!menuName.trim() &&
+    state.kind !== 'submitting';
+
+  async function handleSubmit() {
+    if (!canSubmit) return;
+    setState({ kind: 'submitting' });
+    // JST オフセット付き ISO を組み立てる
+    const scheduledAt = `${date}T${time.length === 4 ? '0' + time : time}:00+09:00`;
+    const durationMin = Number(duration) > 0 ? Number(duration) : 60;
+    const res = await createBookingViaDevice({
+      shopId,
+      scheduledAt,
+      staffExternalId,
+      staffName: selectedStaff?.full_name ?? null,
+      menuName: menuName.trim(),
+      durationMin,
+      customerName: customerName.trim() || null,
+      notes: notes.trim() || null,
+    });
+    if (res.ok) {
+      setState({ kind: 'success', bookingId: res.bookingId, syncStatus: res.syncStatus });
+    } else {
+      setState({ kind: 'error', message: res.error, status: res.status });
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/30 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg overflow-hidden rounded-[18px] border border-hairline bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-hairline/70 px-5 py-4">
+          <h2 className="font-serif text-[17px] font-bold text-ink">新規予約 (SalonBoard 書き込み)</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-full text-ink-soft hover:bg-brand-light/50"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="max-h-[70vh] overflow-y-auto px-5 py-4">
+          {state.kind === 'success' ? (
+            <div className="flex flex-col gap-3 py-6 text-center">
+              <CheckCircle2 className="mx-auto h-10 w-10 text-emerald-500" />
+              <div className="font-serif text-[16px] font-bold text-ink">予約を作成しました</div>
+              <div className="text-[13px] text-ink-soft">
+                予約ID: <code className="rounded bg-brand-light/50 px-1.5 py-0.5 text-[12px]">{state.bookingId}</code>
+              </div>
+              {state.syncStatus === 'pending_push' ? (
+                <div className="rounded-[12px] bg-emerald-50 px-4 py-3 text-[12px] text-emerald-700">
+                  SalonBoard への書き込みジョブを投入しました (同期待ち)。<br />
+                  予約同期くんが SalonBoard に登録します。状態は予約一覧で確認できます。
+                </div>
+              ) : (
+                <div className="rounded-[12px] bg-amber-50 px-4 py-3 text-left text-[12px] text-amber-800">
+                  <div className="font-semibold">⚠️ 書き込みジョブは投入されませんでした</div>
+                  <div className="mt-1">
+                    この店舗の SalonBoard 連携が無効、またはブロック中の可能性があります。<br />
+                    「サロンボード連携」画面で連携状態を確認してください。予約自体は作成済みです。
+                  </div>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={onCreated}
+                className="mx-auto mt-2 inline-flex h-10 items-center rounded-[12px] bg-brand-gradient px-6 text-[13px] font-semibold text-white shadow-brand-sm"
+              >
+                閉じて一覧を更新
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="日付">
+                  <input
+                    type="date"
+                    value={date}
+                    onChange={(e) => setDate(e.target.value)}
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="開始時刻">
+                  <input
+                    type="time"
+                    value={time}
+                    onChange={(e) => setTime(e.target.value)}
+                    className={inputCls}
+                  />
+                </Field>
+              </div>
+
+              <Field label="担当スタッフ (SalonBoard)">
+                {staffLoading ? (
+                  <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> スタッフ読み込み中…
+                  </div>
+                ) : staff.length === 0 ? (
+                  <div className="rounded-[10px] bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                    external_id を持つスタッフが見つかりません。先に「スタッフ」同期を実行してください。
+                  </div>
+                ) : (
+                  <select
+                    value={staffExternalId}
+                    onChange={(e) => setStaffExternalId(e.target.value)}
+                    className={inputCls}
+                  >
+                    {staff.map((s) => (
+                      <option key={s.id} value={s.external_id ?? ''}>
+                        {s.full_name}（{s.external_id}）
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+
+              <Field label="メニュー名 (SalonBoard 上の表示名と一致させる)">
+                <input
+                  type="text"
+                  value={menuName}
+                  onChange={(e) => setMenuName(e.target.value)}
+                  placeholder="例: カット"
+                  className={inputCls}
+                />
+              </Field>
+
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="所要時間 (分)">
+                  <input
+                    type="number"
+                    min={5}
+                    step={5}
+                    value={duration}
+                    onChange={(e) => setDuration(e.target.value)}
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="顧客名 (任意)">
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    placeholder="例: テスト 太郎"
+                    className={inputCls}
+                  />
+                </Field>
+              </div>
+
+              <Field label="備考 (任意)">
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={2}
+                  className={inputCls}
+                />
+              </Field>
+
+              {state.kind === 'error' && (
+                <div className="flex items-start gap-2 rounded-[12px] bg-red-50 px-4 py-3 text-[12px] text-red-700">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <div className="font-semibold">
+                      予約の作成に失敗しました{state.status ? ` (HTTP ${state.status})` : ''}
+                    </div>
+                    <div className="mt-0.5 break-all">{state.message}</div>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-1 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="inline-flex h-10 items-center rounded-[12px] border border-hairline bg-white px-4 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40"
+                >
+                  キャンセル
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={!canSubmit}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-5 text-[13px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+                >
+                  {state.kind === 'submitting' ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> 作成中…
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-3.5 w-3.5" /> 予約を作成
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const inputCls =
+  'h-10 w-full rounded-[10px] border border-hairline bg-white px-3 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20';
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
+      {children}
+    </label>
   );
 }

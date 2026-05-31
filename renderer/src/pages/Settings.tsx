@@ -415,11 +415,12 @@ function SyncTargets() {
 }
 
 // =====================================================================
-// SalonBoard 連携デバイス設定 (v0.2.5)
+// SalonBoard 連携設定 (2026-05-31: 単一デバイス / global token 運用)
 //
-// 店舗 PC ごとに Admin (/admin/salonboard/devices) で発行した
-// Device ID / Device Token を入力 → 接続テスト → userData に保存。
-// token は入力欄以外には保存後 last4 のみ表示する。
+// 以前は店舗 PC ごとに Device ID / Token を発行していたが、運用を
+// 「1 台 + 1 つの Worker Token で全サロンをスクレイピング」に統一した。
+// ここでは API URL と Worker Token (= Admin の SALONBOARD_WORKER_TOKEN)
+// だけを登録する。token は保存後 last4 のみ表示する。
 // =====================================================================
 const DEFAULT_API_URL = 'https://admin.kireidot.jp';
 
@@ -429,9 +430,8 @@ function DeviceConfigSection() {
 
   // 入力フォーム
   const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
-  const [deviceId, setDeviceId] = useState('');
-  const [deviceToken, setDeviceToken] = useState('');
-  const [deviceName, setDeviceName] = useState('');
+  const [token, setToken] = useState('');
+  const [name, setName] = useState('');
   const [editing, setEditing] = useState(false);
 
   const [busy, setBusy] = useState(false);
@@ -454,8 +454,7 @@ function DeviceConfigSection() {
     setConfig(c);
     if (c.configured) {
       setApiUrl(c.apiUrl ?? DEFAULT_API_URL);
-      setDeviceId(c.deviceId ?? '');
-      setDeviceName(c.deviceName ?? '');
+      setName(c.deviceName ?? '');
     }
     setLoading(false);
   };
@@ -465,6 +464,19 @@ function DeviceConfigSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const summarize = (r: DeviceConfigTestResult) => ({
+    ok: r.ok,
+    code: r.code,
+    message: r.message,
+    shopsTotal: r.shops?.length,
+    shopsReady: (r.shops ?? []).filter(
+      (s) =>
+        s.credential_status === 'active' &&
+        s.enabled &&
+        s.consent_status === 'valid',
+    ).length,
+  });
+
   const onTest = async () => {
     if (!bridge?.deviceConfig) return;
     setBusy(true);
@@ -472,26 +484,15 @@ function DeviceConfigSection() {
     // 入力中なら入力値で、そうでなければ保存済み設定でテスト
     const payload =
       editing || !config?.configured
-        ? { apiUrl: apiUrl.trim(), deviceId: deviceId.trim(), deviceToken: deviceToken.trim() }
+        ? { apiUrl: apiUrl.trim(), deviceToken: token.trim() }
         : undefined;
-    if (payload && (!payload.apiUrl || !payload.deviceId || !payload.deviceToken)) {
-      setResult({ ok: false, code: 'invalid_input', message: 'API URL / Device ID / Token を入力してください' });
+    if (payload && (!payload.apiUrl || !payload.deviceToken)) {
+      setResult({ ok: false, code: 'invalid_input', message: 'API URL と Worker Token を入力してください' });
       setBusy(false);
       return;
     }
     const r = await bridge.deviceConfig.test(payload);
-    setResult({
-      ok: r.ok,
-      code: r.code,
-      message: r.message,
-      shopsTotal: r.shops?.length,
-      shopsReady: (r.shops ?? []).filter(
-        (s) =>
-          s.credential_status === 'active' &&
-          s.enabled &&
-          s.consent_status === 'valid',
-      ).length,
-    });
+    setResult(summarize(r));
     setBusy(false);
   };
 
@@ -501,37 +502,24 @@ function DeviceConfigSection() {
     setResult(null);
     const r = await bridge.deviceConfig.save({
       apiUrl: apiUrl.trim(),
-      deviceId: deviceId.trim(),
-      deviceToken: deviceToken.trim(),
-      deviceName: deviceName.trim() || undefined,
+      deviceToken: token.trim(),
+      deviceName: name.trim() || undefined,
     });
-    setResult({
-      ok: r.ok,
-      code: r.code,
-      message: r.message,
-      shopsTotal: r.shops?.length,
-      shopsReady: (r.shops ?? []).filter(
-        (s) =>
-          s.credential_status === 'active' &&
-          s.enabled &&
-          s.consent_status === 'valid',
-      ).length,
-    });
+    setResult(summarize(r));
     setConfig(r.config ?? null);
     setEditing(false);
-    setDeviceToken(''); // 保存後はフォームから token をクリア (画面に残さない)
+    setToken(''); // 保存後はフォームから token をクリア (画面に残さない)
     setBusy(false);
   };
 
   const onClear = async () => {
     if (!bridge?.deviceConfig) return;
-    if (!confirm('このPCのデバイス設定を削除しますか？同期できなくなります。')) return;
+    if (!confirm('このPCの連携設定を削除しますか？同期できなくなります。')) return;
     await bridge.deviceConfig.clear();
     setConfig({ configured: false });
     setApiUrl(DEFAULT_API_URL);
-    setDeviceId('');
-    setDeviceToken('');
-    setDeviceName('');
+    setToken('');
+    setName('');
     setEditing(false);
     setResult(null);
   };
@@ -539,7 +527,7 @@ function DeviceConfigSection() {
   if (!bridge?.deviceConfig) {
     return (
       <Card>
-        <CardHeader title="SalonBoard 連携デバイス" subtitle="この機能はデスクトップアプリでのみ利用できます" />
+        <CardHeader title="SalonBoard 連携" subtitle="この機能はデスクトップアプリでのみ利用できます" />
         <CardBody>
           <p className="text-[12px] text-ink-soft">ブラウザ版では設定できません。</p>
         </CardBody>
@@ -553,8 +541,8 @@ function DeviceConfigSection() {
   return (
     <Card>
       <CardHeader
-        title="SalonBoard 連携デバイス"
-        subtitle="この店舗PCの device 設定 (管理画面で発行した Device ID / Token を登録)"
+        title="SalonBoard 連携"
+        subtitle="この PC 1 台で全サロンをスクレイピングします (API URL と Worker Token を登録)"
       />
       <CardBody className="space-y-4">
         {loading ? (
@@ -568,10 +556,9 @@ function DeviceConfigSection() {
               <div className="flex items-start gap-3 rounded-[12px] bg-emerald-50 p-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
                 <div className="flex-1 text-[12px] text-emerald-800">
-                  <div className="font-semibold">デバイス設定済み</div>
+                  <div className="font-semibold">連携 設定済み</div>
                   <div className="mt-1 space-y-0.5 text-[11px] text-emerald-700/90">
                     <div>名前: {config?.deviceName ?? '(未設定)'}</div>
-                    <div>Device ID: {config?.deviceId?.slice(0, 8)}…</div>
                     <div>Token: ****{config?.tokenLast4 ?? '????'}</div>
                     <div>API: {config?.apiUrl}</div>
                     <div>
@@ -587,10 +574,10 @@ function DeviceConfigSection() {
               <div className="flex items-start gap-3 rounded-[12px] bg-amber-50 p-3">
                 <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
                 <div className="text-[12px] text-amber-800">
-                  <div className="font-semibold">デバイス未設定</div>
+                  <div className="font-semibold">連携 未設定</div>
                   <div className="mt-0.5 text-[11px] text-amber-700/90">
-                    管理画面 (/admin/salonboard/devices) で device を発行し、
-                    表示された Device ID / Token をここに登録してください。
+                    KIREIDOT Admin の <code>SALONBOARD_WORKER_TOKEN</code> と同じ値を
+                    「Worker Token」に登録してください。この 1 つで全サロンを同期します。
                   </div>
                 </div>
               </div>
@@ -606,25 +593,18 @@ function DeviceConfigSection() {
                   placeholder="https://admin.kireidot.jp"
                 />
                 <LabeledInput
-                  label="Device ID"
-                  value={deviceId}
-                  onChange={setDeviceId}
-                  placeholder="00000000-0000-0000-0000-000000000000"
-                  mono
-                />
-                <LabeledInput
-                  label="Device Token"
-                  value={deviceToken}
-                  onChange={setDeviceToken}
-                  placeholder="発行時に1回だけ表示されたトークン"
+                  label="Worker Token"
+                  value={token}
+                  onChange={setToken}
+                  placeholder="Admin の SALONBOARD_WORKER_TOKEN と同じ値"
                   password
                   mono
                 />
                 <LabeledInput
-                  label="デバイス名 (任意)"
-                  value={deviceName}
-                  onChange={setDeviceName}
-                  placeholder="例: 銀座本店-受付PC"
+                  label="この PC の名前 (任意)"
+                  value={name}
+                  onChange={setName}
+                  placeholder="例: 本部-同期用PC"
                 />
               </div>
             ) : null}
@@ -679,7 +659,7 @@ function DeviceConfigSection() {
                   type="button"
                   onClick={() => {
                     setEditing(true);
-                    setDeviceToken('');
+                    setToken('');
                   }}
                   className="inline-flex items-center gap-1.5 rounded-[10px] border border-hairline bg-white px-3 py-2 text-[12px] font-semibold text-ink hover:bg-surface-soft"
                 >

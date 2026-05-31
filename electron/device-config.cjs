@@ -97,7 +97,8 @@ function getMaskedDeviceConfig(app) {
     return { configured: false };
   }
   return {
-    configured: !!(cfg.deviceId && cfg.deviceToken),
+    // global token 運用: deviceId が無くても token + apiUrl があれば「設定済み」。
+    configured: !!(cfg.deviceToken && cfg.apiUrl),
     deviceId: cfg.deviceId,
     deviceName: cfg.deviceName,
     apiUrl: cfg.apiUrl,
@@ -125,8 +126,9 @@ function getMaskedDeviceConfig(app) {
  */
 async function testDeviceConfig(app, cfg) {
   const c = cfg ?? readDeviceConfig(app);
-  if (!c || !c.apiUrl || !c.deviceId || !c.deviceToken) {
-    return { ok: false, code: 'device_unconfigured', message: 'device 設定が未完了です' };
+  // global token 運用: apiUrl + token があれば OK (deviceId は任意)。
+  if (!c || !c.apiUrl || !c.deviceToken) {
+    return { ok: false, code: 'device_unconfigured', message: 'API URL と Token を入力してください' };
   }
   const base = String(c.apiUrl).replace(/\/+$/, '');
   let res;
@@ -135,7 +137,9 @@ async function testDeviceConfig(app, cfg) {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${c.deviceToken}`,
-        'X-Device-Id': c.deviceId,
+        // deviceId がある場合のみ device 認証ヘッダを付ける。
+        // 無ければ global token モード (X-Device-Id を付けない → 全店舗)。
+        ...(c.deviceId ? { 'X-Device-Id': c.deviceId } : {}),
         'X-Worker-Id': c.workerId || 'electron-worker',
         'X-Platform': process.platform,
       },
