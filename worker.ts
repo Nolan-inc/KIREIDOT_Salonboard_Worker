@@ -30,9 +30,9 @@ import {
   RESERVE_LIST,
   RESERVE_ID_RE,
   scheduleUrl,
+  reserveRegistUrl,
   staffHeadId,
   staffOptionValue,
-  isPending,
 } from "./salonboard-selectors";
 
 // package.json の "version" を実行時に読む。失敗しても起動を止めない。
@@ -1396,196 +1396,155 @@ async function pushBooking(
   }
 
   // ----------------------------------------------------------
-  // 3) 新規予約登録フォームを開く
+  // 3) 新規予約登録フォームを直接 URL で開く (booking_create.html)
+  //    /KLP/reserve/ext/extReserveRegist/?staffId=&date=&rsvHour=&rsvMinute=
+  //    スケジュールの空き枠クリックは不要。確認画面を挟まない 1 ページ構成。
   // ----------------------------------------------------------
-  // スケジュールの空き枠クリック/ドラッグで別画面 (登録フォーム) が開く。
-  // まず対象スタッフ行の setArea を、開始時刻に対応する位置でクリックしてみる。
-  const diag = await openRegisterForm(page, p, when, yyyymmdd);
-  const opened = diag.opened;
-
-  // フォーム画面の DOM はまだ確定していない。何が開いたかを必ず capture して
-  // 次回のセレクタ確定に使う (これが本ステップの主目的)。
-  // diagnostics には「クリック対象/モーダル/別ページ遷移/ポップアップ」の観測を含める。
-  // popupPage は Page 参照のため meta から除外する (シリアライズ不可)。
-  const { popupPage, ...diagForMeta } = diag;
-  await captureRegisterDebug(page, job, "register_form_opened", {
-    open_form: diagForMeta,
-    enable_push: ENABLE_PUSH,
-  });
-
-  // クリックで別タブ/ポップアップが開いていたら、そちら (= 登録フォームの可能性大)
-  // も capture する。これが取れれば REGISTER_FORM のセレクタ確定に直結する。
-  if (popupPage) {
-    await captureRegisterDebug(popupPage, job, "register_form_popup", {
-      from: "schedule click popup",
-      url: diag.popupUrl,
-    }).catch(() => null);
-  }
-
-  // ----------------------------------------------------------
-  // 4) フォーム入力 — セレクタ未確定 (REGISTER_FORM が pending) の間は
-  //    推測入力せず manual_required に倒す。
-  // ----------------------------------------------------------
-  const formSelectorsReady = !isPending(
-    REGISTER_FORM.staffSelect,
-    REGISTER_FORM.menuSelect,
-    REGISTER_FORM.date,
-    REGISTER_FORM.time,
-    REGISTER_FORM.proceedToConfirm,
+  const startHH = String(when.hour).padStart(2, "0");
+  const startMM = String(when.minute).padStart(2, "0");
+  const registUrl = reserveRegistUrl(
+    baseUrl,
+    p.salonboard_staff_external_id,
+    yyyymmdd,
+    startHH,
+    startMM,
   );
-
-  if (!formSelectorsReady) {
+  try {
+    await page.goto(registUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
+  } catch (e) {
     return fail(
-      opened
-        ? "新規予約登録フォームを開きましたが、入力欄セレクタが未確定のため安全のため停止しました。capture した DOM でセレクタを確定してください。"
-        : "新規予約登録フォームを開けませんでした (起点クリックの導線が未確定)。capture した画面を確認してください。",
+      `予約登録フォームを開けません: ${e instanceof Error ? e.message : e}`,
+      "UNKNOWN_ERROR",
+      false,
+    );
+  }
+  if (await hasRecaptcha(page)) {
+    return fail("reCAPTCHA on register form", "RECAPTCHA_REQUIRED", true);
+  }
+
+  // フォームが開けたか確認
+  const formReady =
+    (await page
+      .locator(REGISTER_FORM.formReadyIndicators.selector)
+      .first()
+      .count()
+      .catch(() => 0)) > 0;
+  if (!formReady) {
+    await captureRegisterDebug(page, job, "register_page_not_found", {
+      url: page.url(),
+    });
+    return fail(
+      "予約登録フォームに到達できませんでした (ログイン切れ/画面変更の可能性)。",
       "CONFIRMATION_MISMATCH",
-      true, // 必ず手動対応
+      true,
     );
   }
 
-  // --- ここから下は REGISTER_FORM 確定後に有効化される本実装 ---
-  // (現状 formSelectorsReady=false なので到達しない。DOM 確定時にセレクタを
-  //  REGISTER_FORM に入れれば自動的にこの経路が使われる。)
-
-  const filled = { date: false, time: false, staff: false, menu: false };
-
-  // 日付
-  const dateInput = page.locator(REGISTER_FORM.date.selector).first();
-  if ((await dateInput.count().catch(() => 0)) > 0) {
-    await dateInput.fill(when.date, { timeout: 8_000 }).then(
-      () => { filled.date = true; },
-      () => {},
-    );
-  }
-  // 時刻
-  const timeInput = page.locator(REGISTER_FORM.time.selector).first();
-  if ((await timeInput.count().catch(() => 0)) > 0) {
-    await timeInput.fill(when.hhmm, { timeout: 8_000 }).then(
-      () => { filled.time = true; },
-      () => {},
-    );
-  }
-  // 顧客名・電話 (任意)
-  if (p.customer_name && REGISTER_FORM.customerName.selector) {
-    const nameInput = page.locator(REGISTER_FORM.customerName.selector).first();
-    if ((await nameInput.count().catch(() => 0)) > 0) {
-      await nameInput.fill(p.customer_name, { timeout: 8_000 }).catch(() => {});
-    }
-  }
-  if (p.customer_phone && REGISTER_FORM.customerPhone.selector) {
-    const phoneInput = page.locator(REGISTER_FORM.customerPhone.selector).first();
-    if ((await phoneInput.count().catch(() => 0)) > 0) {
-      await phoneInput.fill(p.customer_phone, { timeout: 8_000 }).catch(() => {});
-    }
-  }
-  // スタッフ (external_id → value、ダメなら表示名 → label)
-  const staffSelect = page.locator(REGISTER_FORM.staffSelect.selector).first();
-  if ((await staffSelect.count().catch(() => 0)) > 0) {
-    await staffSelect
+  // ----------------------------------------------------------
+  // 4) フォーム入力
+  // ----------------------------------------------------------
+  // スタッフ (URL で初期選択されるが念のため value=external_id で明示)
+  const staffSel = page.locator(REGISTER_FORM.staffSelect.selector).first();
+  if ((await staffSel.count().catch(() => 0)) > 0) {
+    await staffSel
       .selectOption({ value: p.salonboard_staff_external_id })
-      .then(() => { filled.staff = true; })
+      .catch(async () => {
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+      });
+  }
+
+  // 開始 時/分 (URL でも入るが明示)
+  await page
+    .locator(REGISTER_FORM.startHour.selector)
+    .first()
+    .selectOption({ value: String(when.hour) })
+    .catch(() => {});
+  await page
+    .locator(REGISTER_FORM.startMinute.selector)
+    .first()
+    .selectOption({ value: startMM })
+    .catch(() => {});
+
+  // 所要時間 → 終了時間。rsvTermHour の option value は「分換算」(60=1時間)。
+  // duration_min を 60 で割った時間ぶんを value にし、端数を rsvTermMinute に。
+  const durMin = p.duration_min ?? 60;
+  const termHourVal = String(Math.floor(durMin / 60) * 60); // 例 90分→"60"
+  const termMinVal = String(durMin % 60).padStart(2, "0"); // 例 90分→"30"
+  await page
+    .locator(REGISTER_FORM.termHour.selector)
+    .first()
+    .selectOption({ value: termHourVal })
+    .catch(() => {});
+  await page
+    .locator(REGISTER_FORM.termMinute.selector)
+    .first()
+    .selectOption({ value: termMinVal })
+    .catch(() => {});
+
+  // メニュー = ネット予約クーポン。label 完全一致 → 部分一致の順で試す。
+  let menuFilled = false;
+  const menuSel = page.locator(REGISTER_FORM.menuSelect.selector).first();
+  if ((await menuSel.count().catch(() => 0)) > 0) {
+    await menuSel
+      .selectOption({ label: menuTarget })
+      .then(() => { menuFilled = true; })
       .catch(() => {});
-    if (!filled.staff && p.staff_name) {
-      await staffSelect
-        .selectOption({ label: p.staff_name })
-        .then(() => { filled.staff = true; })
-        .catch(() => {});
+    if (!menuFilled) {
+      // 部分一致: option のラベルに menuTarget を含むものを value で選ぶ
+      const val = await menuSel
+        .evaluate((el, target) => {
+          const sel = el as HTMLSelectElement;
+          const opt = Array.from(sel.options).find((o) =>
+            (o.textContent || "").includes(target as string),
+          );
+          return opt ? opt.value : null;
+        }, menuTarget)
+        .catch(() => null);
+      if (val) {
+        await menuSel.selectOption({ value: val }).then(() => { menuFilled = true; }).catch(() => {});
+      }
     }
   }
-  if (!filled.staff) {
-    await captureRegisterDebug(page, job, "form_staff_select_failed");
-    return fail("スタッフ選択に失敗しました", "STAFF_MAPPING_NOT_FOUND", true);
-  }
-  // メニュー (label 完全一致)
-  const menuSelect = page.locator(REGISTER_FORM.menuSelect.selector).first();
-  if ((await menuSelect.count().catch(() => 0)) > 0) {
-    await menuSelect
-      .selectOption({ label: menuTarget })
-      .then(() => { filled.menu = true; })
-      .catch(() => {});
-  }
-  if (!filled.menu) {
-    await captureRegisterDebug(page, job, "form_menu_failed");
+  if (!menuFilled) {
+    await captureRegisterDebug(page, job, "menu_not_found", { menuTarget });
     return fail(
-      `SalonBoardメニュー/クーポンが見つかりません: ${menuTarget}`,
+      `SalonBoardメニュー/クーポンが見つかりません: ${menuTarget}。メニュー管理で SalonBoard メニューと紐付けてください。`,
       "MENU_MAPPING_NOT_FOUND",
       true,
     );
   }
-  if (!filled.date || !filled.time) {
-    await captureRegisterDebug(page, job, "form_datetime_failed");
-    return fail("予約日時の入力に失敗しました", "UNKNOWN_ERROR", true);
+
+  // 顧客名 (姓名分割)。p.customer_name を空白で姓/名に分ける。
+  if (p.customer_name) {
+    const parts = p.customer_name.trim().split(/[\s　]+/);
+    const sei = parts[0] ?? p.customer_name;
+    const mei = parts.slice(1).join(" ") || "";
+    await page.locator(REGISTER_FORM.customerSei.selector).first().fill(sei, { timeout: 6_000 }).catch(() => {});
+    if (mei) await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
   }
-  // 備考 (KIREIDOT予約ID を必ず入れる)
-  if (REGISTER_FORM.memo.selector) {
+  // 電話 (任意)
+  if (p.customer_phone) {
+    await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(p.customer_phone, { timeout: 6_000 }).catch(() => {});
+  }
+  // 備考 (KIREIDOT予約ID を必ず入れる → 二重登録チェックの照合キー)
+  {
     const notesText =
       p.notes && p.notes.includes(kireidotRef)
         ? p.notes
         : `${p.notes ? p.notes + "\n" : ""}${kireidotRef}`;
-    const memo = page.locator(REGISTER_FORM.memo.selector).first();
-    if ((await memo.count().catch(() => 0)) > 0) {
-      await memo.fill(notesText, { timeout: 8_000 }).catch(() => {});
-    }
+    await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
-  // ----------------------------------------------------------
-  // 5) 確認画面へ進む
-  // ----------------------------------------------------------
-  const proceed = page.locator(REGISTER_FORM.proceedToConfirm.selector).first();
-  if ((await proceed.count().catch(() => 0)) === 0) {
-    await captureRegisterDebug(page, job, "confirm_button_not_found");
-    return fail("確認画面に進むボタンが見つかりません", "UNKNOWN_ERROR", true);
-  }
-  await Promise.all([
-    page.waitForLoadState("networkidle", { timeout: 20_000 }).catch(() => {}),
-    proceed.click({ timeout: 12_000 }),
-  ]).catch(() => {});
-
-  if (await hasRecaptcha(page)) {
-    return fail("reCAPTCHA on confirm", "RECAPTCHA_REQUIRED", true);
-  }
-
-  // 空き枠エラーの検出
+  // 空き枠/エラーメッセージの検出 (入力直後にフォームが警告を出すことがある)
   const slotError = await page
-    .locator("text=/予約できません|空いて|満員|埋ま/")
+    .locator("text=/予約できません|空いて|満員|埋ま|重複/")
     .count()
     .catch(() => 0);
   if (slotError > 0) {
     await captureRegisterDebug(page, job, "slot_not_available");
-    return fail(
-      "SalonBoard側で対象時間が空いていません",
-      "SLOT_NOT_AVAILABLE",
-      false,
-    );
+    return fail("SalonBoard側で対象時間が空いていません", "SLOT_NOT_AVAILABLE", false);
   }
-
-  // ----------------------------------------------------------
-  // 6) 確認画面の内容と payload を照合
-  // ----------------------------------------------------------
-  const pageText = (await page.content().catch(() => "")) ?? "";
-  const mismatches: string[] = [];
-  const mustContain = (label: string, value?: string | null) => {
-    if (!value) return;
-    if (!pageText.includes(value)) mismatches.push(`${label}=${value}`);
-  };
-  mustContain("顧客名", p.customer_name ?? null);
-  mustContain("スタッフ", p.staff_name ?? null);
-  mustContain("メニュー", menuTarget);
-  if (!pageText.includes(when.hhmm)) mismatches.push(`time=${when.hhmm}`);
-  if (!pageText.includes(kireidotRef)) mismatches.push("kireidot_ref");
-
-  if (mismatches.length > 0) {
-    await captureRegisterDebug(page, job, "confirmation_mismatch");
-    return fail(
-      `確認画面の内容が予約内容と一致しません: ${mismatches.join(", ")}`,
-      "CONFIRMATION_MISMATCH",
-      true,
-    );
-  }
-
-  // 確認画面まで到達したら必ず capture (調査・証跡)。
-  await captureRegisterDebug(page, job, "confirm_screen");
 
   const confirmed: CallbackBody["result_payload"] = {
     confirmed_customer_name: p.customer_name ?? null,
@@ -1595,9 +1554,12 @@ async function pushBooking(
   };
 
   // ----------------------------------------------------------
-  // 7) 登録ボタン — ENABLE_PUSH=true のときだけ押す
+  // 5) 登録 — ENABLE_PUSH=true のときだけ「登録する」を押す
   // ----------------------------------------------------------
-  // 重要: ここより前に登録確定ボタンは一切押していない。
+  // 入力済みフォームを必ず capture (証跡)。ENABLE_PUSH=false なら押さず confirm_only。
+  await captureRegisterDebug(page, job, ENABLE_PUSH ? "before_register" : "confirm_only", {
+    enable_push: ENABLE_PUSH,
+  });
   if (!ENABLE_PUSH) {
     return { status: "confirm_only", confirmed };
   }
@@ -1605,11 +1567,7 @@ async function pushBooking(
   const registerBtn = page.locator(REGISTER_FORM.registerButton.selector).first();
   if ((await registerBtn.count().catch(() => 0)) === 0) {
     await captureRegisterDebug(page, job, "register_button_not_found");
-    return fail("登録ボタンが見つかりません", "UNKNOWN_ERROR", true);
-  }
-  // 二重ガード
-  if (!ENABLE_PUSH) {
-    return { status: "confirm_only", confirmed };
+    return fail("登録ボタン (登録する) が見つかりません", "UNKNOWN_ERROR", true);
   }
 
   const beforeUrl = page.url();

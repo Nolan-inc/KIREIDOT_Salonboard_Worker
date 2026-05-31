@@ -26,3 +26,9 @@ https://salonboard.com/KLP/review/reviewList/
 KIREIDOT_Salonboard_Worker/salonboard_code/menu.html
 メニュー
 https://salonboard.com/CNK/draft/menuEdit
+
+
+
+KIREIDOT_Salonboard_Worker/salonboard_code/booking_create.html
+予約作成が面
+https://salonboard.com/KLP/reserve/ext/extReserveRegist/?staffId=W001411297&date=20260616&rsvHour=14&rsvMinute=00&rlastupdate=20260531164945

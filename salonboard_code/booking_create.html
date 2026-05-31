@@ -1,0 +1,350 @@
+<div class="contents">
+    <div class="section">
+        <div class="mod_title01_02 cf">
+            <h1 class="ttl">予約新規登録</h1>
+            <p class="btn_help01"><a href="javascript:void(0);" id="questionManual"><img src="https://imgbp.salonboard.com/KLP/img/btn_help_01.png" width="29" height="29" alt="ヘルプ" class="rollover" id="btn_help"></a></p>
+        </div>
+        <form id="extReserveRegist" method="post" action="/KLP/reserve/ext/extReserveRegist/" autocomplete="off"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="e2cc666024ef7b8e420755d6514c2e78"></div><input type="hidden" name="storeIdForMultipleTabCheck" value="aa3132a51481b791a14775d3e0863e62"><input type="hidden" name="staffId" value="W001411297" id="staffId"><input type="hidden" name="equipmentId" value="" id="equipmentId"><input type="hidden" name="date" value="20260616" id="rsvDate"><input type="hidden" name="customerId" value="" id="customerId"><input type="hidden" name="cautionFlg" value="0" id="cautionFlg"><div style="display:none">
+            <select name="salonStaffList" id="salonStaffList"><option value="W001411297">○ momoka</option>
+<option value="W001411300">○ cheka</option>
+<option value="W001422855">× cobo</option></select><select name="salonEquipmentList" id="salonEquipmentList"><option value="EQ00000000460107">○ ベッド</option></select><select name="salonStartHourList" id="salonStartHourOptionTag"><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option></select><select name="salonStartMinuteList" id="salonStartMinuteOptionTag"><option value="00">00</option><option value="15">15</option><option value="30">30</option><option value="45">45</option></select><select name="salonEndHourList" id="salonEndHourOptionTag"><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option></select><select name="salonEndMinuteList" id="salonEndMinuteOptionTag"><option value="00">00</option><option value="05">05</option><option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="35">35</option><option value="40">40</option><option value="45">45</option><option value="50">50</option><option value="55">55</option></select></div>
+
+        <div class="mod_line_btm_04 mod_column02 mt20 cf">
+            <ul class="columnBlock01 mod_column03 mod_line_btm_04 cf">
+                <li class="columnBlock"><span class="mod_btn_entry_06_cur">予約を登録する</span></li>
+                <li class="columnBlock ml2"><a href="javascript:void(0);" class="mod_btn_entry_07" id="fnc_schedule">予定を登録する</a></li>
+            </ul>
+            <p class="columnBlock02 txt mod_icon_01 mt15"><b>必須項目</b></p>
+        </div>
+
+        <div id="yoyakuinfo" style="">
+
+            <div class="mod_title02 mt20">
+                <h2 class="ttl">予約情報</h2>
+            </div>
+            <span id="jsiMenuJson" class="dn">[{"menuCategoryCd":"MC25","menuId":"MN00000013642229","menuName":"【肌改善に必須】オーダーメイドカスタム　シルクリセットピール【ハーブ×乳酸菌】 ","minutes":"90"},{"menuCategoryCd":"MC25","menuId":"MN00000013642230","menuName":"【敏感肌◎】クリア&amp;ウォーターチャージ【針なし水光導入】","minutes":"90"},{"menuCategoryCd":"MC25","menuId":"MN00000013642231","menuName":"【毛穴レスな肌へ】クリスタル毛穴クレンジング【水素洗浄×栄養導入】","minutes":"90"},{"menuCategoryCd":"MC25","menuId":"MN00000013642232","menuName":"【跡ケア◎】ニキビ、肌荒れ知らずに　Silk式炭酸トリートメント【高濃度炭酸ガス】","minutes":"90"},{"menuCategoryCd":"MC25","menuId":"MN00000013642233","menuName":"【弾力↑】Silk式スキンジェクション【エステ版フィラー】","minutes":"90"},{"menuCategoryCd":"MC25","menuId":"MN00000013642235","menuName":"【爆速改善】スピキュール肌活性トリートメント【慢性悩みに】","minutes":"90"}]</span>
+            <span id="jsiMenuCategoryJson" class="dn">{"MC25":{"menuCategoryCd":"MC25","menuCategoryIconColor":"C49BC2","menuCategoryName":"フェイシャル"}}</span>
+
+            <table class="mod_table03 w980 mt10">
+                <tbody>
+                    <tr class="mod_left mod_middle">
+                        <th class="mod_required_01 " rowspan="2">来店日時</th>
+                        <td colspan="2" class="">
+                            <p class="mod_column04 pr10">
+                                <input type="text" name="rsvDispDate" value="2026年6月16日（火）" readonly="readonly" id="rsvDispDate" class="w130 calendar_readonly"></p>
+                        </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle" id="rsvTimeArea">
+                        <td colspan="2" class="">
+                            <dl class="tblSetTime cf">
+                                <dt class="tblSetInfoTitle">開始時間：</dt>
+                                <dd class="tblSetInfoItem cf">
+                                    <select name="rsvHour" id="jsiRsvHour" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox"><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14" selected="selected">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option></select><span class="tblSetTimeElement tblSetTimeColon">：</span>
+                                    <select name="rsvMinute" id="jsiRsvMinute" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox"><option value="00" selected="selected">00</option><option value="15">15</option><option value="30">30</option><option value="45">45</option></select></dd>
+                                <dt class="tblSetInfoTitle">終了時間：</dt>
+                                <dd id="resultTime" class="tblSetInfoItem">15:00</dd>
+                                <dt class="tblSetInfoTitle">所要時間：</dt>
+                                <dd class="tblSetInfoItem cf rsvTerm_select">
+                                    <select name="rsvTermHour" id="jsiRsvTermHour" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox"><option value="0">0</option>
+<option value="60" selected="selected">1</option>
+<option value="120">2</option>
+<option value="180">3</option>
+<option value="240">4</option>
+<option value="300">5</option>
+<option value="360">6</option>
+<option value="420">7</option>
+<option value="480">8</option>
+<option value="540">9</option>
+<option value="600">10</option>
+<option value="660">11</option>
+<option value="720">12</option>
+<option value="780">13</option>
+<option value="840">14</option>
+<option value="900">15</option>
+<option value="960">16</option>
+<option value="1020">17</option>
+<option value="1080">18</option>
+<option value="1140">19</option>
+<option value="1200">20</option>
+<option value="1260">21</option>
+<option value="1320">22</option>
+<option value="1380">23</option>
+<option value="1440">24</option>
+<option value="1500">25</option>
+<option value="1560">26</option>
+<option value="1620">27</option>
+<option value="1680">28</option>
+<option value="1740">29</option></select><span class="tblSetTimeElement tblSetTimeColon">：</span>
+                                    <select name="rsvTermMinute" id="jsiRsvTermMinute" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox"><option value="00" selected="selected">00</option><option value="05">05</option><option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="35">35</option><option value="40">40</option><option value="45">45</option><option value="50">50</option><option value="55">55</option></select></dd>
+                                <dd class="tblSetInfoItem tblSetTimeBtnWrap">
+                                    <button type="button" id="jsiTimeIncrease" class="tblSetTimeElement setTimeBtn setTimeIncreaseBtn"></button>
+                                    <button type="button" id="jsiTimeDecrease" class="tblSetTimeElement setTimeBtn setTimeDecreaseBtn"></button>
+                                </dd>
+                            </dl>
+                        </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle ">
+                        <th class="mod_required_01">予約経路</th>
+                        <td colspan="2">
+                            <select name="rsvRouteId" class="setInfoSelectBox setRouteSelectBox"><option value="K000000001">電話(自社)</option>
+<option value="K000000002">電話(HOT PEPPER Beauty)</option>
+<option value="K000000005">直接来店</option></select></td>
+                    </tr>
+
+                    <tr class="mod_left ">
+                        <th class="mod_middle w96">メニュー</th>
+                        <td colspan="2" class="border-right menuCategoryListArea">
+                            <ul class="jscMenuCategoryList menuCategoryList">
+                                <li>
+                                        <input type="radio" value="MC25" name="menuCategory" id="menuCategoryMC25">
+                                        <label for="menuCategoryMC25" class="MC25">
+                                            <span>フェイシャル</span>
+                                        </label>
+                                    </li>
+                                <li class="bookmarkCategory"><input type="radio" value="MCFB" name="menuCategory" id="menuCategoryMCFB">
+                                    <label for="menuCategoryMCFB">
+                                        <span>お気に入り</span>
+                                    </label>
+                                </li>
+                            </ul>
+                            <div data-id="MC25" class="jscMenuCategorySelectMenuAreaMC25" style="display: none;"></div>
+                            <div data-id="Favorite" class="jscMenuCategorySelectMenuAreaMCFB" style="display: none;"></div>
+                            <div class="jscMenuCategorySelectedMenu menuCategorySelectedMenu dn">
+                                        <p class="menuCategorySelectedMenuTtl">選択したメニュー</p>
+                                        <ul class="menuCategorySelectedMenuList"></ul>
+                                    </div>
+                                </td>
+                    </tr>
+
+                    <tr class="mod_left">
+                        <th class="mod_middle w96 ">割引・サービス・オプション</th>
+                        <td class="w414 mod_left" id="netCouponArea">
+                            <p><b>HOT PEPPER Beautyクーポンを選択：</b></p>
+                            <select name="netCouponId" class="setInfoSelectBox setHpbLowSelectBox select_coupon"><option value="">-</option>
+<option value="CP00000012857772">★OPEN記念50名様限定CP★silkリセットピール¥25,000→¥7,400</option>
+<option value="CP00000012857795">★OPEN記念50名様限定CP★高濃度炭酸トリートメント¥21,000→¥6,000</option>
+<option value="CP00000012741622">【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</option>
+<option value="CP00000012741624">【肌改善の基礎◎】シルクリセットピール【ハーブ×乳酸菌】 ¥25000→14500</option>
+<option value="CP00000012741636">【ツヤ肌！】Silk式炭酸トリートメント【高濃度炭酸ガス】¥21000→12500</option>
+<option value="CP00000012853951">【momoka限定】トラブルレスなお肌へ！オーダーメイド肌質改善クーポン！</option>
+<option value="CP00000012741629">【スキンケア相談】物販購入のお客様※施術無</option>
+<option value="CP00000012741632">【乾燥肌の方！】クリア&amp;ウォーターチャージ【針なし水光導入】¥25000→14500</option>
+<option value="CP00000012741635">【脱毛穴】クリスタル毛穴クレンジング【水素洗浄×栄養導入】¥21000→¥12500</option>
+<option value="CP00000012741641">【ツヤハリ】Silk式スキンジェクション【エステ版ポテンツァ】¥28000→¥15800</option>
+<option value="CP00000012741645">【爆速改善◎】スピキュール肌活性トリートメント【慢性悩み】¥28000→15800</option>
+<option value="CP00000012741676">【ペア割◆2名様同時初来店】当日の新規施術料金から更に¥1,000ずつOFF</option>
+<option value="CP00000012741681">【リピーター様限定！】回数券をお持ちの方</option>
+<option value="CP00000012861122">【チェカ限定】悩みに寄り添いあなただけのプランを。妥協無し本気の肌質改善</option></select><span id="couponTime" style="display:none">,120,120,120,120,120,120,30,120,120,120,120,,75,120</span>
+                            <span id="couponCategoryName" style="display:none">,フェイシャル＋ブライダル,フェイシャル＋ブライダル,フェイシャル＋ブライダル＋その他,フェイシャル＋ブライダル＋その他,フェイシャル＋ブライダル＋その他,フェイシャル,フェイシャル＋その他,フェイシャル＋ブライダル＋その他,フェイシャル＋ブライダル＋その他,フェイシャル＋ブライダル＋その他,フェイシャル＋ブライダル＋その他,,フェイシャル,フェイシャル</span>
+                            <ul class="mod_list01">
+                            <li>※メニュー指定ありクーポンを選択すると自動でメニューが選択されます。<br>メニューとの重複登録にご注意ください。</li>
+                            </ul>
+                        </td>
+                        <td class="mod_left ">
+                            <p><b>他経路の割引・サービス・オプションを選択：</b></p>
+                                <div id="extCouponArea" class="jsiExtCouponSelectBoxes">
+                                                <div class="mod_column03 mb5 cf">
+                                                    <select name="extCouponCategoryCdList" id="extCouponCategoryCdList" class="setInfoSelectBox setSbLowSelectBox tblSetTimeElement jscSelectExtCouponCategory"><option value="">-</option>
+<option value="DC01">割引</option>
+<option value="DC02">サービス</option>
+<option value="DC03">オプション</option>
+<option value="DC04">他経路の割引</option></select><select name="extCouponIdList" disabled="disabled" id="extCouponIdList" class="setInfoSelectBox setSbLowSelectBoxOption tblSetTimeElement"><option value="">-</option></select></div>
+                                            </div>
+                                    <a href="javascript:void(0);" class="mod_btn_add_05" id="addCoupon">追加する</a>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <table class="mod_table03 w980 mt10">
+                    <tbody>
+                    <tr class="mod_left mod_middle ">
+                            <th class="w96 mod_required_01">スタッフ</th>
+                            <td colspan="2" id="staffArea">
+                                <div class="tblSetStaffText cf">
+                                    <div class="tblSetInfoItem tblSetInfoName">指名予約</div>
+                                    <div class="tblSetInfoItem tblSetInfoStart">開始時間</div>
+                                    <div class="tblSetInfoItem tblSetInfoEnd">終了時間</div>
+                                </div>
+
+                            <div id="staff-0" class="cf mb10 jscStaffRow">
+                                    <div class="tblSetInfoItem">
+                                        <select name="staffIdList" class="setInfoSelectBox setStaffSelectBox staffIdList"><option value="W001411297" selected="selected">○ momoka</option>
+<option value="W001411300">○ cheka</option>
+<option value="W001422855">× cobo</option></select></div>
+
+                                    <div class="tblSetInfoItem tblSetInfoChkBox">
+                                    <input type="checkbox" name="rsvType" class="setInfoChkBox jscStaffCheckBox" value="1">
+                                        <input type="hidden" name="rsvTypeList" value="1" class="rsvTypeList"></div>
+
+                                    <div class="tblSetInfoItem ml20 cf">
+                                        <select name="staffStartHourList" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox time_select jscStaffStartHourList">
+                                            <option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14" selected="selected">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option></select>
+                                        <span class="tblSetTimeElement tblSetTimeColon">：</span>
+                                        <select name="staffStartMinuteList" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox time_select jscStaffStartMinuteList">
+                                            <option value="00" selected="selected">00</option><option value="15">15</option><option value="30">30</option><option value="45">45</option></select>
+                                    </div>
+
+                                    <div class="tblSetInfoItem tblSetTimeFor">～</div>
+
+                                    <div class="tblSetInfoItem cf">
+                                        <select name="staffEndHourList" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox time_select jscStaffEndHourList">
+                                            <option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15" selected="selected">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option></select>
+                                        <span class="tblSetTimeElement tblSetTimeColon">：</span>
+                                        <select name="staffEndMinuteList" class="tblSetTimeElement setInfoSelectBox setTimeSelectBox time_select jscStaffEndMinuteList">
+                                            <option value="00" selected="selected">00</option><option value="05">05</option><option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option><option value="30">30</option><option value="35">35</option><option value="40">40</option><option value="45">45</option><option value="50">50</option><option value="55">55</option></select>
+                                    </div>
+
+                                    <div class="tblSetInfoItem ml20">
+                                        <a href="javascript:void(0);" name="deleteStaffBtn" class="mod_btn_delete_01 deleteStaffBtn">削除</a>
+                                        <input type="hidden" name="staffAssignIdList" value=""></div>
+
+                                </div>
+                                <a href="javascript:void(0);" class="mod_btn_add_05" id="staffAdd">追加する</a>
+                            </td>
+                        </tr>
+                    <tr class="mod_left mod_middle ">
+                            <th class="w96 mod_required_01">設備</th>
+                            <td colspan="2" id="equipArea">
+                                <div class="tblSetEquipText cf">
+                                    <div class="tblSetInfoItem tblSetInfoStart">開始時間</div>
+                                    <div class="tblSetInfoItem tblSetInfoEnd">終了時間</div>
+                                </div>
+
+                        <a href="javascript:void(0);" class="mod_btn_add_05" id="equipAdd">追加する</a>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            <div class="mod_title02 mt20">
+                <h2 class="ttl">お客様情報</h2>
+            </div>
+            <div class="mod_box_06 mt10" id="cautionArea" style="display:none">
+                <p class="mod_color_e50000 personAttention"><b>要注意のお客様です。</b></p>
+            </div>
+            <input type="hidden" id="moduleId" value="KPCL017V01">
+            <table class="mod_table03 w980 mt10 input_table tbl_bdr_grey1px" id="customerInfoArea">
+                <tbody>
+                    <tr class="mod_left mod_middle">
+                        <th class="w96 mod_required_01 ">氏名 (カナ)</th>
+                        <td class="border-right w414 ">
+                            <div class="mod_column03 cf">
+                                <p class="columnBlock mr5">
+                                    <a href="javascript:void(0);" class="mr3 fl w20" id="showKeyboardSeiKana">ア</a><input type="text" name="nmSeiKana" maxlength="60" tabindex="30" value="シ" id="nmSeiKana" class="last_name_kana w170   mod_color_999999"></p>
+                                <p class="columnBlock">
+                                    <a href="javascript:void(0);" class="mr3 fl w20" id="showKeyboardMeiKana">ア</a><input type="text" name="nmMeiKana" maxlength="60" tabindex="31" value="メイ" id="nmMeiKana" class="first_name_kana w170   mod_color_999999"></p>
+                            </div>
+                        </td>
+                        <td rowspan="5">
+                            <div class="bg_search" id="search_area">
+                                <a href="javascript:void(0);" class="mod_btn_search" id="search" tabindex="37">検索する</a>
+                                <span class="mod_btn_search_disable" style="display:none">検索する</span>
+                                </div>
+                            </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle">
+                        <th class="w96 ">氏名 (漢字)</th>
+                        <td class="w414 border-right ">
+                            <div class="mod_column03 cf">
+                                <p class="columnBlock mr5"><span class="mr3 fl w20">&nbsp;</span><input type="text" name="nmSei" maxlength="40" tabindex="32" value="氏" id="nmSei" class="last_name w170   mod_color_999999"></p>
+                                <p class="columnBlock"><span class="mr3 fl w20">&nbsp;</span><input type="text" name="nmMei" maxlength="40" tabindex="33" value="名" id="nmMei" class="first_name w170   mod_color_999999"></p>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle">
+                        <th class="w96 " rowspan="2">電話番号</th>
+                        <td class="w414 border-right border-bottom-hidden ">
+                            <div class="mod_column03 cf">
+                                <p class="columnBlock mr5">
+                                    <a href="javascript:void(0);" class="mr3 fl w20" id="showKeyboardTenkey">TEL</a><input type="text" name="tel" maxlength="17" tabindex="34" value="" id="tel" class="tel w170 "></p>
+                                <p class="columnBlock">※ハイフンなしで入力してください。</p>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr class="mod_left mod_middle">
+                        <td class="border-right border-top-hidden ">
+                            <div class="mod_column03 cf">
+                                <p class="columnBlock mr5">
+                                    <a href="javascript:void(0);" class="mr3 fl w20" id="showKeyboardTenkey2">TEL2</a><input type="text" name="tel2" maxlength="17" tabindex="35" value="" id="tel2" class="tel w170 "></p>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr class="mod_left mod_middle">
+                        <th class="w96 ">お客様番号</th>
+                        <td class="w414 border-right ">
+                            <div class="mod_column03 cf">
+                                <p class="columnBlock mr5">
+                                <span class="mr3 fl w20">&nbsp;</span><input type="text" name="customerNo" maxlength="20" tabindex="36" value="" id="customerNo" class="code w170 "></p>
+                                <div class="columnBlock">
+                                    <ul class="mod_list01">
+                                        <li>※サロンで管理している会員証等の<br>番号を入力してください。</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle" style="display: none;" id="visitCountArea">
+                        <th class="w96">来店回数</th>
+                        <td colspan="2" class="wordBreak">
+                            <span id="delVisitCount" style="display:none">-</span>
+                            <span id="normalVisitCount"><span id="totalVisitCount"></span>回 (サロンボード登録以前：<span id="visitCount"></span>回)</span>
+                        </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle" style="display: none;" id="memoArea">
+                        <th class="w96">お客様メモ</th>
+                        <td colspan="2" class="wordBreak">
+                        <div id="customerMemo">
+                                    <div class="wordBreak">
+                                        -</div>
+                                </div>
+                            </td>
+                    </tr>
+
+                    <tr class="mod_left mod_middle" id="lastReserveArea" style="display:none">
+<th>前回の施術情報</th>
+<td colspan="2" class="wordBreak">
+<dl><dt>-</dt></dl>
+    </td>
+</tr>
+<tr class="mod_left mod_middle previous">
+                        </tr>
+                    </tbody>
+            </table>
+
+            <p class="ml200 js_info_msg mt3 mod_link_color01" style="display:none"><a href="javascript:void(0);" class="txt_data_entry" id="rewrite">再度入力する</a></p>
+
+            <div class="mod_title02 mt25">
+                <h2 class="ttl">メモ</h2>
+            </div>
+
+            <table class="mod_table03 w980 mt10">
+                <tbody>
+                    <tr class="mod_left mod_middle ">
+                        <th class="w96">予約時メモ</th>
+                        <td>
+                            <textarea name="rsvEtc" cols="80" rows="10" id="rsvEtc" class="w536 h40"></textarea><span id="etcCounter">0/100</span>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="mod_box_01 mt30">
+                <div class="w150 mod_box_center">
+                    <a href="javascript:void(0);" onclick="javascript:errorInput=true;return false;" class="mod_btn_entry_08" id="regist">登録する</a>
+                    <span class="mod_btn_entry_08" id="regist_disable" style="display:none">登録する</span>
+                </div>
+            </div>
+            </div>
+        </form><p class="mod_link01 mt10"><a href="https://salonboard.com/KLP/schedule/salonSchedule/?date=20260616">スケジュールへ戻る</a></p>
+
+        <div class="mod_pagetop01 cf">
+            <a href="#top">ページのトップへ</a>
+        </div>
+        </div>
+    </div>
