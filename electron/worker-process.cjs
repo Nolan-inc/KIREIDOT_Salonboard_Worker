@@ -1803,11 +1803,12 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
 async function runTestPush(payload) {
   const step = (s, extra = {}) => emit('push:test', { step: s, ...extra });
   const p = payload || {};
-  if (!p.shopId || !p.staffExternalId || !p.menuName || !p.scheduledAt) {
-    step('done', { ok: false, error: '必須項目が不足 (shop/staff/menu/日時)' });
+  // メニューは任意 (時間と内容だけで登録する)。必須は shop / staff / 日時。
+  if (!p.shopId || !p.staffExternalId || !p.scheduledAt) {
+    step('done', { ok: false, error: '必須項目が不足 (店舗・担当スタッフ・日時)' });
     return;
   }
-  step('start', { msg: `テスト開始: ${p.scheduledAt} staff=${p.staffExternalId} menu=${p.menuName} 実登録=${p.enablePush ? 'ON' : 'OFF'}` });
+  step('start', { msg: `開始: ${p.scheduledAt} staff=${p.staffExternalId} menu=${p.menuName || '(なし)'} 実登録=${p.enablePush ? 'ON' : 'OFF'}` });
 
   let creds;
   try {
