@@ -45,6 +45,12 @@ export type BookingRow = {
   /** サロンボード由来の表示用フィールド */
   salonboard_staff_name?: string | null;
   external_booking_id?: string | null;
+  /** 予約の出所: 'salonboard' = SB から取得 / 'kireidot' = KIREIDOT で作成 */
+  source?: string | null;
+  /** SalonBoard 書き込み同期状態 (kireidot 作成予約のみ意味を持つ) */
+  salonboard_sync_status?: string | null;
+  /** SalonBoard 予約詳細 URL (同期済みのとき) */
+  salonboard_detail_url?: string | null;
   shops?: { name: string } | null;
   staff?: { full_name: string } | null;
   menus?: { name: string } | null;
@@ -62,7 +68,7 @@ export async function fetchTodayBookings(scope: StaffScope): Promise<BookingRow[
   let q: any = supabase
     .from('bookings')
     .select(
-      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
+      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
     )
     .gte('scheduled_at', start.toISOString())
     .lt('scheduled_at', end.toISOString())
@@ -87,7 +93,7 @@ export async function fetchRecentBookings(scope: StaffScope, days = 7): Promise<
   let q: any = supabase
     .from('bookings')
     .select(
-      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
+      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
     )
     .gte('scheduled_at', start.toISOString())
     .lt('scheduled_at', end.toISOString())

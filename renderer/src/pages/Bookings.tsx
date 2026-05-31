@@ -15,9 +15,61 @@ const FILTER_LABELS: Record<(typeof FILTERS)[number], string> = {
   cancelled: 'キャンセル',
 };
 
+// 出所 / SalonBoard 同期での絞り込み
+const SOURCE_FILTERS = ['すべて', 'salonboard', 'synced', 'not_synced'] as const;
+type SourceFilter = (typeof SOURCE_FILTERS)[number];
+const SOURCE_FILTER_LABELS: Record<SourceFilter, string> = {
+  すべて: 'すべて',
+  salonboard: 'SalonBoard取得',
+  synced: 'SB同期済み',
+  not_synced: 'KIREIDOTのみ(未登録)',
+};
+
+type SbBadge = {
+  /** 絞り込み用の分類キー */
+  kind: 'salonboard' | 'synced' | 'pending' | 'failed' | 'not_synced' | 'na';
+  label: string;
+  cls: string;
+  /** SalonBoard に存在することが確実か (✓ 表示用) */
+  inSalonboard: boolean;
+};
+
+/**
+ * 予約の「出所」と「SalonBoard 同期状態」を1つのバッジに分類する。
+ *   - source='salonboard' : SalonBoard から取得した予約 (= SB に存在確定)
+ *   - source='kireidot' :
+ *       synced            : KIREIDOT で作成し SB へ登録済み (SB に存在確定)
+ *       pending_push/pushing : 同期待ち / 同期中
+ *       failed/manual_required : 登録失敗 / 手動対応必要 (SB 未登録)
+ *       それ以外 (null 等) : KIREIDOT のみ (SB 未登録)
+ */
+function classifySbSync(b: BookingRow): SbBadge {
+  const src = b.source ?? null;
+  const st = b.salonboard_sync_status ?? null;
+  if (src === 'salonboard') {
+    return { kind: 'salonboard', label: 'SalonBoard取得', cls: 'bg-sky-100 text-sky-700', inSalonboard: true };
+  }
+  // ここから source = kireidot (または不明) の KIREIDOT 作成予約
+  if (st === 'synced' || st === 'cancelled_synced') {
+    return { kind: 'synced', label: 'SB同期済み', cls: 'bg-emerald-100 text-emerald-700', inSalonboard: true };
+  }
+  if (st === 'pending_push' || st === 'pushing' || st === 'pending_cancel') {
+    return { kind: 'pending', label: '同期待ち', cls: 'bg-amber-100 text-amber-700', inSalonboard: false };
+  }
+  if (st === 'failed') {
+    return { kind: 'failed', label: 'SB登録失敗', cls: 'bg-red-100 text-red-700', inSalonboard: false };
+  }
+  if (st === 'manual_required') {
+    return { kind: 'failed', label: '要手動対応', cls: 'bg-red-100 text-red-700', inSalonboard: false };
+  }
+  // KIREIDOT で作られたが SB へ未送信
+  return { kind: 'not_synced', label: 'KIREIDOTのみ', cls: 'bg-rose-100 text-rose-700', inSalonboard: false };
+}
+
 export function Bookings() {
   const scope = useEffectiveScope();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('すべて');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('すべて');
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [search, setSearch] = useState('');
@@ -49,6 +101,14 @@ export function Bookings() {
     const q = search.trim().toLowerCase();
     return bookings.filter((b) => {
       if (filter !== 'すべて' && b.status !== filter) return false;
+      if (sourceFilter !== 'すべて') {
+        const badge = classifySbSync(b);
+        if (sourceFilter === 'salonboard' && badge.kind !== 'salonboard') return false;
+        if (sourceFilter === 'synced' && !badge.inSalonboard) return false;
+        // 「KIREIDOTのみ(未登録)」= SB に存在しない KIREIDOT 作成予約 (未同期/失敗/手動)
+        if (sourceFilter === 'not_synced' && (badge.kind === 'salonboard' || badge.inSalonboard))
+          return false;
+      }
       if (q) {
         const name = displayName(b).toLowerCase();
         const menu = (b.menus?.name ?? '').toLowerCase();
@@ -56,7 +116,21 @@ export function Bookings() {
       }
       return true;
     });
-  }, [bookings, filter, search]);
+  }, [bookings, filter, sourceFilter, search]);
+
+  // 集計 (出所フィルタのチップに件数を出す)
+  const counts = useMemo(() => {
+    let salonboard = 0;
+    let synced = 0;
+    let notSynced = 0;
+    for (const b of bookings) {
+      const badge = classifySbSync(b);
+      if (badge.kind === 'salonboard') salonboard++;
+      if (badge.inSalonboard) synced++;
+      if (badge.kind !== 'salonboard' && !badge.inSalonboard) notSynced++;
+    }
+    return { all: bookings.length, salonboard, synced, notSynced };
+  }, [bookings]);
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -93,10 +167,10 @@ export function Bookings() {
             type="button"
             onClick={() => setModalOpen(true)}
             disabled={!scope?.shopId}
-            title={scope?.shopId ? '新規予約を作成' : '先に店舗を選択してください'}
+            title={scope?.shopId ? '新規予約を作成して SalonBoard にも登録する' : '先に店舗を選択してください'}
             className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand disabled:opacity-50"
           >
-            <Plus className="h-3.5 w-3.5" /> 新規予約
+            <Plus className="h-3.5 w-3.5" /> 新規予約 → SalonBoard登録
           </button>
         </div>
       </div>
@@ -118,6 +192,36 @@ export function Bookings() {
         ))}
       </div>
 
+      {/* 出所 / SalonBoard 同期での絞り込み */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[11px] font-semibold text-muted">SalonBoard:</span>
+        {SOURCE_FILTERS.map((f) => {
+          const n =
+            f === 'すべて'
+              ? counts.all
+              : f === 'salonboard'
+                ? counts.salonboard
+                : f === 'synced'
+                  ? counts.synced
+                  : counts.notSynced;
+          return (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setSourceFilter(f)}
+              className={
+                sourceFilter === f
+                  ? 'inline-flex h-7 items-center gap-1 rounded-full bg-ink px-3 text-[11px] font-semibold text-white'
+                  : 'inline-flex h-7 items-center gap-1 rounded-full border border-hairline bg-white/70 px-3 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/40'
+              }
+            >
+              {SOURCE_FILTER_LABELS[f]}
+              <span className="opacity-70">({n})</span>
+            </button>
+          );
+        })}
+      </div>
+
       <Card className="overflow-hidden">
         {loading ? (
           <div className="flex items-center gap-2 px-5 py-10 text-[13px] text-ink-soft">
@@ -134,6 +238,7 @@ export function Bookings() {
                 <th className="px-3 py-3">区分</th>
                 <th className="px-3 py-3">メニュー</th>
                 <th className="px-3 py-3">店舗</th>
+                <th className="px-3 py-3">SalonBoard</th>
                 <th className="px-3 py-3 text-right">金額</th>
                 <th className="px-3 py-3">状態</th>
               </tr>
@@ -167,6 +272,30 @@ export function Bookings() {
                     </td>
                     <td className="px-3 py-3 text-ink-soft">{b.menus?.name ?? '-'}</td>
                     <td className="px-3 py-3 text-ink-soft">{b.shops?.name ?? '-'}</td>
+                    <td className="px-3 py-3">
+                      {(() => {
+                        const badge = classifySbSync(b);
+                        return (
+                          <span className="inline-flex items-center gap-1">
+                            <span className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+                              {badge.inSalonboard && <CheckCircle2 className="h-3 w-3" />}
+                              {badge.label}
+                            </span>
+                            {b.salonboard_detail_url && (
+                              <a
+                                href={b.salonboard_detail_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="SalonBoard で予約詳細を開く"
+                                className="text-[10px] text-sky-600 underline hover:text-sky-800"
+                              >
+                                開く
+                              </a>
+                            )}
+                          </span>
+                        );
+                      })()}
+                    </td>
                     <td className="px-3 py-3 text-right font-semibold text-ink">{formatYen(b.amount)}</td>
                     <td className="px-3 py-3">
                       <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${status.cls}`}>{status.label}</span>
