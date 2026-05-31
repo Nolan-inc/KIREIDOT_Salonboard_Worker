@@ -1164,7 +1164,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const formReady =
     (await page.locator('form#extReserveRegist, #regist, textarea#rsvEtc').first().count().catch(() => 0)) > 0;
   if (!formReady) {
-    return fail('予約登録フォームに到達できませんでした (ログイン切れ/画面変更)', 'CONFIRMATION_MISMATCH', true);
+    // 実際にどの画面に居るかを診断に含める (原因切り分け用)。
+    const diag = await page.evaluate(() => {
+      const forms = Array.from(document.querySelectorAll('form')).map((f) => f.id || f.getAttribute('name') || f.action || '?').slice(0, 5);
+      const body = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 200);
+      return { url: location.href, title: document.title, forms, body };
+    }).catch(() => ({ url: page.url(), title: '?', forms: [], body: '?' }));
+    return fail(
+      `予約登録フォームに到達できませんでした。url=${diag.url} title="${diag.title}" forms=[${(diag.forms || []).join(',')}] body="${diag.body}"`,
+      'CONFIRMATION_MISMATCH',
+      true,
+    );
   }
 
   // スタッフ (URL で初期選択されるが明示)
