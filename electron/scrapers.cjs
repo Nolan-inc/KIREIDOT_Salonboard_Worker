@@ -1272,12 +1272,29 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   if ((await registerBtn.count().catch(() => 0)) === 0) {
     return fail('登録ボタン (登録する) が見つかりません', 'UNKNOWN_ERROR', true);
   }
+
+  // 「登録する」を押すと「予約を登録します。よろしいですか？」という
+  // ネイティブ confirm() ダイアログが出る。Playwright は既定でこれを dismiss して
+  // しまう (= キャンセル扱い→登録されない) ため、accept (OK) するハンドラを
+  // クリック前に登録しておく。1 回限り (登録完了後の別ダイアログは無視させない)。
+  let dialogAccepted = false;
+  const onDialog = async (d) => {
+    dialogAccepted = true;
+    try { await d.accept(); } catch (_e) { /* noop */ }
+  };
+  page.on('dialog', onDialog);
+
   const beforeUrl = page.url();
-  await Promise.all([
-    page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
-    registerBtn.click({ timeout: 15_000 }),
-  ]).catch(() => {});
-  await page.waitForTimeout(1500);
+  try {
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
+      registerBtn.click({ timeout: 15_000 }),
+    ]).catch(() => {});
+    // confirm の OK 押下 → 送信 → 遷移を待つ
+    await page.waitForTimeout(2500);
+  } finally {
+    page.off('dialog', onDialog);
+  }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('登録後に reCAPTCHA が表示され成否判定不能', 'RECAPTCHA_REQUIRED', true);
@@ -1311,11 +1328,21 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const m = detailLink.match(/reserveId=([A-Za-z0-9]+)/);
     if (m) externalId = m[1];
   }
-  const doneText = await page.locator('text=/完了|受け付け|登録しました|予約を登録/').count().catch(() => 0);
-  const looksDone = doneText > 0 || afterUrl !== beforeUrl;
+  const doneText = await page.locator('text=/完了しました|受け付けました|登録しました|予約を登録しました/').count().catch(() => 0);
+  // まだ登録フォーム上に居る = 送信されていない (confirm が押せなかった等)。
+  const stillOnForm = /extReserveRegist/i.test(afterUrl);
+
+  if (!dialogAccepted && stillOnForm) {
+    return fail(
+      '登録確認ダイアログ (「予約を登録します。よろしいですか？」) を確定できませんでした。',
+      'UNKNOWN_ERROR',
+      true,
+    );
+  }
+  const looksDone = !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
   if (!looksDone) {
     return fail(
-      '登録ボタンを押しましたが完了画面を確認できませんでした。SalonBoard で登録状況を確認してください。',
+      `登録ボタンは押しましたが完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl})。SalonBoard で登録状況を確認してください。`,
       'UNKNOWN_ERROR',
       true,
     );
