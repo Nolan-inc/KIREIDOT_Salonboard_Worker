@@ -20,7 +20,96 @@
 //   - rows は salonboard_bulk_upsert_* RPC にそのまま送れる形に整形済み
 // =====================================================================
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
 // ----------------- 共通ユーティリティ -----------------
+
+/**
+ * 同期が「検出0」など想定外のときに、実際にどの画面にいたかを保存する debug capture。
+ * 保存先: ~/.kireidot/salonboard-debug/{channel}/{YYYYMMDDThhmmss}_{label}/
+ *   - meta.json    … URL / title / 表示テキスト抜粋 / 入力要素サマリ
+ *   - page.html    … HTML スナップショット (パスワード等はマスク)
+ *   - screenshot.png
+ * 個人情報保護: input/textarea の value は保存しない。HTML 中の password はマスク。
+ * 既定 ON。SALONBOARD_DEBUG_CAPTURE=0/false/no で無効。
+ */
+const SCRAPE_DEBUG_CAPTURE = !/^(0|false|no)$/i.test(
+  process.env.SALONBOARD_DEBUG_CAPTURE ?? '1',
+);
+function scrapeDebugStamp() {
+  const d = new Date(Date.now() + 9 * 3600_000);
+  return d.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+}
+function scrubScrapeSecrets(text, secrets) {
+  let out = text;
+  for (const s of secrets) {
+    if (s && String(s).length >= 3) {
+      const esc = String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(esc, 'g'), '***REDACTED***');
+    }
+  }
+  out = out.replace(
+    /(<input[^>]*type=["']?password["']?[^>]*value=["'])[^"']*(["'])/gi,
+    '$1***REDACTED***$2',
+  );
+  return out;
+}
+async function captureScrapeDebug(page, channel, label, opts = {}) {
+  if (!SCRAPE_DEBUG_CAPTURE) return null;
+  try {
+    const dir = path.join(
+      os.homedir(), '.kireidot', 'salonboard-debug', channel,
+      `${scrapeDebugStamp()}_${String(label).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)}`,
+    );
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const secrets = opts.secrets ?? [];
+    const url = page.url();
+    let title = '';
+    try { title = await page.title(); } catch (_e) { /* noop */ }
+    let inputs = [];
+    let textExcerpt = '';
+    try {
+      const snap = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll('input, select, textarea, table'));
+        const inputSummary = els.slice(0, 80).map((e) => ({
+          tag: e.tagName.toLowerCase(),
+          type: e.getAttribute('type') || undefined,
+          name: e.getAttribute('name') || undefined,
+          id: e.id || undefined,
+        }));
+        const tableInfo = Array.from(document.querySelectorAll('table')).map((t) => ({
+          id: t.id || t.className || '?',
+          rows: t.querySelectorAll('tr').length,
+        }));
+        return { inputSummary, tableInfo, body: (document.body?.innerText ?? '').slice(0, 3000) };
+      });
+      inputs = snap.inputSummary;
+      textExcerpt = scrubScrapeSecrets(snap.body, secrets);
+      var tableInfo = snap.tableInfo;
+    } catch (_e) { /* noop */ }
+    const meta = {
+      captured_at_jst: scrapeDebugStamp(), channel, label, url, title,
+      input_count: inputs.length, inputs,
+      tables: typeof tableInfo !== 'undefined' ? tableInfo : [],
+      diagnostics: opts.diagnostics ?? null,
+      text_excerpt: textExcerpt,
+    };
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2), { mode: 0o600 });
+    try {
+      const html = await page.content();
+      fs.writeFileSync(path.join(dir, 'page.html'), scrubScrapeSecrets(html, secrets), { mode: 0o600 });
+    } catch (_e) { /* noop */ }
+    try {
+      await page.screenshot({ path: path.join(dir, 'screenshot.png'), fullPage: true });
+      try { fs.chmodSync(path.join(dir, 'screenshot.png'), 0o600); } catch (_e) { /* noop */ }
+    } catch (_e) { /* noop */ }
+    return dir;
+  } catch (_e) {
+    return null;
+  }
+}
 
 /**
  * JST 文字列を ISO 8601 (UTC) に変換。複数のフォーマットを許容:
@@ -500,6 +589,34 @@ async function scrapeBookings(page, opts = {}) {
   await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
+  // 予約一覧に到達できているかの即時診断 (検出0 の原因切り分け用)。
+  // landing が login / 空ページ / interstitial だと search 以前に分かる。
+  try {
+    const landing = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      inputs: document.querySelectorAll('input').length,
+      tables: document.querySelectorAll('table').length,
+      hasPw: !!document.querySelector('input[type="password"]'),
+      hasResultList: !!document.getElementById('resultList'),
+      bodyHead: (document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 120),
+    }));
+    diag.unshift(
+      `landing: url=${landing.url} title="${landing.title}" inputs=${landing.inputs} tables=${landing.tables} ` +
+      `pw=${landing.hasPw} resultList=${landing.hasResultList} body="${landing.bodyHead}"`,
+    );
+    // ログイン画面に飛ばされている / 予約一覧の検索欄(resultList)が無い → 早期 capture
+    if (landing.hasPw || landing.inputs === 0) {
+      const capDir = await captureScrapeDebug(page, 'bookings', 'landing_not_reservelist', {
+        secrets: [opts.loginId, opts.password].filter(Boolean),
+        diagnostics: landing,
+      });
+      if (capDir) diag.unshift(`landing capture: ${capDir}`);
+    }
+  } catch (_e) {
+    /* 診断失敗は本処理を止めない */
+  }
+
   // 検索フォームに日付範囲を入れて検索を実行 (これが無いと結果が出ない)
   const searched = await applyBookingDateFilter(page, range, { diag });
   diag.unshift(`searched: ${searched}`);
@@ -628,6 +745,17 @@ async function scrapeBookings(page, opts = {}) {
       }
     }
     if (!advanced) break;
+  }
+
+  // 検出0 (検索フォーム未検出 or 結果0) のときは、実際にどの画面にいたかを capture。
+  // ログイン後に予約一覧へ到達できていない (interstitial / 複数タブ警告 / 再ログイン)
+  // ケースを目視で特定するため。capture 先を diag に残す。
+  if (!searched || allItems.length === 0) {
+    const capDir = await captureScrapeDebug(page, 'bookings', 'no_results', {
+      secrets: [opts.loginId, opts.password].filter(Boolean),
+      diagnostics: { searched, itemsFound: allItems.length, url: page.url() },
+    });
+    if (capDir) diag.push(`debug capture: ${capDir}`);
   }
 
   // パース
