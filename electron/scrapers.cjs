@@ -1256,25 +1256,44 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
-  // 顧客名。SalonBoard は「氏名(カナ)」が必須 (赤●)。漢字からは読みを生成できない
-  // ため、カナは「元の名前がカタカナならそれ、そうでなければ汎用カナ」を必ず入れる。
+  // 顧客名。SalonBoard は氏名(漢字)に () や数字・記号を許可しないため、使える文字
+  // (ひらがな/カタカナ/漢字/英字/中黒・スペース) 以外を除去する。カナは必須なので
+  // カタカナ以外を除去し、空なら汎用カナで埋める。
   {
-    const name = (p.customer_name && String(p.customer_name).trim()) || 'ゲスト 予約';
-    const parts = name.split(/[\s　]+/);
-    const sei = parts[0] || name;
-    const mei = parts.slice(1).join(' ') || '様'; // 名が無ければダミー
-    // カタカナ判定 (全角カタカナ + 長音)
-    const isKatakana = (s) => /^[゠-ヿー]+$/.test(s);
-    const toKana = (s, fallback) => (isKatakana(s) ? s : fallback);
+    // 氏名(漢字)用: 日本語(かな/カナ/漢字/長音)+英字+中黒・スペースのみ残す。
+    // () 〔〕【】 数字 記号 絵文字 等は除去。
+    const cleanName = (s) =>
+      String(s || '')
+        .replace(/[（）()「」『』【】〔〕\[\]{}<>＜＞]/g, ' ') // 各種カッコ → 空白
+        .replace(/[^぀-ゟ゠-ヿ一-鿿々ーA-Za-zＡ-Ｚａ-ｚ・\s]/g, '') // 許可文字以外を除去
+        .replace(/\s+/g, ' ')
+        .trim();
+    // カナ用: 全角カタカナ + 長音 + 中黒のみ。半角カナは全角化しない (簡易) → 除去。
+    const cleanKana = (s) =>
+      String(s || '')
+        .replace(/[^゠-ヿー・\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const rawName = (p.customer_name && String(p.customer_name).trim()) || 'ゲスト';
+    const cleaned = cleanName(rawName) || 'ゲスト';
+    const parts = cleaned.split(/[\s　]+/).filter(Boolean);
+    const sei = parts[0] || cleaned || 'ゲスト';
+    const mei = parts.slice(1).join('') || '様';
+    // カナ: 元名のカナ部分が取れればそれ、無ければ汎用カナ
+    const seiKana = cleanKana(sei) || 'ヨヤク';
+    const meiKana = cleanKana(mei) || 'キャクサマ';
 
     await page.locator('input#nmSei').first().fill(sei, { timeout: 6_000 }).catch(() => {});
     await page.locator('input#nmMei').first().fill(mei, { timeout: 6_000 }).catch(() => {});
-    // カナ (必須) — 読み不明な漢字には汎用カナを入れて必須チェックを通す
-    await page.locator('input#nmSeiKana').first().fill(toKana(sei, 'ヨヤク'), { timeout: 6_000 }).catch(() => {});
-    await page.locator('input#nmMeiKana').first().fill(toKana(mei, 'キャクサマ'), { timeout: 6_000 }).catch(() => {});
+    // カナ (必須)
+    await page.locator('input#nmSeiKana').first().fill(seiKana, { timeout: 6_000 }).catch(() => {});
+    await page.locator('input#nmMeiKana').first().fill(meiKana, { timeout: 6_000 }).catch(() => {});
   }
   if (p.customer_phone) {
-    await page.locator('input#tel').first().fill(String(p.customer_phone), { timeout: 6_000 }).catch(() => {});
+    // 電話はハイフン無し数字のみ (SB の注意書きに従う)
+    const tel = String(p.customer_phone).replace(/[^\d]/g, '');
+    if (tel) await page.locator('input#tel').first().fill(tel, { timeout: 6_000 }).catch(() => {});
   }
   // 備考 (KIREIDOT予約ID を必ず入れる)
   {
