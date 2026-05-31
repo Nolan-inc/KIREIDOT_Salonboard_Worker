@@ -1209,15 +1209,32 @@ async function tryLogin(page, c) {
     .locator('input[name="password"], input[type="password"]')
     .first();
 
+  // slow モード (テスト時): 人間らしくゆっくり・1文字ずつ入力する。
+  const slow = !!(c && c.slow);
+  const wait = (ms) => page.waitForTimeout(ms).catch(() => {});
   try {
-    await idInput.fill(c.loginId, { timeout: 10_000 });
-    await pwInput.fill(c.password, { timeout: 10_000 });
+    if (slow) {
+      await idInput.click({ timeout: 10_000 }).catch(() => {});
+      await wait(700);
+      await idInput.pressSequentially(String(c.loginId ?? ''), { delay: 140, timeout: 20_000 });
+      await wait(900);
+      await pwInput.click({ timeout: 10_000 }).catch(() => {});
+      await wait(700);
+      await pwInput.pressSequentially(String(c.password ?? ''), { delay: 140, timeout: 20_000 });
+      await wait(1200);
+    } else {
+      await idInput.fill(c.loginId, { timeout: 10_000 });
+      await pwInput.fill(c.password, { timeout: 10_000 });
+    }
   } catch (e) {
     return {
       status: 'failed',
       reason: `cannot find login inputs: ${e instanceof Error ? e.message : e}`,
     };
   }
+
+  // slow モードでは「入力し終わって少し待ってからログインを押す」挙動にする。
+  if (slow) await wait(1000);
 
   // SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn" onclick="dologin(event)">
   // で実装されている (button[type="submit"] は存在しない)。複数のセレクタを順に試し、
@@ -1807,8 +1824,9 @@ async function runTestPush(payload) {
     step('launch', { msg: 'ブラウザ起動 (画面表示)' });
     const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
     try {
-      // テストは画面表示 (目視確認用)。完全版 Chromium が無ければ headless に自動フォールバック。
-      browser = await chromium.launch({ headless: false, slowMo: 250, args: launchArgs });
+      // テストは画面表示 (目視確認用)。各操作をゆっくり (slowMo 大きめ) にして
+      // 動きが目で追えるようにする。完全版 Chromium が無ければ headless に自動フォールバック。
+      browser = await chromium.launch({ headless: false, slowMo: 700, args: launchArgs });
     } catch (e) {
       step('launch', { msg: `画面表示の起動に失敗 (${e?.message?.split('\n')[0] ?? e})。headless で続行します` });
       browser = await chromium.launch({ headless: true, args: launchArgs });
@@ -1826,7 +1844,9 @@ async function runTestPush(payload) {
     if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
     if (auth !== 'logged_in') {
       // creds は { loginId, password, baseUrl }。tryLogin はこの形をそのまま受け取る。
-      const lr = await tryLogin(page, creds);
+      // テストは slow:true で人間らしくゆっくり入力する。
+      step('login', { msg: 'ID/パスワードをゆっくり入力中…' });
+      const lr = await tryLogin(page, { ...creds, slow: true });
       if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
       await saveStorageState(ctx, ssPath);
     }
