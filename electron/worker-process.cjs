@@ -724,7 +724,7 @@ async function processShop(target, channels, runId, opts = {}) {
     if (channelSet.has('bookings')) {
       try {
         emit('shop:progress', { shopId, step: 'bookings', msg: '予約一覧を取得中…' });
-        const { rows, debug } = await scrapeBookings(page);
+        const { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl });
         const sent = await sendBookings(shopId, rows);
         counts.bookings = sent;
         const skipNote =
@@ -732,8 +732,9 @@ async function processShop(target, channels, runId, opts = {}) {
             ? ` skip例:[${debug.sampleSkipped.slice(0, 2).join('|').slice(0, 200)}]`
             : '';
         const rangeNote = debug.range ? ` 範囲:${debug.range}` : '';
+        const durNote = debug.durationFixed ? ` 終了時刻補正${debug.durationFixed}件` : '';
         summary.push(
-          `予約 ${sent}/${rows.length}件 (検出${debug.itemsFound}${rangeNote}${skipNote})`,
+          `予約 ${sent}/${rows.length}件 (検出${debug.itemsFound}${rangeNote}${durNote}${skipNote})`,
         );
         if (debug.diag?.length) {
           emit('log', {

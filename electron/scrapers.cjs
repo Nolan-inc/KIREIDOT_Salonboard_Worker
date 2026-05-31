@@ -793,6 +793,18 @@ async function scrapeBookings(page, opts = {}) {
       notes: null,
     });
   }
+  // 終了時刻(所要時間)の補正:
+  // 予約一覧には終了時刻が無く duration が取れない。スケジュール画面の
+  // scheduleTimeZoneSetting [開始,終了] から、各日・各スタッフ列の予約ブロックを
+  // 取得し、(同日+同開始時刻+同スタッフ) が一意なものだけ duration_min を補正する。
+  let durationFixed = 0;
+  try {
+    durationFixed = await enrichDurationsFromSchedule(page, rows, opts.baseUrl);
+    diag.push(`duration補正: ${durationFixed} 件`);
+  } catch (e) {
+    diag.push(`duration補正 失敗: ${e?.message ?? e}`);
+  }
+
   return {
     rows,
     debug: {
@@ -800,10 +812,122 @@ async function scrapeBookings(page, opts = {}) {
       parsed: rows.length,
       skipped,
       sampleSkipped,
+      durationFixed,
       range: `${range.fromStr} 〜 ${range.toStr}`,
       diag,
     },
   };
+}
+
+/**
+ * スケジュール画面から各予約の [開始,終了] を取得し、rows の duration_min を補正する。
+ * マッチングキー: 日付(YYYYMMDD) + 開始HHMM + スタッフ(external_id or 表示名)。
+ * 同キーのスケジュールブロックが一意なものだけ補正 (誤補正を避ける)。
+ * @returns 補正した件数
+ */
+async function enrichDurationsFromSchedule(page, rows, baseUrl) {
+  const base = baseUrl || 'https://salonboard.com/';
+  if (!rows || rows.length === 0) return 0;
+
+  // rows から対象日付 (JST) を集める
+  const datesNeeded = new Set();
+  for (const r of rows) {
+    const jst = new Date(Date.parse(r.scheduled_at) + 9 * 3600_000);
+    const ymd = `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, '0')}${String(jst.getUTCDate()).padStart(2, '0')}`;
+    datesNeeded.add(ymd);
+  }
+  // 暴走防止 (最大 40 日分)
+  const dates = Array.from(datesNeeded).slice(0, 40);
+
+  // 日付 -> [{ staffExt, staffName, customer, startHHMM, endMin, startMin }]
+  const byDate = new Map();
+  for (const ymd of dates) {
+    try {
+      const u = new URL('/KLP/schedule/salonSchedule/', base);
+      u.searchParams.set('date', ymd);
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      const blocks = await page.evaluate(() => {
+        const out = [];
+        // スタッフ列ヘッダの external_id 順
+        const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]'))
+          .map((el) => {
+            const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
+            return {
+              ext: m ? m[1].toUpperCase() : null,
+              name: (el.querySelector('.scheduleLink')?.getAttribute('title') || el.textContent || '').trim(),
+            };
+          });
+        // スタッフ側テーブルの各 line (= スタッフ列順)
+        const staffTable = document.querySelector('.jscScheduleMainTableStaff');
+        if (!staffTable) return out;
+        const lines = Array.from(staffTable.querySelectorAll('.scheduleMainTableLine'));
+        lines.forEach((line, i) => {
+          const head = heads[i] || { ext: null, name: null };
+          const resvs = Array.from(line.querySelectorAll('.scheduleReservation'));
+          for (const rv of resvs) {
+            const tzEl = rv.querySelector('.scheduleTimeZoneSetting');
+            const nameEl = rv.querySelector('.scheduleReserveName');
+            const tz = tzEl ? (tzEl.textContent || '') : '';
+            const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
+            if (!m) continue;
+            out.push({
+              staffExt: head.ext,
+              staffName: (head.name || '').replace(/\s*様$/, '').trim(),
+              customer: (nameEl?.getAttribute('title') || nameEl?.textContent || '').replace(/\s*様$/, '').trim(),
+              startMin: parseInt(m[1], 10) * 60 + parseInt(m[2], 10),
+              endMin: parseInt(m[3], 10) * 60 + parseInt(m[4], 10),
+              startHHMM: `${m[1].padStart(2, '0')}:${m[2]}`,
+            });
+          }
+        });
+        return out;
+      });
+      byDate.set(ymd, blocks);
+    } catch (_e) {
+      // この日付は補正できないだけ。続行。
+    }
+  }
+
+  // rows を補正
+  let fixed = 0;
+  for (const r of rows) {
+    const jst = new Date(Date.parse(r.scheduled_at) + 9 * 3600_000);
+    const ymd = `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, '0')}${String(jst.getUTCDate()).padStart(2, '0')}`;
+    const startMin = jst.getUTCHours() * 60 + jst.getUTCMinutes();
+    const blocks = byDate.get(ymd);
+    if (!blocks || blocks.length === 0) continue;
+
+    const rowStaffExt = (r.staff_external_id || '').toUpperCase();
+    const rowStaffName = (r.staff_name || '').replace(/\s*様$/, '').replace(/^\(.*?\)/, '').trim();
+
+    // 同開始時刻のブロックに絞る
+    let cands = blocks.filter((b) => b.startMin === startMin);
+    // スタッフで絞る (external_id 優先、無ければ表示名で部分一致)
+    if (rowStaffExt) {
+      const byExt = cands.filter((b) => b.staffExt === rowStaffExt);
+      if (byExt.length) cands = byExt;
+    } else if (rowStaffName) {
+      const byName = cands.filter((b) => b.staffName && (b.staffName === rowStaffName || b.staffName.includes(rowStaffName) || rowStaffName.includes(b.staffName)));
+      if (byName.length) cands = byName;
+    }
+    // さらに顧客名で絞れるなら絞る (一意性を上げる)
+    const rowCust = (r.customer_name || '').replace(/\s*様$/, '').trim();
+    if (cands.length > 1 && rowCust) {
+      const byCust = cands.filter((b) => b.customer && (b.customer === rowCust || b.customer.includes(rowCust) || rowCust.includes(b.customer)));
+      if (byCust.length) cands = byCust;
+    }
+
+    // 一意に決まったものだけ補正
+    if (cands.length === 1) {
+      const dur = cands[0].endMin - cands[0].startMin;
+      if (dur > 0 && dur <= 24 * 60) {
+        r.duration_min = dur;
+        fixed++;
+      }
+    }
+  }
+  return fixed;
 }
 
 /**
