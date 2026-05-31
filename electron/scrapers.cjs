@@ -1251,11 +1251,10 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     await page.locator('textarea#rsvEtc').first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
-  // 空き枠/重複エラー検出
-  const slotError = await page.locator('text=/予約できません|空いて|満員|埋ま|重複/').count().catch(() => 0);
-  if (slotError > 0) {
-    return fail('SalonBoard側で対象時間が空いていません', 'SLOT_NOT_AVAILABLE', false);
-  }
+  // ※ 旧実装はここで body 全文を /空いて|重複/ 等で検索していたが、フォームの
+  //    説明文 (例「空いている時間を選択」) に誤反応して、実際は空いていても
+  //    SLOT_NOT_AVAILABLE になっていた。空き枠/重複の本当のエラーは「登録する」
+  //    送信後にエラー領域に出るので、ここでの事前チェックは廃止する。
 
   const confirmed = {
     confirmed_customer_name: p.customer_name ?? null,
@@ -1282,6 +1281,20 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('登録後に reCAPTCHA が表示され成否判定不能', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // 送信後のエラー領域だけを見る (body 全文ではなく、エラー専用の要素に限定)。
+  // 空き枠不足/重複はここに出る。説明文への誤反応を避ける。
+  const errText = await page
+    .locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage, [class*="error" i]')
+    .first()
+    .innerText()
+    .catch(() => '');
+  if (errText && /空いて|空き|満員|埋ま|重複|登録できません|予約できません|エラー/.test(errText)) {
+    if (/空いて|空き|満員|埋ま/.test(errText)) {
+      return fail(`SalonBoard側で対象時間が空いていません (${errText.slice(0, 60)})`, 'SLOT_NOT_AVAILABLE', false);
+    }
+    return fail(`登録時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
   }
 
   // 完了画面から reserveId / detail_url
