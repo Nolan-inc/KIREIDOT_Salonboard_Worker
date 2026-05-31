@@ -399,6 +399,11 @@ ipcMain.handle('worker:sync', async (_event, payload) => {
   const ok = postToWorker({ type: 'sync', payload: merged });
   return { ok };
 });
+ipcMain.handle('worker:test-push', async (_event, payload) => {
+  // 単発の予約書き込みテスト (ジョブキューを通さない)。
+  const ok = postToWorker({ type: 'test-push', payload });
+  return { ok };
+});
 ipcMain.handle('worker:abort', async () => {
   const ok = postToWorker({ type: 'abort' });
   return { ok };

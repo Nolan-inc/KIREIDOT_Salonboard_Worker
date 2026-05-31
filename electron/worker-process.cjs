@@ -1773,6 +1773,87 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
 }
 
 // メッセージハンドリング
+/**
+ * 単発の予約書き込みテスト。ジョブキューを通さず、画面から渡された
+ * shop/staff/menu/日時で直接 pushBookingViaForm を実行する。各ステップを
+ * push:test イベントで返し、画面に表示する (制約テスト用)。
+ *
+ * payload: { shopId, staffExternalId, staffName, menuName, scheduledAt,
+ *            durationMin, customerName, enablePush }
+ */
+async function runTestPush(payload) {
+  const step = (s, extra = {}) => emit('push:test', { step: s, ...extra });
+  const p = payload || {};
+  if (!p.shopId || !p.staffExternalId || !p.menuName || !p.scheduledAt) {
+    step('done', { ok: false, error: '必須項目が不足 (shop/staff/menu/日時)' });
+    return;
+  }
+  step('start', { msg: `テスト開始: ${p.scheduledAt} staff=${p.staffExternalId} menu=${p.menuName} 実登録=${p.enablePush ? 'ON' : 'OFF'}` });
+
+  let creds;
+  try {
+    creds = await revealCredentials(p.shopId);
+  } catch (e) {
+    step('done', { ok: false, error: `認証情報の取得に失敗: ${e?.message ?? e}` });
+    return;
+  }
+  const baseUrl = creds.base_url || 'https://salonboard.com/';
+
+  let browser = null;
+  try {
+    step('launch', { msg: 'ブラウザ起動 (画面表示)' });
+    browser = await chromium.launch({
+      headless: false, // テストは必ず画面表示 (目視確認用)
+      slowMo: 250,
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'],
+    });
+    const ssPath = storageStatePathFor(p.shopId);
+    const ctx = await browser.newContext({
+      ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1366, height: 900 },
+    });
+    const page = await ctx.newPage();
+
+    step('login', { msg: 'ログイン確認中' });
+    let auth = await isLoggedIn(page, baseUrl);
+    if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
+    if (auth !== 'logged_in') {
+      const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password });
+      if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
+      await saveStorageState(ctx, ssPath);
+    }
+    step('login_ok', { msg: 'ログイン成功' });
+
+    step('form', { msg: '登録フォームを開いて入力中' });
+    const result = await pushBookingViaForm(page, {
+      booking_id: `test-${Date.now()}`,
+      scheduled_at: p.scheduledAt,
+      duration_min: p.durationMin || 60,
+      salonboard_staff_external_id: p.staffExternalId,
+      staff_name: p.staffName || null,
+      salonboard_menu_name: p.menuName,
+      customer_name: p.customerName || 'テスト 予約',
+      notes: null,
+      kireidot_ref: 'KIREIDOT予約ID: TEST',
+    }, { baseUrl, enablePush: !!p.enablePush });
+
+    if (result.status === 'ok') {
+      step('done', { ok: true, registered: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null, msg: `✅ 登録完了 external_id=${result.externalId ?? '?'}` });
+    } else if (result.status === 'confirm_only') {
+      step('done', { ok: true, registered: false, msg: '🟡 入力まで成功 (実登録OFFのため登録ボタンは押していません)。ON にすると登録します。' });
+    } else {
+      step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode}] ${result.reason}` });
+    }
+    // 目視できるよう少し待ってから閉じる
+    await page.waitForTimeout(3000).catch(() => {});
+    await browser.close().catch(() => {});
+  } catch (e) {
+    step('done', { ok: false, error: `例外: ${e?.message ?? e}` });
+    await browser?.close().catch(() => {});
+  }
+}
+
 process.parentPort?.on('message', async (event) => {
   const m = event?.data ?? event;
   if (!m || typeof m !== 'object') return;
@@ -1801,6 +1882,15 @@ process.parentPort?.on('message', async (event) => {
           break;
         }
         await runSync(m.payload ?? {});
+        break;
+      case 'test-push':
+        try {
+          await ensureReady();
+        } catch (e) {
+          emit('push:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
+          break;
+        }
+        await runTestPush(m.payload ?? {});
         break;
       case 'abort':
         abortRequested = true;

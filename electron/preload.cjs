@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('kireidotApp', {
   // onWorkerEvent: worker からのイベント (boot/ready/log/run:*/shop:*/error) を購読
   workerInit: (payload) => ipcRenderer.invoke('worker:init', payload),
   workerSync: (payload) => ipcRenderer.invoke('worker:sync', payload),
+  workerTestPush: (payload) => ipcRenderer.invoke('worker:test-push', payload),
   workerAbort: () => ipcRenderer.invoke('worker:abort'),
   onWorkerEvent: (handler) => {
     const listener = (_event, msg) => handler(msg);

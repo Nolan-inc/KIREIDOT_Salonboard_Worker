@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, BookOpen, CheckCircle2, RefreshCcw } from 'lucide-react';
+import { Loader2, BookOpen, CheckCircle2, RefreshCcw, FlaskConical, AlertTriangle } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchMenusMerged, type MergedMenuRow } from '../lib/data';
+import { fetchMenusMerged, fetchStaffList, fetchMenuList, type MergedMenuRow, type StaffRow, type MenuRow } from '../lib/data';
 import { useSyncController } from '../lib/sync-controller';
 
 const SOURCE_FILTERS = ['すべて', 'salonboard', 'kireidot'] as const;
@@ -67,6 +67,9 @@ export function Menus() {
 
   return (
     <div className="flex flex-col gap-5 pt-4">
+      {/* 予約書き込みテスト (制約が通るかだけを単発で検証) */}
+      <PushTestPanel />
+
       <div className="flex flex-col items-stretch gap-3 lg:flex-row lg:items-center lg:justify-between">
         <p className="text-[13px] text-ink-soft">
           {loading ? '読み込み中…' : `全 ${menus.length} 件 (SalonBoard ${counts.salonboard} / KIREIDOT ${counts.kireidot})`}
@@ -193,5 +196,208 @@ export function Menus() {
         )}
       </Card>
     </div>
+  );
+}
+
+// =====================================================================
+// 予約書き込みテストパネル
+// ジョブキューを通さず、選んだスタッフ・メニュー・日時 (既定 2026/6/10 13:00) で
+// 1 件だけ SalonBoard 登録フォームを操作し、制約が通るかを検証する。
+// 「実登録」ON のときだけ登録ボタンを押す。各ステップを画面に表示。
+// =====================================================================
+type TestLine = { at: string; text: string; kind: 'info' | 'ok' | 'error' };
+
+function PushTestPanel() {
+  const scope = useEffectiveScope();
+  const [staff, setStaff] = useState<StaffRow[]>([]);
+  const [menus, setMenus] = useState<MenuRow[]>([]);
+  const [staffExt, setStaffExt] = useState('');
+  const [menuName, setMenuName] = useState('');
+  const [date, setDate] = useState('2026-06-10');
+  const [time, setTime] = useState('13:00');
+  const [duration, setDuration] = useState('60');
+  const [customer, setCustomer] = useState('テスト 予約');
+  const [enablePush, setEnablePush] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [lines, setLines] = useState<TestLine[]>([]);
+  const [loadingOpts, setLoadingOpts] = useState(true);
+
+  const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+
+  useEffect(() => {
+    if (!scope) return;
+    let cancelled = false;
+    setLoadingOpts(true);
+    Promise.all([fetchStaffList(scope), fetchMenuList(scope)])
+      .then(([st, mn]) => {
+        if (cancelled) return;
+        const withExt = st.filter((s) => !!s.external_id);
+        setStaff(withExt);
+        setMenus(mn);
+        if (withExt[0]?.external_id) setStaffExt(withExt[0].external_id);
+        if (mn[0]) setMenuName(mn[0].name);
+      })
+      .finally(() => !cancelled && setLoadingOpts(false));
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
+
+  // worker からのテスト結果イベントを購読
+  useEffect(() => {
+    if (!bridge?.onWorkerEvent) return;
+    return bridge.onWorkerEvent((msg) => {
+      if (msg.type !== 'push:test') return;
+      const p = msg.payload;
+      const now = new Date().toLocaleTimeString('ja-JP');
+      if (p.step === 'done') {
+        setRunning(false);
+        if (p.ok) {
+          setLines((c) => [...c, { at: now, text: p.msg || (p.registered ? '✅ 登録完了' : '🟡 入力まで成功'), kind: 'ok' }]);
+        } else {
+          setLines((c) => [...c, { at: now, text: p.error || `失敗 (${p.errorCode || 'unknown'})`, kind: 'error' }]);
+        }
+      } else {
+        setLines((c) => [...c, { at: now, text: p.msg || p.step, kind: 'info' }]);
+      }
+    });
+  }, [bridge]);
+
+  const canRun =
+    !!scope?.shopId && !!staffExt && !!menuName.trim() && /^\d{4}-\d{2}-\d{2}$/.test(date) && /^\d{1,2}:\d{2}$/.test(time) && !running;
+
+  const run = async () => {
+    if (!scope?.shopId || !bridge?.workerTestPush) return;
+    setLines([]);
+    setRunning(true);
+    const sel = staff.find((s) => s.external_id === staffExt);
+    const scheduledAt = `${date}T${time.length === 4 ? '0' + time : time}:00+09:00`;
+    await bridge.workerTestPush({
+      shopId: scope.shopId,
+      staffExternalId: staffExt,
+      staffName: sel?.full_name ?? null,
+      menuName: menuName.trim(),
+      scheduledAt,
+      durationMin: Number(duration) > 0 ? Number(duration) : 60,
+      customerName: customer.trim() || null,
+      enablePush,
+    });
+    // 安全網: 90 秒で running 解除 (done が来なかった場合)
+    setTimeout(() => setRunning(false), 90_000);
+  };
+
+  if (!bridge?.workerTestPush) {
+    return null; // ブラウザ版では非表示
+  }
+
+  const ic = 'h-10 w-full rounded-[10px] border border-hairline bg-white px-3 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20';
+
+  return (
+    <Card className="border-amber-200">
+      <div className="border-b border-hairline/70 bg-amber-50/60 px-5 py-3">
+        <div className="flex items-center gap-2 text-[14px] font-bold text-ink">
+          <FlaskConical className="h-4 w-4 text-amber-600" /> 予約書き込みテスト
+        </div>
+        <p className="mt-0.5 text-[11px] text-ink-soft">
+          選んだスタッフ・メニュー・日時で 1 件だけ SalonBoard 登録フォームを操作し、書き込めるか検証します
+          (ジョブキューを通しません)。
+        </p>
+      </div>
+      <div className="px-5 py-4">
+        {!scope?.shopId ? (
+          <p className="text-[12px] text-ink-soft">先に店舗を選択してください。</p>
+        ) : loadingOpts ? (
+          <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+            <Loader2 className="h-4 w-4 animate-spin" /> スタッフ・メニュー読み込み中…
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">日付</span>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={ic} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">時刻</span>
+                <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={ic} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">所要(分)</span>
+                <input type="number" min={5} step={5} value={duration} onChange={(e) => setDuration(e.target.value)} className={ic} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">顧客名</span>
+                <input type="text" value={customer} onChange={(e) => setCustomer(e.target.value)} className={ic} />
+              </label>
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">担当スタッフ</span>
+                {staff.length === 0 ? (
+                  <span className="text-[11px] text-amber-700">external_id 付きスタッフ無し (先にスタッフ同期)</span>
+                ) : (
+                  <select value={staffExt} onChange={(e) => setStaffExt(e.target.value)} className={ic}>
+                    {staff.map((s) => (
+                      <option key={s.id} value={s.external_id ?? ''}>{s.full_name}（{s.external_id}）</option>
+                    ))}
+                  </select>
+                )}
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">メニュー</span>
+                {menus.length === 0 ? (
+                  <input type="text" value={menuName} onChange={(e) => setMenuName(e.target.value)} placeholder="メニュー名 (手入力)" className={ic} />
+                ) : (
+                  <select value={menuName} onChange={(e) => setMenuName(e.target.value)} className={ic}>
+                    {menus.map((m) => (
+                      <option key={m.id} value={m.name}>{m.category ? `[${m.category}] ` : ''}{m.name}</option>
+                    ))}
+                  </select>
+                )}
+              </label>
+            </div>
+
+            <label className="flex items-center gap-2 text-[12px]">
+              <input type="checkbox" checked={enablePush} onChange={(e) => setEnablePush(e.target.checked)} className="h-4 w-4 accent-brand" />
+              <span className={enablePush ? 'font-semibold text-amber-700' : 'text-ink-soft'}>
+                実登録する (ON: 登録ボタンを押して SalonBoard に実際に登録 / OFF: 入力まで)
+              </span>
+            </label>
+
+            <div>
+              <button
+                type="button"
+                onClick={run}
+                disabled={!canRun}
+                className="inline-flex h-10 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-5 text-[13px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+              >
+                {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+                {running ? 'テスト実行中… (ブラウザが開きます)' : 'テスト実行'}
+              </button>
+            </div>
+
+            {lines.length > 0 && (
+              <div className="mt-1 rounded-[10px] border border-hairline bg-surface-soft/60 p-3">
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">実行ログ</div>
+                <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                  {lines.map((l, i) => (
+                    <div
+                      key={i}
+                      className={
+                        l.kind === 'ok' ? 'text-emerald-700' : l.kind === 'error' ? 'text-red-600' : 'text-ink-soft'
+                      }
+                    >
+                      <span className="text-muted-faint">{l.at}</span>{' '}
+                      {l.kind === 'error' && <AlertTriangle className="mr-0.5 inline h-3 w-3" />}
+                      {l.kind === 'ok' && <CheckCircle2 className="mr-0.5 inline h-3 w-3" />}
+                      {l.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }

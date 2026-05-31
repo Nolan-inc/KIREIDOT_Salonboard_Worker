@@ -75,7 +75,24 @@ type WorkerEvent =
         };
       };
     }
-  | { type: 'exited'; payload: { code: number | null } };
+  | { type: 'exited'; payload: { code: number | null } }
+  | {
+      type: 'push:done';
+      payload: { bookingId?: string; ok: boolean; externalId?: string | null; detailUrl?: string | null; reason?: string; errorCode?: string };
+    }
+  | {
+      type: 'push:test';
+      payload: {
+        step: string;
+        ok?: boolean;
+        registered?: boolean;
+        msg?: string;
+        error?: string;
+        errorCode?: string;
+        externalId?: string | null;
+        detailUrl?: string | null;
+      };
+    };
 
 interface Window {
   salondesk?: {
@@ -122,6 +139,17 @@ interface Window {
     }) => Promise<{ ok: boolean }>;
     /** 現在の同期を中断 */
     workerAbort: () => Promise<{ ok: boolean }>;
+    /** 単発の予約書き込みテスト (ジョブキューを通さない)。結果は push:test イベントで届く。 */
+    workerTestPush: (payload: {
+      shopId: string;
+      staffExternalId: string;
+      staffName?: string | null;
+      menuName: string;
+      scheduledAt: string;
+      durationMin?: number;
+      customerName?: string | null;
+      enablePush?: boolean;
+    }) => Promise<{ ok: boolean }>;
     /** worker からの全イベントを購読。返値は解除関数 */
     onWorkerEvent: (handler: (msg: WorkerEvent) => void) => () => void;
 
