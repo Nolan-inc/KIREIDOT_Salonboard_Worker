@@ -39,8 +39,18 @@ let supabase = null;
 let initReady = false;
 let initPromise = null;
 let running = false;
+let runStartedAt = 0;
 let abortRequested = false;
 let currentBrowser = null;
+
+/**
+ * 全体同期 (runSync) の stale タイムアウト。
+ * runSync は scraping + push_booking (SalonBoard フォーム書込) を含み、
+ * Playwright が固まると finally に到達せず running が true のまま残る
+ * (= 以後ずっと「同期は既に実行中です」になる) 。
+ * 開始から下記時間を超えた running は「ハング」とみなし、新規同期要求で奪取する。
+ */
+const RUN_STALE_MS = 15 * 60_000;
 
 /**
  * 旧 Supabase 直読み fallback を許可するか (v0.2.5)。
@@ -1717,14 +1727,29 @@ async function postCallback(body) {
 
 async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
   if (running) {
-    emit('error', { msg: '同期は既に実行中です' });
-    return;
+    const elapsed = Date.now() - runStartedAt;
+    if (elapsed < RUN_STALE_MS) {
+      emit('error', {
+        msg: `同期は既に実行中です (経過 ${Math.round(elapsed / 1000)} 秒)。完了までお待ちください。`,
+      });
+      return;
+    }
+    // stale: 前回の同期がハングしたまま running が残っている → 強制的に奪取して継続。
+    emit('log', {
+      level: 'warn',
+      msg: `前回の同期が ${Math.round(elapsed / 60000)} 分以上応答していないため、ハングとみなして再実行します`,
+      at: new Date().toISOString(),
+    });
+    abortRequested = true;
+    await currentBrowser?.close().catch(() => {});
+    currentBrowser = null;
   }
   // 同期ごとに渡される実登録トグルの最新値を反映 (init 後の変更も効く)。
   if (enablePush !== undefined && deviceAuth) {
     deviceAuth.enablePush = !!enablePush;
   }
   running = true;
+  runStartedAt = Date.now();
   abortRequested = false;
   let runId = null;
   try {
@@ -1788,6 +1813,7 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
     emit('error', { msg: e instanceof Error ? e.message : String(e) });
   } finally {
     running = false;
+    runStartedAt = 0;
     abortRequested = false;
   }
 }
@@ -1945,6 +1971,13 @@ process.parentPort?.on('message', async (event) => {
       case 'abort':
         abortRequested = true;
         await currentBrowser?.close().catch(() => {});
+        currentBrowser = null;
+        // ハングして finally に到達しないケースに備え、ロックも明示的に解放する。
+        // (正常進行中なら runSync 側の finally でも false になる)
+        running = false;
+        runStartedAt = 0;
+        emit('log', { level: 'warn', msg: '同期を中断しました (ロック解放)', at: new Date().toISOString() });
+        emit('run:end', { total: 0, ok: 0, ng: 0, aborted: true, runId: null });
         break;
       default:
         log(`unknown message type: ${m.type}`, 'warn');
