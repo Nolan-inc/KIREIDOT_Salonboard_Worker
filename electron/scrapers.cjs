@@ -1054,10 +1054,21 @@ async function extractBookingItemsFromCurrentPage(page) {
       .map((tr) => {
         const tds = Array.from(tr.querySelectorAll('td'));
         if (tds.length === 0) return null;
-        // 予約詳細リンクから external_id を取得
+        // 予約詳細リンクから external_id を取得する。
+        // SalonBoard は予約種別でリンクの形が違う:
+        //   - ネット予約(BF/BE): /KLP/reserve/net/reserveDetail/?reserveId=BF...
+        //   - 電話/外部予約(YG): /KLP/reserve/ext/extReserveDetail/?reserveId=YG...  ← 大文字Rを含む
+        // CSS の [href*="reserveDetail"] は **大文字小文字を区別する**ため
+        // extReserveDetail(大文字R) にマッチせず、先頭の salonSchedule リンクを
+        // 誤って拾って external_id がフォールバックになっていた。
+        // → reserveId= を持つリンクを最優先で全 a から探す (チャート/スケジュール除外)。
+        const anchors = Array.from(tr.querySelectorAll('a[href]'));
         const link =
-          tr.querySelector('a[href*="reserveDetail"], a[href*="reservation"]') ||
-          tr.querySelector('a[href]');
+          anchors.find((a) => /reserveId=/i.test(a.getAttribute('href') || '')) ||
+          anchors.find((a) => /reserveDetail|reservation/i.test(a.getAttribute('href') || '')) ||
+          anchors.find((a) => !/salonSchedule|\/charts\//i.test(a.getAttribute('href') || '')) ||
+          anchors[0] ||
+          null;
         // セルごとに multiline 文字列 (改行区切り) を取り出す
         const cells = tds.map(multilineTxt);
         const rowText = cells.join('\n');
@@ -2325,5 +2336,6 @@ module.exports = {
     extractCustomerCode,
     mapBookingStatus,
     cleanPhone,
+    extractBookingItemsFromCurrentPage,
   },
 };
