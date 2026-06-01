@@ -77,6 +77,8 @@ export function Bookings() {
   const [reloadKey, setReloadKey] = useState(0);
   // 週送り (0=今週, +7=翌週, -7=先週 …)
   const [weekOffset, setWeekOffset] = useState(0);
+  // 表示ビュー (台帳がデフォルト)
+  const [view, setView] = useState<'ledger' | 'list'>('ledger');
 
   // --- 行ごと「サロンボードに挿入」 ---
   const [staffOptions, setStaffOptions] = useState<StaffRow[]>([]);
@@ -250,6 +252,29 @@ export function Bookings() {
           </button>
         </div>
         <div className="flex items-center gap-2">
+          {/* ビュー切替 (台帳 / リスト) */}
+          <div className="inline-flex overflow-hidden rounded-[12px] border border-hairline bg-white/80">
+            <button
+              type="button"
+              onClick={() => setView('ledger')}
+              className={
+                'h-9 px-3 text-[12px] font-semibold ' +
+                (view === 'ledger' ? 'bg-brand-gradient text-white' : 'text-ink-soft hover:bg-brand-light/40')
+              }
+            >
+              台帳
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('list')}
+              className={
+                'h-9 px-3 text-[12px] font-semibold ' +
+                (view === 'list' ? 'bg-brand-gradient text-white' : 'text-ink-soft hover:bg-brand-light/40')
+              }
+            >
+              リスト
+            </button>
+          </div>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-faint" size={14} />
             <input
@@ -322,6 +347,20 @@ export function Bookings() {
         })}
       </div>
 
+      {view === 'ledger' && (
+        <LedgerView
+          bookings={filtered}
+          staff={staffOptions}
+          loading={loading}
+          displayName={displayName}
+          classify={classifySbSync}
+          insertingId={insertingId}
+          insertResults={insertResults}
+          onInsert={insertToSalonboard}
+        />
+      )}
+
+      {view === 'list' && (
       <Card className="overflow-hidden">
         {loading ? (
           <div className="flex items-center gap-2 px-5 py-10 text-[13px] text-ink-soft">
@@ -450,6 +489,7 @@ export function Bookings() {
           </table>
         )}
       </Card>
+      )}
 
       {modalOpen && scope?.shopId && (
         <NewBookingModal
@@ -891,5 +931,217 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
       <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
       {children}
     </label>
+  );
+}
+
+// =====================================================================
+// 台帳ビュー (スタッフ縦 × 時間横のタイムライン)
+// 読み込み済みの週内予約から1日分を選び、スタッフ行に予約ブロックを配置する。
+// 各ブロックに SalonBoard バッジ、「KIREIDOTのみ」には挿入ボタンを付ける。
+// =====================================================================
+const LEDGER_START_HOUR = 9; // 表示開始
+const LEDGER_END_HOUR = 22; // 表示終了
+const PX_PER_MIN = 1.4; // 1分あたりのピクセル幅
+
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function LedgerView({
+  bookings,
+  staff,
+  loading,
+  displayName,
+  classify,
+  insertingId,
+  insertResults,
+  onInsert,
+}: {
+  bookings: BookingRow[];
+  staff: StaffRow[];
+  loading: boolean;
+  displayName: (b: BookingRow) => string;
+  classify: (b: BookingRow) => SbBadge;
+  insertingId: string | null;
+  insertResults: Record<string, { ok: boolean; msg: string }>;
+  onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
+}) {
+  // 読み込み済み予約に含まれる日付一覧 (昇順)
+  const days = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of bookings) set.add(ymd(new Date(b.scheduled_at)));
+    return Array.from(set).sort();
+  }, [bookings]);
+
+  const [day, setDay] = useState<string>('');
+  useEffect(() => {
+    // 日付が未選択 or 範囲外なら先頭日にする
+    if (days.length && (!day || !days.includes(day))) setDay(days[0]);
+  }, [days, day]);
+
+  // 選択日の予約
+  const dayBookings = useMemo(
+    () => bookings.filter((b) => ymd(new Date(b.scheduled_at)) === day),
+    [bookings, day],
+  );
+
+  // スタッフ行: external_id 付きスタッフ + 「未割当」行
+  const staffRows = useMemo(() => {
+    const rows = staff.map((s) => ({ key: s.external_id ?? s.id, name: s.full_name, ext: s.external_id ?? null }));
+    rows.push({ key: '__unassigned__', name: '未割当', ext: null });
+    return rows;
+  }, [staff]);
+
+  // 予約をスタッフ行へ割り当てる
+  function staffKeyOf(b: BookingRow): string {
+    if (b.salonboard_staff_external_id) {
+      const hit = staffRows.find((r) => r.ext === b.salonboard_staff_external_id);
+      if (hit) return hit.key;
+    }
+    if (b.salonboard_staff_name) {
+      const hit = staff.find((s) => s.full_name === b.salonboard_staff_name);
+      if (hit) return hit.external_id ?? hit.id;
+    }
+    return '__unassigned__';
+  }
+
+  const hours: number[] = [];
+  for (let h = LEDGER_START_HOUR; h <= LEDGER_END_HOUR; h++) hours.push(h);
+  const gridWidth = (LEDGER_END_HOUR - LEDGER_START_HOUR) * 60 * PX_PER_MIN;
+
+  if (loading) {
+    return (
+      <Card>
+        <div className="flex items-center gap-2 px-5 py-10 text-[13px] text-ink-soft">
+          <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
+        </div>
+      </Card>
+    );
+  }
+  if (days.length === 0) {
+    return (
+      <Card>
+        <div className="px-5 py-10 text-center text-[13px] text-ink-soft">この期間に予約がありません。</div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="overflow-hidden">
+      {/* 日付タブ */}
+      <div className="flex items-center gap-1.5 overflow-x-auto border-b border-hairline/70 bg-white/50 px-3 py-2">
+        {days.map((d) => {
+          const dd = new Date(d + 'T00:00:00');
+          const n = bookings.filter((b) => ymd(new Date(b.scheduled_at)) === d).length;
+          return (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDay(d)}
+              className={
+                'inline-flex shrink-0 items-center gap-1 rounded-full px-3 py-1 text-[12px] font-semibold ' +
+                (day === d ? 'bg-brand-gradient text-white shadow-brand-sm' : 'border border-hairline bg-white/70 text-ink-soft hover:bg-brand-light/40')
+              }
+            >
+              {dd.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short' })}
+              <span className="opacity-70">({n})</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="overflow-x-auto">
+        <div style={{ minWidth: 120 + gridWidth }}>
+          {/* 時間ヘッダ */}
+          <div className="flex border-b border-hairline/70 bg-white/40">
+            <div className="w-[120px] shrink-0 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+              スタッフ
+            </div>
+            <div className="relative" style={{ width: gridWidth, height: 22 }}>
+              {hours.map((h) => (
+                <div
+                  key={h}
+                  className="absolute top-0 border-l border-hairline/50 pl-1 text-[10px] text-muted"
+                  style={{ left: (h - LEDGER_START_HOUR) * 60 * PX_PER_MIN }}
+                >
+                  {h}:00
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* スタッフ行 */}
+          {staffRows.map((row) => {
+            const rowBookings = dayBookings.filter((b) => staffKeyOf(b) === row.key);
+            // 未割当行は予約があるときだけ表示
+            if (row.key === '__unassigned__' && rowBookings.length === 0) return null;
+            return (
+              <div key={row.key} className="flex border-b border-hairline/40 hover:bg-brand-light/10">
+                <div className="flex w-[120px] shrink-0 items-center px-2 py-1 text-[12px] font-semibold text-ink">
+                  <span className="truncate" title={row.name}>{row.name}</span>
+                </div>
+                <div className="relative" style={{ width: gridWidth, height: 56 }}>
+                  {/* 時間グリッド線 */}
+                  {hours.map((h) => (
+                    <div
+                      key={h}
+                      className="absolute top-0 bottom-0 border-l border-hairline/30"
+                      style={{ left: (h - LEDGER_START_HOUR) * 60 * PX_PER_MIN }}
+                    />
+                  ))}
+                  {/* 予約ブロック */}
+                  {rowBookings.map((b) => {
+                    const dt = new Date(b.scheduled_at);
+                    const startMin = dt.getHours() * 60 + dt.getMinutes();
+                    const left = (startMin - LEDGER_START_HOUR * 60) * PX_PER_MIN;
+                    const width = Math.max((b.duration_min ?? 60) * PX_PER_MIN, 30);
+                    const badge = classify(b);
+                    const res = insertResults[b.id];
+                    const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
+                    return (
+                      <div
+                        key={b.id}
+                        className={`absolute top-1 bottom-1 overflow-hidden rounded-[6px] border px-1.5 py-0.5 text-[10px] leading-tight ${
+                          badge.inSalonboard
+                            ? 'border-emerald-200 bg-emerald-50'
+                            : badge.kind === 'salonboard'
+                              ? 'border-sky-200 bg-sky-50'
+                              : 'border-rose-200 bg-rose-50'
+                        }`}
+                        style={{ left, width }}
+                        title={`${dt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}・${b.duration_min ?? 60}分 / ${displayName(b)} / ${badge.label}`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="truncate font-semibold text-ink">
+                            {dt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })} {displayName(b)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className={`rounded px-1 py-px text-[9px] font-bold ${badge.cls}`}>{badge.label}</span>
+                          {canInsert &&
+                            (res ? (
+                              <span className={res.ok ? 'text-emerald-700' : 'text-red-600'}>{res.ok ? '✓' : '×'}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => onInsert(b)}
+                                disabled={!!insertingId}
+                                title="この予約を SalonBoard に挿入"
+                                className="inline-flex items-center rounded bg-brand-gradient px-1 py-px text-[9px] font-bold text-white disabled:opacity-40"
+                              >
+                                {insertingId === b.id ? '…' : 'SB挿入'}
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </Card>
   );
 }
