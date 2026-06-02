@@ -245,25 +245,22 @@ export function Bookings() {
   function changeBooking(b: BookingRow, newIso: string, newDurationMin: number) {
     const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
     if (!scope?.shopId) return;
-    if (!b.external_booking_id) {
-      setChangeResults((r) => ({ ...r, [b.id]: { ok: false, msg: 'SalonBoard 未連携 (external_booking_id 無し) のため SB 変更はできません' } }));
-      return;
-    }
+    const hasSb = !!b.external_booking_id;
     setChangingId(b.id);
     setChangeResults((r) => {
       const { [b.id]: _omit, ...rest } = r;
       return rest;
     });
     void (async () => {
-      // 1) KIREIDOT 側を先に更新
+      // 1) KIREIDOT 側を先に更新 (SB連携の有無に関わらず常に実行)
       const { error } = await updateBookingTimeLocal(b.id, newIso, newDurationMin);
       if (error) {
         setChangeResults((r) => ({ ...r, [b.id]: { ok: false, msg: `KIREIDOT 更新に失敗: ${error}` } }));
         setChangingId((cur) => (cur === b.id ? null : cur));
         return;
       }
-      // 2) SalonBoard 側を worker で変更
-      if (bridge?.workerChangeBooking) {
+      // 2) SalonBoard 連携済み (reserveId あり) なら worker で SB 側も変更
+      if (hasSb && bridge?.workerChangeBooking) {
         void bridge.workerChangeBooking({
           shopId: scope.shopId!,
           bookingId: b.id,
@@ -276,8 +273,13 @@ export function Bookings() {
         });
         setTimeout(() => setChangingId((cur) => (cur === b.id ? null : cur)), 120_000);
       } else {
-        setChangeResults((r) => ({ ...r, [b.id]: { ok: true, msg: 'KIREIDOT のみ更新しました (Electron 環境ではないため SB 未反映)' } }));
+        // SB 未連携 → KIREIDOT のみ更新で完了
+        setChangeResults((r) => ({
+          ...r,
+          [b.id]: { ok: true, msg: hasSb ? 'KIREIDOT のみ更新しました (Electron 環境ではないため SB 未反映)' : 'KIREIDOT の予約時間を変更しました (SalonBoard 未連携)' },
+        }));
         setChangingId((cur) => (cur === b.id ? null : cur));
+        setTimeout(() => setReloadKey((k) => k + 1), 1000);
       }
     })();
   }
@@ -1592,8 +1594,9 @@ function LedgerDetailModal({
   const changeRes = changeResults[b.id];
   const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
   const canCancel = b.status !== 'cancelled';
-  // SalonBoard 連携済み (synced) かつ未キャンセルなら時間変更可
-  const canChange = !!b.external_booking_id && b.status !== 'cancelled';
+  // 未キャンセルなら時間変更可 (SB連携済みは両方、未連携はKIREIDOTのみ更新)
+  const canChange = b.status !== 'cancelled';
+  const sbLinked = !!b.external_booking_id;
   // 時間変更フォーム (datetime-local 用の値を初期化)
   const toLocalInput = (d: Date) => {
     const p = (n: number) => String(n).padStart(2, '0');
@@ -1665,10 +1668,12 @@ function LedgerDetailModal({
           </div>
         )}
 
-        {/* 時間変更フォーム (SB連携済みのみ) */}
+        {/* 時間変更フォーム */}
         {canChange && editMode && (
           <div className="mt-3 rounded-lg border border-hairline bg-brand-light/20 p-3">
-            <div className="mb-2 text-[12px] font-semibold text-ink">予約時間を変更 (KIREIDOT + SalonBoard)</div>
+            <div className="mb-2 text-[12px] font-semibold text-ink">
+              予約時間を変更 {sbLinked ? '(KIREIDOT + SalonBoard)' : '(KIREIDOTのみ・SB未連携)'}
+            </div>
             <div className="flex flex-wrap items-end gap-3">
               <label className="flex flex-col gap-1 text-[11px] text-ink-soft">
                 日時
@@ -1717,15 +1722,15 @@ function LedgerDetailModal({
         )}
 
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
-          {/* 時間変更 (SB連携済みのみ・左寄せ) */}
+          {/* 時間変更 */}
           {canChange && !editMode && !changeRes && (
             <button
               type="button"
               onClick={() => setEditMode(true)}
-              title="KIREIDOT と SalonBoard の予約時間を変更します"
+              title={sbLinked ? 'KIREIDOT と SalonBoard の予約時間を変更します' : 'KIREIDOT の予約時間を変更します (SalonBoard 未連携)'}
               className="inline-flex items-center gap-1 rounded-lg border border-brand-400 px-3 py-1.5 text-[13px] font-semibold text-brand-700 hover:bg-brand-light/40"
             >
-              時間を変更
+              {sbLinked ? '時間を変更 (SBも)' : '時間を変更'}
             </button>
           )}
           {/* キャンセル (左寄せ) */}
