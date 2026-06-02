@@ -1569,83 +1569,65 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     // reserveId が無いと SalonBoard 上の予約を一意に特定できない。
     return fail('external_booking_id (SalonBoard 予約ID) が無いためキャンセル対象を特定できません', 'STAFF_MAPPING_NOT_FOUND', true);
   }
-  const when = parseJstPartsForPush(p.scheduled_at);
-  if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
-
-  // 1) 対象日のスケジュール画面を開く
-  const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-  schedUrl.searchParams.set('date', when.yyyymmdd);
-  await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  // 1) reserveId で予約詳細ページを直接開く。
+  //    実DOM (確認済み):
+  //      詳細  : /KLP/reserve/ext/extReserveDetail/?reserveId=YG...
+  //              (ネット予約は net/reserveDetail)
+  //      キャンセル開始ボタン : <a id="fnc_cancel">キャンセルにする</a>
+  //      → ページ内 HTML ダイアログ (confirm() ではない):
+  //          「予約をキャンセルにします。よろしいですか？」
+  //          <a class="...accept">はい</a> / <a class="...deny">いいえ</a>
+  const detailCandidates = [
+    `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+    `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
+  ];
+  let onDetail = false;
+  for (const path of detailCandidates) {
+    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    if ((await page.locator('#fnc_cancel').count().catch(() => 0)) > 0) { onDetail = true; break; }
+  }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
 
-  // 2) reserveId を含むリンク/要素を探して予約ポップアップを開く。
-  //    予約コマは onclick / href / data 属性に reserveId を持つことが多い。
-  const opened = await page.evaluate((rid) => {
-    const hasRid = (el) => {
-      const s = (el.getAttribute('href') || '') + ' ' + (el.getAttribute('onclick') || '') + ' ' +
-        (el.getAttribute('data-reserve-id') || '') + ' ' + (el.id || '') + ' ' + (el.className || '');
-      return s.includes(rid);
-    };
-    // a / div / li / span などから reserveId を含む最初の要素をクリック
-    const all = Array.from(document.querySelectorAll('a,div,li,span,td'));
-    const hit = all.find(hasRid);
-    if (hit) { (hit).click(); return true; }
-    return false;
-  }, reserveId).catch(() => false);
-
-  // ポップアップ表示待ち
-  await page.waitForTimeout(1200);
-  const cap1 = await captureScrapeDebug(page, 'cancel', `popup_${reserveId}`, {
-    diagnostics: { reserveId, opened, url: page.url() },
+  const cap1 = await captureScrapeDebug(page, 'cancel', `detail_${reserveId}`, {
+    diagnostics: { reserveId, onDetail, url: page.url() },
   });
 
-  // 3) キャンセルリンク (btn_schedule_cancel) をクリック
-  let cancelLink = page.locator('a.btn_schedule_cancel:visible').first();
-  if ((await cancelLink.count().catch(() => 0)) === 0) {
-    // ポップアップが開けなかった / セレクタ違い → 予約詳細ページ直開きにフォールバック
-    const detailCandidates = [
-      `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
-      `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
-    ];
-    for (const path of detailCandidates) {
-      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
-      const c = page.locator('a.btn_schedule_cancel, a:has-text("キャンセル"):not(:has-text("キャンセル料")), a[href*="Cancel" i], a[onclick*="cancel" i]').first();
-      if ((await c.count().catch(() => 0)) > 0) { cancelLink = c; break; }
-    }
+  // 既にキャンセル済みなら成功扱い (冪等)
+  const detailText = (await page.locator('body').innerText().catch(() => '')) || '';
+  if (/ステータス[\s\S]{0,30}(キャンセル|取消)/.test(detailText) && (await page.locator('#fnc_cancel').count().catch(() => 0)) === 0) {
+    return { status: 'ok' };
   }
-  if ((await cancelLink.count().catch(() => 0)) === 0) {
-    const cap = await captureScrapeDebug(page, 'cancel', `no_cancel_btn_${reserveId}`, { diagnostics: { reserveId, url: page.url() } });
-    return fail(`キャンセルボタンが見つかりませんでした (reserveId=${reserveId}${cap ? `, capture=${cap}` : ''})`, 'UNKNOWN_ERROR', true);
+
+  const cancelBtn = page.locator('#fnc_cancel').first();
+  if ((await cancelBtn.count().catch(() => 0)) === 0) {
+    return fail(`キャンセルボタン(#fnc_cancel)が見つかりませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
   if (!enableCancel) {
     return { status: 'confirm_only' };
   }
 
-  // 4) confirm() ダイアログを accept するハンドラを付けてキャンセルを実行
-  let dialogAccepted = false;
-  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  // 2) 「キャンセルにする」をクリック → HTML ダイアログを待つ
+  // (念のためネイティブ confirm が出るケースにも accept ハンドラを張る)
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
+  let confirmClicked = false;
   try {
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
-      cancelLink.click({ timeout: 12_000 }).catch(() => {}),
-    ]);
-    await page.waitForTimeout(1500);
-    // キャンセル確認画面に「キャンセルする/確定/OK」等の確定ボタンがある場合は押す
-    const confirmBtn = page
-      .locator('a:has-text("キャンセルする"), a:has-text("予約をキャンセル"), button:has-text("キャンセルする"), a#regist, a.mod_btn_76:has-text("キャンセル"), input[type="submit"][value*="キャンセル"]')
-      .first();
-    if ((await confirmBtn.count().catch(() => 0)) > 0) {
+    await cancelBtn.click({ timeout: 12_000 }).catch(() => {});
+    // 3) ページ内ダイアログの「はい」(.accept) を待ってクリック
+    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    if ((await yesBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
         page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
-        confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
+        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
+      confirmClicked = true;
       await page.waitForTimeout(1500);
     }
   } finally {
@@ -1653,21 +1635,21 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   }
 
   const cap2 = await captureScrapeDebug(page, 'cancel', `after_${reserveId}`, {
-    diagnostics: { reserveId, dialogAccepted, url: page.url() },
+    diagnostics: { reserveId, confirmClicked, nativeDialogAccepted, url: page.url() },
   });
 
-  // 5) 検証: 完了表示、またはステータスが「キャンセル」になっているか
+  // 4) 検証: 完了表示 or ステータスがキャンセルになったか
   const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
   const looksCancelled =
-    /キャンセルしました|キャンセルが完了|取り消しました|キャンセル済/.test(bodyText) ||
-    /ステータス[^]{0,20}キャンセル/.test(bodyText);
+    /キャンセルしました|キャンセルが完了|キャンセルを受け付け|取り消しました|キャンセル済/.test(bodyText) ||
+    /ステータス[\s\S]{0,30}(キャンセル|取消)/.test(bodyText);
   const looksError = /エラー|失敗|できませんでした/.test(bodyText) && !looksCancelled;
 
   if (looksError) {
     return fail(`キャンセル時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
   }
-  if (!looksCancelled && !dialogAccepted) {
-    return fail(`キャンセルの完了を確認できませんでした (dialog=${dialogAccepted}${cap1 ? `, popup=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
+  if (!looksCancelled && !confirmClicked && !nativeDialogAccepted) {
+    return fail(`キャンセルの完了を確認できませんでした (confirmClicked=${confirmClicked}${cap1 ? `, detail=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
   }
   return { status: 'ok' };
 }
