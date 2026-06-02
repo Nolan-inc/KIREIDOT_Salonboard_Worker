@@ -676,7 +676,8 @@ async function processShop(target, channels, runId, opts = {}) {
     let loginAttempted = false;
     if (needsLogin) {
       loginAttempted = true;
-      const r = await tryLogin(page, creds);
+      // 取得時も bot 検知/reCAPTCHA を避けるため、人間らしくゆっくり(1文字ずつ)ログインする。
+      const r = await tryLogin(page, { ...creds, slow: true });
       if (r.status === 'captcha') {
         clearStorageState(ssPath);
         const blockedUntil = blockedUntilForCode('captcha_detected');
@@ -1633,7 +1634,8 @@ async function runPushJobs({ showBrowser } = {}) {
         continue;
       }
       if (auth !== 'logged_in') {
-        const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password });
+        // 書き込み(push_booking)時もゆっくりログイン (bot 検知回避)。
+        const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password, slow: true });
         if (lr.status === 'captcha') {
           await postCallback({ job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id, error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at login', manual_required: true });
           await browser.close().catch(() => {});
