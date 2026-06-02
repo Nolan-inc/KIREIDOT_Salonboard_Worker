@@ -1253,6 +1253,53 @@ function parseJstPartsForPush(iso) {
   };
 }
 
+/**
+ * 登録/挿入した予約の SalonBoard 予約ID(reserveId) を予約一覧(reserveList)から特定する。
+ * 完了画面から reserveId を拾えなかったときのフォールバック。
+ * 予約一覧の各行は detail リンクに reserveId= を持つので、日付フィルタ→
+ * (同開始時刻 + 同スタッフ external_id) [+ 顧客名] で一意に決まる行の reserveId を返す。
+ *
+ * 引数 target: { yyyymmdd, hhmm, staffExt, customerName }
+ * 戻り値: reserveId(string) | null
+ */
+async function findReserveIdForBooking(page, target, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  try {
+    await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    // 対象日に絞って検索 (その日だけ)
+    const y = target.yyyymmdd;
+    const fromStr = `${y.slice(0, 4)}-${y.slice(4, 6)}-${y.slice(6, 8)}`;
+    await applyBookingDateFilter(page, { fromStr, toStr: fromStr }, {});
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+
+    const items = await extractBookingItemsFromCurrentPage(page);
+    const wantStaff = (target.staffExt || '').toUpperCase();
+    const wantCust = (target.customerName || '').replace(/\s*様$/, '').trim();
+    const cands = [];
+    for (const it of items) {
+      const reserveId = extractIdFromUrl(it.link_href, 'reservationId', 'reserveId', 'rsvId');
+      if (!reserveId) continue;
+      // 開始時刻 (datetime_raw に HH:MM が含まれる)
+      const tm = (it.datetime_raw || '').match(/(\d{1,2}):(\d{2})/);
+      const hhmm = tm ? `${tm[1].padStart(2, '0')}:${tm[2]}` : null;
+      if (target.hhmm && hhmm !== target.hhmm) continue;
+      // スタッフ external_id (行から拾えた場合)
+      if (wantStaff && it.staff_external_id && it.staff_external_id.toUpperCase() !== wantStaff) continue;
+      cands.push({ reserveId, customer: (it.customer_raw || '').replace(/\s*様$/, '').trim() });
+    }
+    if (cands.length === 1) return cands[0].reserveId;
+    // 複数候補なら顧客名で一意化
+    if (cands.length > 1 && wantCust) {
+      const byCust = cands.filter((c) => c.customer && (c.customer.includes(wantCust) || wantCust.includes(c.customer)));
+      if (byCust.length === 1) return byCust[0].reserveId;
+    }
+    return null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -1535,6 +1582,23 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       true,
     );
   }
+
+  // 完了画面から reserveId を拾えなかった場合のフォールバック:
+  // 予約一覧(reserveList)を対象日で検索し、同開始時刻+同スタッフ(+顧客名)で
+  // 一意に決まる行の reserveId を取得する (synced なのに external_booking_id=null を防ぐ)。
+  if (!externalId) {
+    const found = await findReserveIdForBooking(page, {
+      yyyymmdd: when.yyyymmdd,
+      hhmm: when.hhmm,
+      staffExt: p.salonboard_staff_external_id,
+      customerName: p.customer_name,
+    }, { baseUrl }).catch(() => null);
+    if (found) {
+      externalId = found;
+      detailUrl = detailUrl || `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+    }
+  }
+
   return { status: 'ok', externalId, detailUrl, confirmed };
 }
 

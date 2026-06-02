@@ -1900,26 +1900,37 @@ async function runTestPush(payload) {
     }, { baseUrl, enablePush: !!p.enablePush });
 
     if (result.status === 'ok') {
+      // reserveId が取れたかどうかで synced 後の状態が変わる。
+      // 取れない場合のみ「予約ID未取得」を last_push_error に残す (バッジがオレンジになる理由)。
+      const gotId = !!result.externalId;
       // 本物の予約なら DB の同期状態を synced に更新 (バッジが「SB同期済み」になる)。
       if (realBookingId) {
         try {
-          await supabase
-            .from('bookings')
-            .update({
-              salonboard_sync_status: 'synced',
-              external_booking_id: result.externalId ?? null,
-              salonboard_detail_url: result.detailUrl ?? null,
-              salonboard_pushed_at: new Date().toISOString(),
-              salonboard_last_push_error: null,
-              salonboard_staff_external_id: p.staffExternalId,
-              salonboard_staff_name: p.staffName || null,
-            })
-            .eq('id', realBookingId);
+          const patch = {
+            salonboard_sync_status: 'synced',
+            salonboard_detail_url: result.detailUrl ?? null,
+            salonboard_pushed_at: new Date().toISOString(),
+            salonboard_last_push_error: gotId ? null : 'SalonBoard 登録は成功したが予約ID(reserveId)を取得できませんでした',
+            salonboard_staff_external_id: p.staffExternalId,
+            salonboard_staff_name: p.staffName || null,
+          };
+          // 予約IDは取れたときだけ上書きする (取れないのに null で潰さない)
+          if (gotId) patch.external_booking_id = result.externalId;
+          await supabase.from('bookings').update(patch).eq('id', realBookingId);
         } catch (e) {
           log(`booking同期状態の更新に失敗: ${e?.message ?? e}`, 'warn');
         }
       }
-      step('done', { ok: true, registered: true, bookingId: realBookingId, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null, msg: `✅ 登録完了 external_id=${result.externalId ?? '?'}` });
+      step('done', {
+        ok: true,
+        registered: true,
+        bookingId: realBookingId,
+        externalId: result.externalId ?? null,
+        detailUrl: result.detailUrl ?? null,
+        msg: gotId
+          ? `✅ 登録完了 external_id=${result.externalId}`
+          : '✅ 登録完了 (ただし予約IDを取得できませんでした。次回の予約取得で補完されます)',
+      });
     } else if (result.status === 'confirm_only') {
       step('done', { ok: true, registered: false, msg: '🟡 入力まで成功 (実登録OFFのため登録ボタンは押していません)。ON にすると登録します。' });
     } else {

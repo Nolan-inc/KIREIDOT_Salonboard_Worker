@@ -1,6 +1,6 @@
 {
   "name": "kireidot-salondesk",
-  "version": "0.2.50",
+  "version": "0.2.51",
   "private": true,
   "description": "KIREIDOT サロンデスク — サロン業務 (予約・スタッフ・シフト・ブログ) を一元管理する Electron デスクトップアプリ",
   "type": "module",
