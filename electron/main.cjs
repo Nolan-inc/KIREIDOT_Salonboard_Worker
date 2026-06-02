@@ -404,6 +404,11 @@ ipcMain.handle('worker:test-push', async (_event, payload) => {
   const ok = postToWorker({ type: 'test-push', payload });
   return { ok };
 });
+ipcMain.handle('worker:cancel-booking', async (_event, payload) => {
+  // 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。
+  const ok = postToWorker({ type: 'cancel-booking', payload });
+  return { ok };
+});
 ipcMain.handle('worker:abort', async () => {
   const ok = postToWorker({ type: 'abort' });
   return { ok };

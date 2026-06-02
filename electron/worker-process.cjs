@@ -33,6 +33,7 @@ const {
   scrapeShifts,
   scrapeCustomerDetails,
   pushBookingViaForm,
+  cancelBookingViaForm,
 } = require('./scrapers.cjs');
 
 let supabase = null;
@@ -1932,6 +1933,101 @@ async function runTestPush(payload) {
   }
 }
 
+/**
+ * 単発キャンセル。画面 (予約同期くん) からの直接実行。reserveId を使って
+ * SalonBoard 上の予約をキャンセルし、成功したら DB を cancelled + cancelled_synced に。
+ *
+ * payload: { shopId, bookingId, externalBookingId(reserveId), scheduledAt,
+ *            staffExternalId?, staffName?, enableCancel? }
+ * 結果は cancel:test イベントで返す。
+ */
+async function runCancel(payload) {
+  const step = (s, extra = {}) => emit('cancel:test', { step: s, ...extra });
+  const p = payload || {};
+  if (!p.shopId || !p.bookingId || !p.scheduledAt) {
+    step('done', { ok: false, error: '必須項目が不足 (店舗・予約ID・日時)' });
+    return;
+  }
+  if (!p.externalBookingId) {
+    step('done', { ok: false, error: 'SalonBoard 予約ID (external_booking_id) が無いためキャンセル対象を特定できません。先に SalonBoard 連携 (synced) されている必要があります。' });
+    return;
+  }
+  step('start', { msg: `キャンセル開始: reserveId=${p.externalBookingId}` });
+
+  let creds;
+  try {
+    creds = await revealCredentials(p.shopId);
+  } catch (e) {
+    step('done', { ok: false, error: `認証情報の取得に失敗: ${e?.message ?? e}` });
+    return;
+  }
+  const baseUrl = creds.baseUrl || 'https://salonboard.com/login/';
+
+  let browser = null;
+  try {
+    step('launch', { msg: 'ブラウザ起動' });
+    const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
+    try {
+      browser = await chromium.launch({ headless: false, slowMo: 500, args: launchArgs });
+    } catch (_e) {
+      browser = await chromium.launch({ headless: true, args: launchArgs });
+    }
+    const ssPath = storageStatePathFor(p.shopId);
+    const ctx = await browser.newContext({
+      ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1366, height: 900 },
+    });
+    const page = await ctx.newPage();
+
+    step('login', { msg: 'ログイン確認中' });
+    let auth = await isLoggedIn(page, baseUrl);
+    if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
+    if (auth !== 'logged_in') {
+      step('login', { msg: 'ID/パスワードをゆっくり入力中…' });
+      const lr = await tryLogin(page, { ...creds, slow: true });
+      if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
+      await saveStorageState(ctx, ssPath);
+    }
+    step('login_ok', { msg: 'ログイン成功' });
+
+    step('cancel', { msg: 'SalonBoard 上の予約をキャンセル中' });
+    const result = await cancelBookingViaForm(page, {
+      booking_id: p.bookingId,
+      external_booking_id: p.externalBookingId,
+      scheduled_at: p.scheduledAt,
+      salonboard_staff_external_id: p.staffExternalId || null,
+      staff_name: p.staffName || null,
+    }, { baseUrl, enableCancel: p.enableCancel !== false });
+
+    if (result.status === 'ok') {
+      try {
+        await supabase
+          .from('bookings')
+          .update({
+            status: 'cancelled',
+            salonboard_sync_status: 'cancelled_synced',
+            salonboard_last_push_error: null,
+            external_synced_at: new Date().toISOString(),
+          })
+          .eq('id', p.bookingId);
+      } catch (e) {
+        log(`booking キャンセル状態の更新に失敗: ${e?.message ?? e}`, 'warn');
+      }
+      step('done', { ok: true, msg: '✅ SalonBoard でキャンセルしました', bookingId: p.bookingId });
+    } else if (result.status === 'confirm_only') {
+      step('done', { ok: true, registered: false, msg: '🟡 キャンセルボタンまで到達 (実行OFF)。ON にするとキャンセルします。' });
+    } else {
+      step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode}] ${result.reason}` });
+    }
+    await page.waitForTimeout(2500).catch(() => {});
+    await browser.close().catch(() => {});
+  } catch (e) {
+    step('done', { ok: false, error: `例外: ${e?.message ?? e}` });
+    await browser?.close().catch(() => {});
+  }
+}
+
 process.parentPort?.on('message', async (event) => {
   const m = event?.data ?? event;
   if (!m || typeof m !== 'object') return;
@@ -1969,6 +2065,15 @@ process.parentPort?.on('message', async (event) => {
           break;
         }
         await runTestPush(m.payload ?? {});
+        break;
+      case 'cancel-booking':
+        try {
+          await ensureReady();
+        } catch (e) {
+          emit('cancel:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
+          break;
+        }
+        await runCancel(m.payload ?? {});
         break;
       case 'abort':
         abortRequested = true;

@@ -92,6 +92,18 @@ type WorkerEvent =
         externalId?: string | null;
         detailUrl?: string | null;
       };
+    }
+  | {
+      type: 'cancel:test';
+      payload: {
+        step: string;
+        ok?: boolean;
+        registered?: boolean;
+        msg?: string;
+        error?: string;
+        errorCode?: string;
+        bookingId?: string;
+      };
     };
 
 interface Window {
@@ -151,6 +163,16 @@ interface Window {
       enablePush?: boolean;
       /** 予約一覧からの挿入時に渡す本物の予約ID (成功時に同期状態を synced に更新) */
       bookingId?: string;
+    }) => Promise<{ ok: boolean }>;
+    /** 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。結果は cancel:test イベントで届く。 */
+    workerCancelBooking: (payload: {
+      shopId: string;
+      bookingId: string;
+      externalBookingId: string;
+      scheduledAt: string;
+      staffExternalId?: string | null;
+      staffName?: string | null;
+      enableCancel?: boolean;
     }) => Promise<{ ok: boolean }>;
     /** worker からの全イベントを購読。返値は解除関数 */
     onWorkerEvent: (handler: (msg: WorkerEvent) => void) => () => void;

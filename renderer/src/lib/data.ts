@@ -172,6 +172,19 @@ export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
   })) as StaffRow[];
 }
 
+/**
+ * 予約を KIREIDOT 側でキャンセル状態にする (SalonBoard 未連携の予約用)。
+ * SalonBoard 連携済みの予約は worker 経由 (workerCancelBooking) で SB もキャンセルする。
+ * 戻り値の error は失敗時のメッセージ文字列、成功時は null。
+ */
+export async function cancelBookingLocal(bookingId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('bookings')
+    .update({ status: 'cancelled' })
+    .eq('id', bookingId);
+  return { error: error ? error.message : null };
+}
+
 // =========================
 // メニュー (サロンボード由来) — 予約作成時の選択用
 // salonboard_menu_imports を読む (メニュー同期で投入される)。

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud, CalendarDays } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchRecentBookings, fetchStaffList, fetchMenuList, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
+import { fetchRecentBookings, fetchStaffList, fetchMenuList, cancelBookingLocal, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 import { createBookingViaDevice } from '../lib/salonboard';
 
@@ -90,6 +90,9 @@ export function Bookings() {
   const [insertResults, setInsertResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
   // スタッフ未紐付けの予約をどのスタッフで入れるか選ばせる対象 booking
   const [staffPickFor, setStaffPickFor] = useState<BookingRow | null>(null);
+  // キャンセル処理中の booking id と結果メッセージ
+  const [cancelingId, setCancelingId] = useState<string | null>(null);
+  const [cancelResults, setCancelResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
   useEffect(() => {
     if (!scope) return;
@@ -140,6 +143,77 @@ export function Bookings() {
       });
     });
   }, []);
+
+  // worker からのキャンセル結果 (cancel:test) を購読する
+  useEffect(() => {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.onWorkerEvent) return;
+    return bridge.onWorkerEvent((msg) => {
+      if (msg.type !== 'cancel:test') return;
+      const p = msg.payload;
+      if (p.step !== 'done') return;
+      setCancelingId((cur) => {
+        const target = cur;
+        if (target) {
+          setCancelResults((r) => ({
+            ...r,
+            [target]: {
+              ok: !!p.ok,
+              msg: p.ok ? (p.msg || '✅ SalonBoardでキャンセルしました') : `失敗: ${p.error || p.errorCode || 'unknown'}`,
+            },
+          }));
+          if (p.ok) setTimeout(() => setReloadKey((k) => k + 1), 2000);
+        }
+        return null;
+      });
+    });
+  }, []);
+
+  // KIREIDOT + SalonBoard 両方をキャンセルする。
+  // SalonBoard 連携済み (external_booking_id あり) なら worker でSB側もキャンセル。
+  // 未連携なら KIREIDOT 側だけ cancelled にする。
+  function cancelBooking(b: BookingRow) {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!scope?.shopId) return;
+    const hasSb = !!b.external_booking_id;
+    const confirmMsg = hasSb
+      ? `この予約を KIREIDOT・SalonBoard の両方でキャンセルします。よろしいですか？\n\n${displayName(b)} / ${new Date(b.scheduled_at).toLocaleString('ja-JP')}`
+      : `この予約をキャンセルします (SalonBoard 未連携のため KIREIDOT のみ)。よろしいですか？\n\n${displayName(b)} / ${new Date(b.scheduled_at).toLocaleString('ja-JP')}`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setCancelingId(b.id);
+    setCancelResults((r) => {
+      const { [b.id]: _omit, ...rest } = r;
+      return rest;
+    });
+    if (hasSb && bridge?.workerCancelBooking) {
+      void bridge.workerCancelBooking({
+        shopId: scope.shopId,
+        bookingId: b.id,
+        externalBookingId: b.external_booking_id as string,
+        scheduledAt: b.scheduled_at,
+        staffExternalId: resolveStaffExt(b)?.ext ?? null,
+        staffName: b.salonboard_staff_name ?? null,
+        enableCancel: true,
+      });
+      // 安全網: 120秒で解除
+      setTimeout(() => setCancelingId((cur) => (cur === b.id ? null : cur)), 120_000);
+    } else {
+      // SalonBoard 未連携 → KIREIDOT 側のみ cancelled に
+      void (async () => {
+        try {
+          const { error } = await cancelBookingLocal(b.id);
+          setCancelResults((r) => ({
+            ...r,
+            [b.id]: error ? { ok: false, msg: `失敗: ${error}` } : { ok: true, msg: 'KIREIDOTでキャンセルしました (SB未連携)' },
+          }));
+          if (!error) setTimeout(() => setReloadKey((k) => k + 1), 1000);
+        } finally {
+          setCancelingId((cur) => (cur === b.id ? null : cur));
+        }
+      })();
+    }
+  }
 
   // 予約のスタッフ紐付けから SalonBoard external_id を解決する。
   //   ① 予約に直接入っている salonboard_staff_external_id
@@ -423,6 +497,9 @@ export function Bookings() {
           insertingId={insertingId}
           insertResults={insertResults}
           onInsert={insertToSalonboard}
+          cancelingId={cancelingId}
+          cancelResults={cancelResults}
+          onCancel={cancelBooking}
         />
       )}
 
@@ -1151,6 +1228,9 @@ function LedgerView({
   insertingId,
   insertResults,
   onInsert,
+  cancelingId,
+  cancelResults,
+  onCancel,
 }: {
   bookings: BookingRow[];
   staff: StaffRow[];
@@ -1162,6 +1242,9 @@ function LedgerView({
   insertingId: string | null;
   insertResults: Record<string, { ok: boolean; msg: string }>;
   onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
+  cancelingId: string | null;
+  cancelResults: Record<string, { ok: boolean; msg: string }>;
+  onCancel: (b: BookingRow) => void;
 }) {
   // 期間内の全日付 (予約有無に関わらず。月単位で連続表示するため範囲から生成)
   const days = useMemo(() => {
@@ -1382,6 +1465,9 @@ function LedgerView({
           insertingId={insertingId}
           insertResults={insertResults}
           onInsert={onInsert}
+          cancelingId={cancelingId}
+          cancelResults={cancelResults}
+          onCancel={onCancel}
           onClose={() => setDetail(null)}
         />
       )}
@@ -1397,6 +1483,9 @@ function LedgerDetailModal({
   insertingId,
   insertResults,
   onInsert,
+  cancelingId,
+  cancelResults,
+  onCancel,
   onClose,
 }: {
   booking: BookingRow;
@@ -1405,13 +1494,18 @@ function LedgerDetailModal({
   insertingId: string | null;
   insertResults: Record<string, { ok: boolean; msg: string }>;
   onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
+  cancelingId: string | null;
+  cancelResults: Record<string, { ok: boolean; msg: string }>;
+  onCancel: (b: BookingRow) => void;
   onClose: () => void;
 }) {
   const dt = new Date(b.scheduled_at);
   const end = new Date(dt.getTime() + (b.duration_min ?? 60) * 60_000);
   const badge = classify(b);
   const res = insertResults[b.id];
+  const cancelRes = cancelResults[b.id];
   const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
+  const canCancel = b.status !== 'cancelled';
   const fmt = (d: Date) => d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
   const Row = ({ label, value }: { label: string; value: ReactNode }) =>
     value ? (
@@ -1464,8 +1558,25 @@ function LedgerDetailModal({
             {res.msg}
           </div>
         )}
+        {cancelRes && (
+          <div className={`mt-3 rounded-lg px-3 py-2 text-[12px] ${cancelRes.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+            {cancelRes.msg}
+          </div>
+        )}
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+          {/* キャンセル (左寄せ) */}
+          {canCancel && !cancelRes && (
+            <button
+              type="button"
+              onClick={() => onCancel(b)}
+              disabled={cancelingId === b.id}
+              title={b.external_booking_id ? 'KIREIDOT と SalonBoard の両方でキャンセルします' : 'SalonBoard 未連携のため KIREIDOT のみキャンセルします'}
+              className="mr-auto inline-flex items-center gap-1 rounded-lg border border-red-300 px-3 py-1.5 text-[13px] font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40"
+            >
+              {cancelingId === b.id ? 'キャンセル中…' : (b.external_booking_id ? 'キャンセル (SBも)' : 'キャンセル')}
+            </button>
+          )}
           {b.salonboard_detail_url && (
             <a
               href={b.salonboard_detail_url}

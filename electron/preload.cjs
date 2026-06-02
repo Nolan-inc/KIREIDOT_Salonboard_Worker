@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('kireidotApp', {
   workerInit: (payload) => ipcRenderer.invoke('worker:init', payload),
   workerSync: (payload) => ipcRenderer.invoke('worker:sync', payload),
   workerTestPush: (payload) => ipcRenderer.invoke('worker:test-push', payload),
+  workerCancelBooking: (payload) => ipcRenderer.invoke('worker:cancel-booking', payload),
   workerAbort: () => ipcRenderer.invoke('worker:abort'),
   onWorkerEvent: (handler) => {
     const listener = (_event, msg) => handler(msg);
