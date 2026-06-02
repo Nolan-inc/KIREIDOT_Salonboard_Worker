@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud } from 'lucide-react';
+import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud, CalendarDays } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
 import { fetchRecentBookings, fetchStaffList, fetchMenuList, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
@@ -75,8 +75,11 @@ export function Bookings() {
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  // 週送り (0=今週, +7=翌週, -7=先週 …)
-  const [weekOffset, setWeekOffset] = useState(0);
+  // 表示範囲のオフセット (日数。0=今日起点の30日, +30=次の30日 …)
+  const [rangeOffset, setRangeOffset] = useState(0);
+  // 右上カレンダーで選んだ「この日を表示」用のターゲット日 (台帳の初期選択日にも使う)
+  const [calendarTarget, setCalendarTarget] = useState<string | null>(null);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   // 表示ビュー (台帳がデフォルト)
   const [view, setView] = useState<'ledger' | 'list'>('ledger');
 
@@ -92,7 +95,8 @@ export function Bookings() {
     if (!scope) return;
     let cancelled = false;
     setLoading(true);
-    fetchRecentBookings(scope, 7, weekOffset)
+    // 30 日分を取得 (月単位の表示)
+    fetchRecentBookings(scope, 30, rangeOffset)
       .then((data) => {
         if (cancelled) return;
         setBookings(data);
@@ -105,7 +109,7 @@ export function Bookings() {
     return () => {
       cancelled = true;
     };
-  }, [scope?.shopId, scope?.organizationId, reloadKey, weekOffset]);
+  }, [scope?.shopId, scope?.organizationId, reloadKey, rangeOffset]);
 
   // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する
   useEffect(() => {
@@ -233,15 +237,32 @@ export function Bookings() {
     return { all: bookings.length, salonboard, synced, notSynced };
   }, [bookings]);
 
-  // 表示中の週の開始日 (今日 + weekOffset 日)
-  const weekStart = (() => {
+  // 表示範囲の開始日 (今日 + rangeOffset 日) と終了日 (30日後)
+  const rangeStart = (() => {
     const d = new Date();
-    d.setDate(d.getDate() + weekOffset);
+    d.setDate(d.getDate() + rangeOffset);
     d.setHours(0, 0, 0, 0);
     return d;
   })();
-  const weekLabel =
-    weekOffset === 0 ? '今週' : weekOffset > 0 ? `${weekOffset / 7} 週後` : `${-weekOffset / 7} 週前`;
+  const rangeEnd = (() => {
+    const d = new Date(rangeStart);
+    d.setDate(d.getDate() + 29);
+    return d;
+  })();
+  const rangeLabel =
+    rangeOffset === 0 ? '今日から' : rangeOffset > 0 ? `${rangeOffset} 日後から` : `${-rangeOffset} 日前から`;
+
+  // 右上カレンダーで日付を選んだら、その日を含む範囲に移動し、台帳の選択日にする
+  const jumpToDate = (d: Date) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const target = new Date(d);
+    target.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((target.getTime() - today.getTime()) / 86_400_000);
+    setRangeOffset(diffDays);
+    setCalendarTarget(ymd(target));
+    setCalendarOpen(false);
+  };
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -249,31 +270,51 @@ export function Bookings() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setWeekOffset((w) => w - 7)}
-            title="前の7日間"
+            onClick={() => setRangeOffset((w) => w - 30)}
+            title="前の30日間"
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50"
           >
             <ChevronLeft className="h-4 w-4" />
           </button>
           <button
             type="button"
-            onClick={() => setWeekOffset(0)}
-            title="今週に戻る"
+            onClick={() => { setRangeOffset(0); setCalendarTarget(ymd(new Date())); }}
+            title="今日を含む期間に戻る"
             className="rounded-[12px] border border-hairline bg-white/85 px-4 py-2 text-left hover:bg-brand-light/30"
           >
-            <div className="text-[10px] uppercase tracking-wider text-muted">{weekLabel}</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted">{rangeLabel} 30 日</div>
             <div className="font-serif text-[16px] font-bold text-ink">
-              {weekStart.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })} から 7 日
+              {rangeStart.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })}
+              {' 〜 '}
+              {rangeEnd.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })}
             </div>
           </button>
           <button
             type="button"
-            onClick={() => setWeekOffset((w) => w + 7)}
-            title="次の7日間"
+            onClick={() => setRangeOffset((w) => w + 30)}
+            title="次の30日間"
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50"
           >
             <ChevronRight className="h-4 w-4" />
           </button>
+          {/* 右上カレンダー (Admin 風) で日付ジャンプ */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setCalendarOpen((o) => !o)}
+              title="カレンダーから日付を選ぶ"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-white/80 text-ink-soft hover:bg-brand-light/50"
+            >
+              <CalendarDays className="h-4 w-4" />
+            </button>
+            {calendarOpen && (
+              <MiniCalendar
+                selected={calendarTarget}
+                onPick={jumpToDate}
+                onClose={() => setCalendarOpen(false)}
+              />
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {/* ビュー切替 (台帳 / リスト) */}
@@ -376,6 +417,7 @@ export function Bookings() {
           bookings={filtered}
           staff={staffOptions}
           loading={loading}
+          targetDay={calendarTarget}
           displayName={displayName}
           classify={classifySbSync}
           insertingId={insertingId}
@@ -971,6 +1013,98 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// =====================================================================
+// 右上カレンダー (Admin 風)。月を前後でき、日付クリックでその日にジャンプ。
+// =====================================================================
+function MiniCalendar({
+  selected,
+  onPick,
+  onClose,
+}: {
+  selected?: string | null;
+  onPick: (d: Date) => void;
+  onClose: () => void;
+}) {
+  const todayYmd = ymd(new Date());
+  // 表示中の月 (selected があればその月、無ければ今月)
+  const initial = selected ? new Date(selected + 'T00:00:00') : new Date();
+  const [viewYear, setViewYear] = useState(initial.getFullYear());
+  const [viewMonth, setViewMonth] = useState(initial.getMonth()); // 0-based
+
+  const first = new Date(viewYear, viewMonth, 1);
+  const startWeekday = first.getDay(); // 0=日
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const cells: (Date | null)[] = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(viewYear, viewMonth, d));
+
+  const prevMonth = () => {
+    const m = viewMonth - 1;
+    if (m < 0) { setViewMonth(11); setViewYear((y) => y - 1); } else setViewMonth(m);
+  };
+  const nextMonth = () => {
+    const m = viewMonth + 1;
+    if (m > 11) { setViewMonth(0); setViewYear((y) => y + 1); } else setViewMonth(m);
+  };
+
+  return (
+    <>
+      {/* 外側クリックで閉じる */}
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div className="absolute right-0 z-50 mt-2 w-[260px] rounded-2xl border border-hairline bg-white p-3 shadow-xl">
+        <div className="mb-2 flex items-center justify-between">
+          <button type="button" onClick={prevMonth} className="rounded-full p-1 text-ink-soft hover:bg-brand-light/40">
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <div className="text-[14px] font-bold text-ink">{viewYear}年 {viewMonth + 1}月</div>
+          <button type="button" onClick={nextMonth} className="rounded-full p-1 text-ink-soft hover:bg-brand-light/40">
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid grid-cols-7 gap-0.5 text-center text-[10px] text-muted">
+          {['日', '月', '火', '水', '木', '金', '土'].map((w) => (
+            <div key={w} className="py-1">{w}</div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-0.5">
+          {cells.map((d, i) => {
+            if (!d) return <div key={i} />;
+            const key = ymd(d);
+            const isToday = key === todayYmd;
+            const isSelected = key === selected;
+            const dow = d.getDay();
+            return (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onPick(d)}
+                className={
+                  'aspect-square rounded-lg text-[12px] font-semibold ' +
+                  (isSelected
+                    ? 'bg-brand-gradient text-white shadow-brand-sm'
+                    : isToday
+                      ? 'border border-brand-400 text-brand-700'
+                      : (dow === 0 ? 'text-rose-500' : dow === 6 ? 'text-sky-600' : 'text-ink') +
+                        ' hover:bg-brand-light/40')
+                }
+              >
+                {d.getDate()}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          type="button"
+          onClick={() => onPick(new Date())}
+          className="mt-2 w-full rounded-lg border border-hairline py-1.5 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40"
+        >
+          今日
+        </button>
+      </div>
+    </>
+  );
+}
+
 /**
  * 同一スタッフ行内で時間が重なる予約に、縦の lane (0-based) を割り当てる。
  * sweep line 方式 (KIREIDOT Admin の layoutGanttOverlaps と同じ考え方)。
@@ -1011,6 +1145,7 @@ function LedgerView({
   bookings,
   staff,
   loading,
+  targetDay,
   displayName,
   classify,
   insertingId,
@@ -1020,13 +1155,15 @@ function LedgerView({
   bookings: BookingRow[];
   staff: StaffRow[];
   loading: boolean;
+  /** 右上カレンダーで選んだ日 (この日を優先表示する) */
+  targetDay?: string | null;
   displayName: (b: BookingRow) => string;
   classify: (b: BookingRow) => SbBadge;
   insertingId: string | null;
   insertResults: Record<string, { ok: boolean; msg: string }>;
   onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
 }) {
-  // 読み込み済み予約に含まれる日付一覧 (昇順)
+  // 期間内の全日付 (予約有無に関わらず。月単位で連続表示するため範囲から生成)
   const days = useMemo(() => {
     const set = new Set<string>();
     for (const b of bookings) set.add(ymd(new Date(b.scheduled_at)));
@@ -1034,10 +1171,14 @@ function LedgerView({
   }, [bookings]);
 
   const [day, setDay] = useState<string>('');
+  // 右上カレンダーで選んだ日が来たら最優先で表示
   useEffect(() => {
-    // 日付が未選択 or 範囲外なら先頭日にする
-    if (days.length && (!day || !days.includes(day))) setDay(days[0]);
-  }, [days, day]);
+    if (targetDay) setDay(targetDay);
+  }, [targetDay]);
+  useEffect(() => {
+    // 未選択 or 予約のある日が無いとき: targetDay があればそれ、無ければ先頭の予約日
+    if (!day) setDay(targetDay ?? days[0] ?? '');
+  }, [days, day, targetDay]);
 
   // クリックで開く予約詳細
   const [detail, setDetail] = useState<BookingRow | null>(null);
