@@ -135,6 +135,8 @@ export type StaffRow = {
   organization_id: string | null;
   /** サロンボードでの外部 ID (W001234) */
   external_id?: string | null;
+  /** 紐付け済み KIREIDOT staff.id (= bookings.staff_id と一致するキー) */
+  matched_staff_id?: string | null;
   position?: string | null;
   catch_phrase?: string | null;
   bio?: string | null;
@@ -146,7 +148,7 @@ export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
   const { data, error } = await supabase
     .from('salonboard_staff_imports')
     .select(
-      'id, shop_id, external_id, name, position, catch_phrase, bio, photo_url, is_published',
+      'id, shop_id, external_id, name, position, catch_phrase, bio, photo_url, is_published, matched_staff_id',
     )
     .eq('shop_id', scope.shopId)
     .order('name');
@@ -163,6 +165,7 @@ export async function fetchStaffList(scope: StaffScope): Promise<StaffRow[]> {
     tenure_years: null,
     organization_id: null,
     external_id: r.external_id,
+    matched_staff_id: r.matched_staff_id ?? null,
     position: r.position,
     catch_phrase: r.catch_phrase,
     bio: r.bio,

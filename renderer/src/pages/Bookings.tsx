@@ -985,22 +985,38 @@ function LedgerView({
     [bookings, day],
   );
 
-  // スタッフ行: external_id 付きスタッフ + 「未割当」行
+  // スタッフ行: SalonBoard 取り込みスタッフ (salonboard_staff_imports) + 「未割当」行。
+  // 行のキーは import 行 id を使い、突合済み KIREIDOT staff.id (matched) と
+  // SalonBoard external_id / 表示名を保持して、予約をどの行に置くか判定する。
   const staffRows = useMemo(() => {
-    const rows = staff.map((s) => ({ key: s.external_id ?? s.id, name: s.full_name, ext: s.external_id ?? null }));
-    rows.push({ key: '__unassigned__', name: '未割当', ext: null });
+    const rows = staff.map((s) => ({
+      key: s.id,
+      name: s.full_name,
+      ext: s.external_id ?? null,
+      matched: s.matched_staff_id ?? null,
+    }));
+    rows.push({ key: '__unassigned__', name: '未割当', ext: null, matched: null });
     return rows;
   }, [staff]);
 
-  // 予約をスタッフ行へ割り当てる
+  // 予約をスタッフ行へ割り当てる。
+  // 優先順: ① bookings.staff_id == 紐付け済み matched_staff_id (最も確実)
+  //         ② SalonBoard external_id 一致
+  //         ③ SalonBoard 担当名の一致 (前後の (指) などを除去して比較)
   function staffKeyOf(b: BookingRow): string {
+    if (b.staff_id) {
+      const hit = staffRows.find((r) => r.matched && r.matched === b.staff_id);
+      if (hit) return hit.key;
+    }
     if (b.salonboard_staff_external_id) {
       const hit = staffRows.find((r) => r.ext === b.salonboard_staff_external_id);
       if (hit) return hit.key;
     }
     if (b.salonboard_staff_name) {
-      const hit = staff.find((s) => s.full_name === b.salonboard_staff_name);
-      if (hit) return hit.external_id ?? hit.id;
+      const norm = (s: string) => s.replace(/[（(]指[）)]/g, '').trim().toLowerCase();
+      const target = norm(b.salonboard_staff_name);
+      const hit = staffRows.find((r) => norm(r.name) === target);
+      if (hit) return hit.key;
     }
     return '__unassigned__';
   }
