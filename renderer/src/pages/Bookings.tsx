@@ -137,16 +137,40 @@ export function Bookings() {
     });
   }, []);
 
-  // 実際に1件 SalonBoard へ挿入する。staffExt が無ければスタッフ選択モーダルを出す。
+  // 予約のスタッフ紐付けから SalonBoard external_id を解決する。
+  //   ① 予約に直接入っている salonboard_staff_external_id
+  //   ② staff_id を salonboard_staff_imports.matched_staff_id で逆引き
+  //   ③ SalonBoard 担当名の一致 (前後の (指) を除去して比較)
+  function resolveStaffExt(b: BookingRow): { ext: string; name: string | null } | null {
+    if (b.salonboard_staff_external_id) {
+      return { ext: b.salonboard_staff_external_id, name: b.salonboard_staff_name ?? null };
+    }
+    if (b.staff_id) {
+      const hit = staffOptions.find((s) => s.matched_staff_id && s.matched_staff_id === b.staff_id);
+      if (hit?.external_id) return { ext: hit.external_id, name: hit.full_name };
+    }
+    if (b.salonboard_staff_name) {
+      const norm = (s: string) => s.replace(/[（(]指[）)]/g, '').trim().toLowerCase();
+      const target = norm(b.salonboard_staff_name);
+      const hit = staffOptions.find((s) => norm(s.full_name) === target);
+      if (hit?.external_id) return { ext: hit.external_id, name: hit.full_name };
+    }
+    return null;
+  }
+
+  // 実際に1件 SalonBoard へ挿入する。staffExt が解決できなければスタッフ選択モーダルを出す。
   function insertToSalonboard(b: BookingRow, staffExtOverride?: string, staffNameOverride?: string) {
     const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
     if (!bridge?.workerTestPush || !scope?.shopId) return;
-    const staffExt = staffExtOverride || b.salonboard_staff_external_id || '';
-    if (!staffExt) {
-      // スタッフ未紐付け → 選択モーダルを出す
+    const resolved = staffExtOverride
+      ? { ext: staffExtOverride, name: staffNameOverride ?? null }
+      : resolveStaffExt(b);
+    if (!resolved?.ext) {
+      // どうしても解決できないときだけ選択モーダルを出す
       setStaffPickFor(b);
       return;
     }
+    const staffExt = resolved.ext;
     setStaffPickFor(null);
     setInsertingId(b.id);
     setInsertResults((r) => {
@@ -156,7 +180,7 @@ export function Bookings() {
     void bridge.workerTestPush({
       shopId: scope.shopId,
       staffExternalId: staffExt,
-      staffName: staffNameOverride || b.salonboard_staff_name || null,
+      staffName: staffNameOverride || resolved.name || b.salonboard_staff_name || null,
       menuName: '', // メニューは入れない (時間と内容のみ)
       scheduledAt: b.scheduled_at,
       durationMin: b.duration_min ?? 60,
