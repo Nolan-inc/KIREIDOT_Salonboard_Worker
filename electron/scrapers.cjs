@@ -1654,6 +1654,133 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   return { status: 'ok' };
 }
 
+// =====================================================================
+// 予約変更 (KIREIDOT → SalonBoard)
+// reserveId(external_booking_id) をキーに SalonBoard 上の予約の
+// 時間・所要(・担当) を変更する。
+//
+// 動線 (詳細ページの「変更する」リンク先):
+//   /KLP/reserve/ext/extReserveChange/?reserveId=YG...  (ネットは net)
+//   登録フォームと同じ構成 (#jsiRsvHour/#jsiRsvMinute/#jsiRsvTermHour/
+//   #jsiRsvTermMinute, select#salonStaffList + hidden #staffId) が
+//   既存値で埋まった状態で開く想定。値を更新して「登録する(a#regist)」または
+//   確定ボタン → (HTMLダイアログなら a.accept / ネイティブ confirm なら accept)。
+//
+// payload: { booking_id, external_booking_id(reserveId), scheduled_at,
+//            duration_min, salonboard_staff_external_id?, staff_name? }
+// opts: { baseUrl, enableChange }   enableChange=false なら確定せず確認のみ。
+//
+// 戻り値: { status:'ok' } | { status:'confirm_only' }
+//         | { status:'failed', reason, errorCode, manualRequired }
+// =====================================================================
+async function changeBookingViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enableChange = opts.enableChange !== false;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+  const reserveId = (p.external_booking_id || '').trim();
+
+  if (!reserveId) return fail('external_booking_id (SalonBoard 予約ID) が無いため変更対象を特定できません', 'STAFF_MAPPING_NOT_FOUND', true);
+  const when = parseJstPartsForPush(p.scheduled_at);
+  if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  const startMM = String(when.minute).padStart(2, '0');
+  const durMin = p.duration_min || 60;
+
+  // 1) 変更画面を開く (ext → net)
+  const candidates = [
+    `/KLP/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
+    `/KLP/reserve/net/reserveChange/?reserveId=${reserveId}`,
+  ];
+  let onForm = false;
+  for (const path of candidates) {
+    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, url: page.url() } });
+  if (!onForm) {
+    return fail(`予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 2) 担当 (指定があれば更新。登録フォームと同じ select#salonStaffList + hidden #staffId)
+  const staffExt = (p.salonboard_staff_external_id || '').trim();
+  if (staffExt) {
+    await page.locator('select#salonStaffList').first().selectOption({ value: staffExt }).catch(() => {});
+    await page.evaluate((ext) => {
+      const setVal = (el) => { if (el) { el.value = ext; el.dispatchEvent(new Event('change', { bubbles: true })); } };
+      setVal(document.getElementById('staffId'));
+      document.querySelectorAll('input[name="staffId"]').forEach(setVal);
+      for (const name of ['salonStaffList', 'staffIdList']) {
+        const sel = document.querySelector(`select[name="${name}"]`);
+        if (sel && Array.from(sel.options).some((o) => o.value === ext)) { sel.value = ext; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+      }
+    }, staffExt).catch(() => {});
+  }
+
+  // 3) 時間・所要を更新 (登録フォームと同じセレクタ)
+  await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
+  await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
+  await page.locator('select#jsiRsvTermHour').first().selectOption({ value: String(Math.floor(durMin / 60) * 60) }).catch(() => {});
+  await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: String(durMin % 60).padStart(2, '0') }).catch(() => {});
+
+  if (!enableChange) {
+    return { status: 'confirm_only' };
+  }
+
+  // 4) 確定: 「登録する」(a#regist) もしくは「変更を確定」等。
+  //    確認は登録フォームと同じくネイティブ confirm の場合と、キャンセルのような
+  //    HTMLダイアログ(a.accept)の場合の両方に備える。
+  const submitBtn = page
+    .locator('a#regist, a:has-text("登録する"), a:has-text("変更を確定"), a:has-text("変更する"):not([href*="extReserveChange"]), button:has-text("登録する")')
+    .first();
+  if ((await submitBtn.count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'change', `no_submit_${reserveId}`, { diagnostics: { reserveId, url: page.url() } });
+    return fail(`変更の確定ボタンが見つかりませんでした (reserveId=${reserveId}${cap ? `, capture=${cap}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let confirmClicked = false;
+  try {
+    await submitBtn.click({ timeout: 12_000 }).catch(() => {});
+    // HTMLダイアログ「はい」(.accept) が出れば押す
+    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
+    if ((await yesBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmClicked = true;
+    } else {
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+    }
+    await page.waitForTimeout(1500);
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'change', `after_${reserveId}`, {
+    diagnostics: { reserveId, confirmClicked, nativeDialogAccepted, url: page.url() },
+  });
+
+  // 5) 検証
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyText);
+  const looksError = /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(bodyText) && !looksDone;
+  if (looksError) {
+    return fail(`変更時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !confirmClicked && !nativeDialogAccepted) {
+    return fail(`変更の完了を確認できませんでした (confirmClicked=${confirmClicked}${cap1 ? `, form=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+  return { status: 'ok' };
+}
+
 // ----------------- スタッフ一覧 (staffList) -----------------
 
 const STAFF_LIST_URL = 'https://salonboard.com/CNK/draft/staffList';
@@ -2444,6 +2571,7 @@ module.exports = {
   scrapeCustomerDetails,
   pushBookingViaForm,
   cancelBookingViaForm,
+  changeBookingViaForm,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

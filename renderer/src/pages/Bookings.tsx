@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud, CalendarDays } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchRecentBookings, fetchStaffList, fetchMenuList, cancelBookingLocal, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
+import { fetchRecentBookings, fetchStaffList, fetchMenuList, cancelBookingLocal, updateBookingTimeLocal, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 import { createBookingViaDevice } from '../lib/salonboard';
 
@@ -93,6 +93,9 @@ export function Bookings() {
   // キャンセル処理中の booking id と結果メッセージ
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelResults, setCancelResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  // 変更処理中の booking id と結果メッセージ
+  const [changingId, setChangingId] = useState<string | null>(null);
+  const [changeResults, setChangeResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
   useEffect(() => {
     if (!scope) return;
@@ -213,6 +216,70 @@ export function Bookings() {
         }
       })();
     }
+  }
+
+  // worker からの変更結果 (change:test) を購読する
+  useEffect(() => {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.onWorkerEvent) return;
+    return bridge.onWorkerEvent((msg) => {
+      if (msg.type !== 'change:test') return;
+      const p = msg.payload;
+      if (p.step !== 'done') return;
+      setChangingId((cur) => {
+        const target = cur;
+        if (target) {
+          setChangeResults((r) => ({
+            ...r,
+            [target]: { ok: !!p.ok, msg: p.ok ? (p.msg || '✅ SalonBoardで変更しました') : `失敗: ${p.error || p.errorCode || 'unknown'}` },
+          }));
+          if (p.ok) setTimeout(() => setReloadKey((k) => k + 1), 2000);
+        }
+        return null;
+      });
+    });
+  }, []);
+
+  // SalonBoard 連携済み予約の時間/所要を変更する。
+  // 先に KIREIDOT 側の bookings を更新し、その後 worker で SalonBoard も変更する。
+  function changeBooking(b: BookingRow, newIso: string, newDurationMin: number) {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!scope?.shopId) return;
+    if (!b.external_booking_id) {
+      setChangeResults((r) => ({ ...r, [b.id]: { ok: false, msg: 'SalonBoard 未連携 (external_booking_id 無し) のため SB 変更はできません' } }));
+      return;
+    }
+    setChangingId(b.id);
+    setChangeResults((r) => {
+      const { [b.id]: _omit, ...rest } = r;
+      return rest;
+    });
+    void (async () => {
+      // 1) KIREIDOT 側を先に更新
+      const { error } = await updateBookingTimeLocal(b.id, newIso, newDurationMin);
+      if (error) {
+        setChangeResults((r) => ({ ...r, [b.id]: { ok: false, msg: `KIREIDOT 更新に失敗: ${error}` } }));
+        setChangingId((cur) => (cur === b.id ? null : cur));
+        return;
+      }
+      // 2) SalonBoard 側を worker で変更
+      if (bridge?.workerChangeBooking) {
+        void bridge.workerChangeBooking({
+          shopId: scope.shopId!,
+          bookingId: b.id,
+          externalBookingId: b.external_booking_id as string,
+          scheduledAt: newIso,
+          durationMin: newDurationMin,
+          staffExternalId: resolveStaffExt(b)?.ext ?? null,
+          staffName: b.salonboard_staff_name ?? null,
+          enableChange: true,
+        });
+        setTimeout(() => setChangingId((cur) => (cur === b.id ? null : cur)), 120_000);
+      } else {
+        setChangeResults((r) => ({ ...r, [b.id]: { ok: true, msg: 'KIREIDOT のみ更新しました (Electron 環境ではないため SB 未反映)' } }));
+        setChangingId((cur) => (cur === b.id ? null : cur));
+      }
+    })();
   }
 
   // 予約のスタッフ紐付けから SalonBoard external_id を解決する。
@@ -500,6 +567,9 @@ export function Bookings() {
           cancelingId={cancelingId}
           cancelResults={cancelResults}
           onCancel={cancelBooking}
+          changingId={changingId}
+          changeResults={changeResults}
+          onChange={changeBooking}
         />
       )}
 
@@ -1231,6 +1301,9 @@ function LedgerView({
   cancelingId,
   cancelResults,
   onCancel,
+  changingId,
+  changeResults,
+  onChange,
 }: {
   bookings: BookingRow[];
   staff: StaffRow[];
@@ -1245,6 +1318,9 @@ function LedgerView({
   cancelingId: string | null;
   cancelResults: Record<string, { ok: boolean; msg: string }>;
   onCancel: (b: BookingRow) => void;
+  changingId: string | null;
+  changeResults: Record<string, { ok: boolean; msg: string }>;
+  onChange: (b: BookingRow, newIso: string, newDurationMin: number) => void;
 }) {
   // 期間内の全日付 (予約有無に関わらず。月単位で連続表示するため範囲から生成)
   const days = useMemo(() => {
@@ -1468,6 +1544,9 @@ function LedgerView({
           cancelingId={cancelingId}
           cancelResults={cancelResults}
           onCancel={onCancel}
+          changingId={changingId}
+          changeResults={changeResults}
+          onChange={onChange}
           onClose={() => setDetail(null)}
         />
       )}
@@ -1486,6 +1565,9 @@ function LedgerDetailModal({
   cancelingId,
   cancelResults,
   onCancel,
+  changingId,
+  changeResults,
+  onChange,
   onClose,
 }: {
   booking: BookingRow;
@@ -1497,6 +1579,9 @@ function LedgerDetailModal({
   cancelingId: string | null;
   cancelResults: Record<string, { ok: boolean; msg: string }>;
   onCancel: (b: BookingRow) => void;
+  changingId: string | null;
+  changeResults: Record<string, { ok: boolean; msg: string }>;
+  onChange: (b: BookingRow, newIso: string, newDurationMin: number) => void;
   onClose: () => void;
 }) {
   const dt = new Date(b.scheduled_at);
@@ -1504,8 +1589,19 @@ function LedgerDetailModal({
   const badge = classify(b);
   const res = insertResults[b.id];
   const cancelRes = cancelResults[b.id];
+  const changeRes = changeResults[b.id];
   const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
   const canCancel = b.status !== 'cancelled';
+  // SalonBoard 連携済み (synced) かつ未キャンセルなら時間変更可
+  const canChange = !!b.external_booking_id && b.status !== 'cancelled';
+  // 時間変更フォーム (datetime-local 用の値を初期化)
+  const toLocalInput = (d: Date) => {
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const [editMode, setEditMode] = useState(false);
+  const [editTime, setEditTime] = useState(() => toLocalInput(dt));
+  const [editDur, setEditDur] = useState<number>(b.duration_min ?? 60);
   const fmt = (d: Date) => d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
   const Row = ({ label, value }: { label: string; value: ReactNode }) =>
     value ? (
@@ -1563,8 +1659,75 @@ function LedgerDetailModal({
             {cancelRes.msg}
           </div>
         )}
+        {changeRes && (
+          <div className={`mt-3 rounded-lg px-3 py-2 text-[12px] ${changeRes.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+            {changeRes.msg}
+          </div>
+        )}
+
+        {/* 時間変更フォーム (SB連携済みのみ) */}
+        {canChange && editMode && (
+          <div className="mt-3 rounded-lg border border-hairline bg-brand-light/20 p-3">
+            <div className="mb-2 text-[12px] font-semibold text-ink">予約時間を変更 (KIREIDOT + SalonBoard)</div>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-[11px] text-ink-soft">
+                日時
+                <input
+                  type="datetime-local"
+                  value={editTime}
+                  onChange={(e) => setEditTime(e.target.value)}
+                  className="rounded-lg border border-hairline px-2 py-1 text-[13px] text-ink"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-ink-soft">
+                所要(分)
+                <input
+                  type="number"
+                  min={15}
+                  step={15}
+                  value={editDur}
+                  onChange={(e) => setEditDur(Number(e.target.value) || 60)}
+                  className="w-20 rounded-lg border border-hairline px-2 py-1 text-[13px] text-ink"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={changingId === b.id}
+                onClick={() => {
+                  // datetime-local はローカル時刻。JST(+09:00) ISO に変換して渡す。
+                  const [d, t] = editTime.split('T');
+                  if (!d || !t) return;
+                  const iso = `${d}T${t}:00+09:00`;
+                  onChange(b, iso, editDur);
+                  setEditMode(false);
+                }}
+                className="rounded-lg bg-brand-gradient px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-40"
+              >
+                {changingId === b.id ? '変更中…' : 'この内容で変更'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditMode(false)}
+                className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40"
+              >
+                やめる
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+          {/* 時間変更 (SB連携済みのみ・左寄せ) */}
+          {canChange && !editMode && !changeRes && (
+            <button
+              type="button"
+              onClick={() => setEditMode(true)}
+              title="KIREIDOT と SalonBoard の予約時間を変更します"
+              className="inline-flex items-center gap-1 rounded-lg border border-brand-400 px-3 py-1.5 text-[13px] font-semibold text-brand-700 hover:bg-brand-light/40"
+            >
+              時間を変更
+            </button>
+          )}
           {/* キャンセル (左寄せ) */}
           {canCancel && !cancelRes && (
             <button

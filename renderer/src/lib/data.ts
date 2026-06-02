@@ -185,6 +185,22 @@ export async function cancelBookingLocal(bookingId: string): Promise<{ error: st
   return { error: error ? error.message : null };
 }
 
+/**
+ * 予約の時間/所要を KIREIDOT 側で更新する (SalonBoard 連携済み予約の変更時、先に KIREIDOT を更新)。
+ * scheduledAtIso は ISO (JST オフセット付き) 文字列。
+ */
+export async function updateBookingTimeLocal(
+  bookingId: string,
+  scheduledAtIso: string,
+  durationMin: number,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('bookings')
+    .update({ scheduled_at: new Date(scheduledAtIso).toISOString(), duration_min: durationMin })
+    .eq('id', bookingId);
+  return { error: error ? error.message : null };
+}
+
 // =========================
 // メニュー (サロンボード由来) — 予約作成時の選択用
 // salonboard_menu_imports を読む (メニュー同期で投入される)。
