@@ -947,6 +947,42 @@ function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * 同一スタッフ行内で時間が重なる予約に、縦の lane (0-based) を割り当てる。
+ * sweep line 方式 (KIREIDOT Admin の layoutGanttOverlaps と同じ考え方)。
+ * 重なる予約は別 lane に積まれ、行の高さを lane 数ぶん確保することで
+ * 後ろの予約も隠れず見えるようになる。
+ */
+function layoutLanes(
+  list: BookingRow[],
+): { lane: Map<string, number>; laneCount: number } {
+  const lane = new Map<string, number>();
+  if (list.length === 0) return { lane, laneCount: 1 };
+  const items = list
+    .map((b) => {
+      const start = new Date(b.scheduled_at).getTime();
+      const dur = (b.duration_min ?? 60) * 60_000;
+      return { id: b.id, start, end: start + dur };
+    })
+    .filter((b) => Number.isFinite(b.start))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const active: number[] = []; // active[lane] = endTime
+  for (const it of items) {
+    let l = active.findIndex((endAt) => endAt <= it.start);
+    if (l === -1) {
+      l = active.length;
+      active.push(it.end);
+    } else {
+      active[l] = it.end;
+    }
+    lane.set(it.id, l);
+  }
+  return { lane, laneCount: Math.max(1, active.length) };
+}
+
+const LANE_HEIGHT = 30; // 1 lane あたりの高さ(px)
+const ROW_VPAD = 4; // 行の上下パディング(px)
+
 function LedgerView({
   bookings,
   staff,
@@ -978,6 +1014,9 @@ function LedgerView({
     // 日付が未選択 or 範囲外なら先頭日にする
     if (days.length && (!day || !days.includes(day))) setDay(days[0]);
   }, [days, day]);
+
+  // クリックで開く予約詳細
+  const [detail, setDetail] = useState<BookingRow | null>(null);
 
   // 選択日の予約
   const dayBookings = useMemo(
@@ -1091,12 +1130,15 @@ function LedgerView({
             const rowBookings = dayBookings.filter((b) => staffKeyOf(b) === row.key);
             // 未割当行は予約があるときだけ表示
             if (row.key === '__unassigned__' && rowBookings.length === 0) return null;
+            // 重なり予約を縦 lane に分割 (後ろの予約も隠れず見える)
+            const { lane, laneCount } = layoutLanes(rowBookings);
+            const rowHeight = laneCount * LANE_HEIGHT + ROW_VPAD * 2;
             return (
               <div key={row.key} className="flex border-b border-hairline/40 hover:bg-brand-light/10">
                 <div className="flex w-[120px] shrink-0 items-center px-2 py-1 text-[12px] font-semibold text-ink">
                   <span className="truncate" title={row.name}>{row.name}</span>
                 </div>
-                <div className="relative" style={{ width: gridWidth, height: 56 }}>
+                <div className="relative" style={{ width: gridWidth, height: rowHeight }}>
                   {/* 時間グリッド線 */}
                   {hours.map((h) => (
                     <div
@@ -1105,7 +1147,7 @@ function LedgerView({
                       style={{ left: (h - LEDGER_START_HOUR) * 60 * PX_PER_MIN }}
                     />
                   ))}
-                  {/* 予約ブロック */}
+                  {/* 予約ブロック (lane で縦に分割。クリックで詳細) */}
                   {rowBookings.map((b) => {
                     const dt = new Date(b.scheduled_at);
                     const startMin = dt.getHours() * 60 + dt.getMinutes();
@@ -1114,42 +1156,49 @@ function LedgerView({
                     const badge = classify(b);
                     const res = insertResults[b.id];
                     const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
+                    const l = lane.get(b.id) ?? 0;
+                    const top = ROW_VPAD + l * LANE_HEIGHT;
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={b.id}
-                        className={`absolute top-1 bottom-1 overflow-hidden rounded-[6px] border px-1.5 py-0.5 text-[10px] leading-tight ${
+                        onClick={() => setDetail(b)}
+                        className={`absolute overflow-hidden rounded-[6px] border px-1.5 py-0.5 text-left text-[10px] leading-tight transition-shadow hover:z-20 hover:shadow-md ${
                           badge.inSalonboard
                             ? 'border-emerald-200 bg-emerald-50'
                             : badge.kind === 'salonboard'
                               ? 'border-sky-200 bg-sky-50'
                               : 'border-rose-200 bg-rose-50'
                         }`}
-                        style={{ left, width }}
-                        title={`${dt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}・${b.duration_min ?? 60}分 / ${displayName(b)} / ${badge.label}`}
+                        style={{ left, width, top, height: LANE_HEIGHT - 2 }}
+                        title={`${dt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}・${b.duration_min ?? 60}分 / ${displayName(b)} / ${badge.label} (クリックで詳細)`}
                       >
-                        <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1">
                           <span className="truncate font-semibold text-ink">
                             {dt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })} {displayName(b)}
                           </span>
                         </div>
                         <div className="flex items-center gap-1">
-                          <span className={`rounded px-1 py-px text-[9px] font-bold ${badge.cls}`}>{badge.label}</span>
+                          <span className={`shrink-0 rounded px-1 py-px text-[9px] font-bold ${badge.cls}`}>{badge.label}</span>
                           {canInsert &&
                             (res ? (
                               <span className={res.ok ? 'text-emerald-700' : 'text-red-600'}>{res.ok ? '✓' : '×'}</span>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => onInsert(b)}
-                                disabled={!!insertingId}
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!insertingId) onInsert(b);
+                                }}
                                 title="この予約を SalonBoard に挿入"
-                                className="inline-flex items-center rounded bg-brand-gradient px-1 py-px text-[9px] font-bold text-white disabled:opacity-40"
+                                className="inline-flex shrink-0 items-center rounded bg-brand-gradient px-1 py-px text-[9px] font-bold text-white"
                               >
                                 {insertingId === b.id ? '…' : 'SB挿入'}
-                              </button>
+                              </span>
                             ))}
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -1158,6 +1207,123 @@ function LedgerView({
           })}
         </div>
       </div>
+
+      {/* 予約詳細 (ブロッククリックで表示) */}
+      {detail && (
+        <LedgerDetailModal
+          booking={detail}
+          displayName={displayName}
+          classify={classify}
+          insertingId={insertingId}
+          insertResults={insertResults}
+          onInsert={onInsert}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </Card>
+  );
+}
+
+// 予約ブロックをクリックしたときの詳細モーダル
+function LedgerDetailModal({
+  booking: b,
+  displayName,
+  classify,
+  insertingId,
+  insertResults,
+  onInsert,
+  onClose,
+}: {
+  booking: BookingRow;
+  displayName: (b: BookingRow) => string;
+  classify: (b: BookingRow) => SbBadge;
+  insertingId: string | null;
+  insertResults: Record<string, { ok: boolean; msg: string }>;
+  onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
+  onClose: () => void;
+}) {
+  const dt = new Date(b.scheduled_at);
+  const end = new Date(dt.getTime() + (b.duration_min ?? 60) * 60_000);
+  const badge = classify(b);
+  const res = insertResults[b.id];
+  const canInsert = badge.kind !== 'salonboard' && !badge.inSalonboard;
+  const fmt = (d: Date) => d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const Row = ({ label, value }: { label: string; value: ReactNode }) =>
+    value ? (
+      <div className="flex gap-3 py-1 text-[13px]">
+        <span className="w-24 shrink-0 text-ink-soft">{label}</span>
+        <span className="flex-1 text-ink">{value}</span>
+      </div>
+    ) : null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-start justify-between gap-2">
+          <div>
+            <div className="text-[17px] font-bold text-ink">{displayName(b)}</div>
+            <span className={`mt-1 inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-bold ${badge.cls}`}>
+              {badge.label}
+            </span>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-full p-1 text-ink-soft hover:bg-hairline/40" aria-label="閉じる">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="divide-y divide-hairline/60">
+          <Row label="日時" value={`${fmt(dt)} 〜 ${end.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}`} />
+          <Row label="所要" value={`${b.duration_min ?? 60} 分`} />
+          <Row
+            label="状態"
+            value={
+              <span className={`inline-flex rounded px-1.5 py-0.5 text-[11px] font-bold ${bookingStatusJp(b.status).cls}`}>
+                {bookingStatusJp(b.status).label}
+              </span>
+            }
+          />
+          <Row label="担当(SB)" value={b.salonboard_staff_name ?? b.staff?.full_name ?? null} />
+          <Row label="メニュー" value={b.menus?.name ?? null} />
+          <Row label="出所" value={b.source ?? null} />
+          <Row label="SB予約ID" value={b.external_booking_id ?? null} />
+          <Row label="顧客コード" value={b.customers?.customer_code ?? null} />
+        </div>
+
+        {res && (
+          <div className={`mt-3 rounded-lg px-3 py-2 text-[12px] ${res.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+            {res.msg}
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          {b.salonboard_detail_url && (
+            <a
+              href={b.salonboard_detail_url}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40"
+            >
+              SalonBoardで開く
+            </a>
+          )}
+          {canInsert && !res && (
+            <button
+              type="button"
+              onClick={() => onInsert(b)}
+              disabled={!!insertingId}
+              className="inline-flex items-center gap-1 rounded-lg bg-brand-gradient px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-40"
+            >
+              <UploadCloud className="h-4 w-4" />
+              {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
