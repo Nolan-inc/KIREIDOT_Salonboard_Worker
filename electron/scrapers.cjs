@@ -2094,6 +2094,62 @@ function absoluteUrl(src) {
 // ----------------- ブログ一覧 (blogList) -----------------
 
 const BLOG_LIST_URL = 'https://salonboard.com/KLP/blog/blogList/';
+const BLOG_FORM_URL = 'https://salonboard.com/KLP/blog/blog/';
+
+// =====================================================================
+// ブログ投稿フォームの実 DOM をキャプチャする (実装前の調査用 / Step1)。
+// /KLP/blog/blog/ を開いて HTML + スクショを debug capture に保存し、
+// フォームのフィールド名/ボタンを後で確認できるようにする。
+// 実際の投稿はまだ行わない (DOM 確定後に postBlogViaForm を実装する)。
+//
+// payload: { title, body_html, cover_image_url?, tags?, ... }
+// 戻り値: { status:'captured', capturePath } | { status:'failed', reason, errorCode }
+// =====================================================================
+async function postBlogViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  let formUrl;
+  try {
+    formUrl = new URL('/KLP/blog/blog/', baseUrl).toString();
+  } catch (_e) {
+    formUrl = BLOG_FORM_URL;
+  }
+  await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // フォーム要素の手がかりを集めて診断に残す (title/body/画像/送信ボタンの候補)。
+  const diag = await page.evaluate(() => {
+    const names = (sel) => Array.from(document.querySelectorAll(sel)).map((el) => el.getAttribute('name') || el.id || '').filter(Boolean);
+    const btns = Array.from(document.querySelectorAll('a,button,input[type="submit"]'))
+      .map((el) => ({ tag: el.tagName.toLowerCase(), id: el.id || '', cls: el.className || '', text: (el.textContent || el.getAttribute('value') || '').trim().slice(0, 20) }))
+      .filter((b) => /登録|投稿|保存|確定|公開|submit|entry/i.test(b.text + b.id + b.cls))
+      .slice(0, 20);
+    return {
+      url: location.href,
+      title: document.title,
+      inputs: names('input'),
+      textareas: names('textarea'),
+      selects: names('select'),
+      fileInputs: names('input[type="file"]'),
+      buttons: btns,
+    };
+  }).catch(() => ({}));
+
+  const cap = await captureScrapeDebug(page, 'blog', 'form_dom', { diagnostics: diag });
+
+  // Step1: まだ実投稿しない。DOM を撮って手動対応に倒す (DOM 確定後に実装)。
+  return fail(
+    `ブログ投稿フォームの DOM をキャプチャしました (実投稿は DOM 確定後に実装)。capture=${cap || '?'} / title="${diag.title || ''}" textareas=[${(diag.textareas || []).join(',')}] inputs=[${(diag.inputs || []).slice(0, 12).join(',')}]`,
+    'BLOG_FORM_DOM_CAPTURED',
+    true,
+  );
+}
 
 async function scrapeBlogs(page, opts = {}) {
   // 詳細ページから本文を取得する最大件数 (順次アクセスのため負荷に注意)
@@ -2639,6 +2695,7 @@ module.exports = {
   pushBookingViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
+  postBlogViaForm,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

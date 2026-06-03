@@ -35,6 +35,7 @@ const {
   pushBookingViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
+  postBlogViaForm,
 } = require('./scrapers.cjs');
 
 let supabase = null;
@@ -225,7 +226,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -268,7 +269,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -1735,14 +1736,43 @@ async function runPushJobs({ showBrowser } = {}) {
         await saveStorageState(ctx, ssPath);
       }
 
-      // ジョブ種別で分岐: cancel_booking=キャンセル / push_booking(action=update)=変更 / それ以外=新規登録
+      // ジョブ種別で分岐: push_blog=ブログ投稿 / cancel_booking=キャンセル /
+      // push_booking(action=update)=変更 / それ以外=新規登録
+      const isBlog = job.job_type === 'push_blog';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
       const cap = job.max_attempts || 3;
       const exhausted = (job.attempts || 0) + 1 >= cap;
 
-      if (isCancel) {
+      if (isBlog) {
+        // ---- ブログ投稿 (現状は DOM キャプチャのみ。実投稿は DOM 確定後) ----
+        const result = await postBlogViaForm(page, payload, { baseUrl });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_blog', status: 'succeeded',
+            content_post_id: payload.content_post_id ?? null,
+            external_id: result.externalId ?? null,
+            summary: 'push_blog 投稿完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ ブログ投稿完了`, at: new Date().toISOString() });
+        } else if (result.status === 'captured') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_blog', status: 'manual_required',
+            content_post_id: payload.content_post_id ?? null,
+            error_code: 'BLOG_FORM_DOM_CAPTURED', error: 'ブログ投稿フォームのDOMを取得しました(実投稿は未実装)', manual_required: true,
+          });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_blog',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            content_post_id: payload.content_post_id ?? null,
+            error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] ブログ: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isCancel) {
         // ---- キャンセル ----
         const result = await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush });
         if (result.status === 'ok') {
@@ -1869,10 +1899,10 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 扱わない種別 (cancel/push以外) は整理して除外
+    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog を処理する。
     const handled = [];
     for (const j of claimedJobs) {
-      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking') {
+      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog') {
         await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
         drainedOther++;
       } else {
