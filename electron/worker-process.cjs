@@ -1665,46 +1665,13 @@ async function runPushJobs({ showBrowser } = {}) {
     `予約書き込み(push_booking)チェック開始 — 実登録(SalonBoardへ書込)=${enablePush ? 'ON' : 'OFF (確認のみ)'}`,
     'info',
   );
-  const MAX_JOBS = 30; // 1 回の同期で処理する上限 (暴走防止)
+  const MAX_BATCHES = 30; // バッチ取得の最大回数 (暴走防止)
   let processed = 0;
   let drainedOther = 0;
 
-  for (let i = 0; i < MAX_JOBS; i++) {
-    if (abortRequested) break;
-    // 1 件 claim
-    let job;
-    try {
-      const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/jobs?limit=1`, {
-        method: 'GET',
-        headers,
-      });
-      if (!res.ok) {
-        log(`予約書き込み: ジョブ取得失敗 ${res.status}`, 'warn');
-        break;
-      }
-      const json = await res.json();
-      const jobs = Array.isArray(json.jobs) ? json.jobs : [];
-      if (jobs.length === 0) {
-        // キューが空 = 処理対象なし
-        break;
-      }
-      const claimed = jobs[0];
-      // push_booking (新規/変更) と cancel_booking を処理する。それ以外は整理して次へ。
-      if (claimed.job_type !== 'push_booking' && claimed.job_type !== 'cancel_booking') {
-        await postCallback({
-          job_id: claimed.id,
-          status: 'cancelled',
-          error: `worker (desktop) は ${claimed.job_type} を処理しません`,
-        });
-        drainedOther++;
-        continue;
-      }
-      job = claimed;
-    } catch (e) {
-      log(`予約書き込み: ジョブ取得エラー: ${e?.message ?? e}`, 'warn');
-      break;
-    }
-
+  // 1 ジョブを処理する (ブラウザ起動→ログイン→種別分岐→close)。
+  // 店舗ごとに直列、店舗間は並列で呼ばれる。
+  const runOne = async (job) => {
     const payload = job.payload || {};
     const creds = job.credentials || {};
     const baseUrl = creds.base_url || 'https://salonboard.com/';
@@ -1743,7 +1710,7 @@ async function runPushJobs({ showBrowser } = {}) {
           error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at landing', manual_required: true,
         });
         await browser.close().catch(() => {});
-        continue;
+        return;
       }
       if (auth !== 'logged_in') {
         // 書き込み(push_booking)時もゆっくりログイン (bot 検知回避)。
@@ -1751,12 +1718,12 @@ async function runPushJobs({ showBrowser } = {}) {
         if (lr.status === 'captcha') {
           await postCallback({ job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id, error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at login', manual_required: true });
           await browser.close().catch(() => {});
-          continue;
+          return;
         }
         if (lr.status === 'failed') {
           await postCallback({ job_id: job.id, status: 'login_required', booking_id: payload.booking_id, error_code: 'LOGIN_FAILED', error: lr.reason || 'login failed', manual_required: true });
           await browser.close().catch(() => {});
-          continue;
+          return;
         }
         await saveStorageState(ctx, ssPath);
       }
@@ -1870,6 +1837,63 @@ async function runPushJobs({ showBrowser } = {}) {
       } catch (_e) { /* ignore */ }
       await browser?.close().catch(() => {});
     }
+  };
+
+  // バッチで claim → 店舗ごとにグループ化 → 店舗グループを並列実行
+  // (同一店舗内は直列。全店舗が別ログインIDなので店舗間並列は安全)。
+  // claim は最大5件/回。並列度は claim 件数と店舗数で自然に最大5に収まる。
+  for (let batch = 0; batch < MAX_BATCHES; batch++) {
+    if (abortRequested) break;
+    let claimedJobs = [];
+    try {
+      const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/jobs?limit=5`, {
+        method: 'GET',
+        headers,
+      });
+      if (!res.ok) {
+        log(`予約書き込み: ジョブ取得失敗 ${res.status}`, 'warn');
+        break;
+      }
+      const json = await res.json();
+      claimedJobs = Array.isArray(json.jobs) ? json.jobs : [];
+    } catch (e) {
+      log(`予約書き込み: ジョブ取得エラー: ${e?.message ?? e}`, 'warn');
+      break;
+    }
+    if (claimedJobs.length === 0) break; // キューが空
+
+    // 扱わない種別 (cancel/push以外) は整理して除外
+    const handled = [];
+    for (const j of claimedJobs) {
+      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking') {
+        await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
+        drainedOther++;
+      } else {
+        handled.push(j);
+      }
+    }
+    if (handled.length === 0) continue;
+
+    // 店舗ごとにグループ化
+    const byShop = new Map();
+    for (const j of handled) {
+      const sid = j.shop_id || 'unknown';
+      if (!byShop.has(sid)) byShop.set(sid, []);
+      byShop.get(sid).push(j);
+    }
+    if (byShop.size > 1) {
+      log(`予約書き込み: ${byShop.size} 店舗を並列処理 (各店舗内は直列)`, 'info');
+    }
+
+    // 各店舗グループ: グループ内は直列、グループ同士は並列
+    await Promise.all(
+      Array.from(byShop.values()).map(async (jobsForShop) => {
+        for (const job of jobsForShop) {
+          if (abortRequested) break;
+          await runOne(job);
+        }
+      }),
+    );
   }
   // 終了サマリを必ず出す (0件でも「実行されたが対象なし」が分かるように)。
   log(
