@@ -46,6 +46,10 @@ let abortRequested = false;
 let currentBrowser = null;
 // runPushJobs の二重起動防止 (Realtime トリガー + 自動同期が重なるケース)
 let pushJobsRunning = false;
+// 自動 push をブラウザ表示(headful)で実行するか。
+// headless だと SalonBoard のログイン画面で bot 検知され、入力欄が描画されず
+// ログインがハングするケースがあるため、手動「SB挿入」と同じく headful で動かす。
+const AUTO_PUSH_SHOW_BROWSER = true;
 
 /**
  * 全体同期 (runSync) の stale タイムアウト。
@@ -228,7 +232,7 @@ function subscribeToPushJobs() {
             pushTriggerTimer = null;
             // 全体同期中は runPushJobs を呼ばない (runSync 末尾で処理されるため二重実行回避)。
             if (running) return;
-            runPushJobs({ showBrowser: false }).catch((e) =>
+            runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch((e) =>
               log(`Realtime トリガーの push 処理でエラー: ${e?.message ?? e}`, 'warn'),
             );
           }, 1500);
@@ -240,7 +244,7 @@ function subscribeToPushJobs() {
           log('Realtime: salonboard_sync_jobs を購読開始 (予約作成→即SB反映)', 'info');
           // 起動時/再購読時に、購読前に積まれていた未処理ジョブをまとめて処理する。
           if (!running) {
-            runPushJobs({ showBrowser: false }).catch(() => {});
+            runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch(() => {});
           }
         }
       });
@@ -269,7 +273,7 @@ function startPushJobPoller() {
       if (error) return;
       if ((count ?? 0) > 0) {
         log(`保険ポーリング: 未処理ジョブ ${count} 件を検知 → push 処理`, 'info');
-        runPushJobs({ showBrowser: false }).catch(() => {});
+        runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch(() => {});
       }
     } catch (_e) { /* noop */ }
   }, PUSH_JOB_POLL_MS);
