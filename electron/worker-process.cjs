@@ -1197,7 +1197,10 @@ function clearStorageState(p) {
  * 代表的な管理画面パスの両方を試す。
  */
 async function isLoggedIn(page, baseUrl) {
+  // まず管理画面 TOP (/KLP/top/) を開いてセッション有効性を確認する。
+  // ここで KPCL018V01 等のエラー / ログイン画面に飛ばされたら needs_login。
   const candidates = [
+    safeUrl('/KLP/top/', baseUrl),
     safeUrl('/KLP/', baseUrl),
     safeUrl('/CNF/', baseUrl),
     baseUrl,
@@ -1233,17 +1236,21 @@ async function isLoggedIn(page, baseUrl) {
       );
       const errorTitle = /エラー|ERROR/i.test(title);
       const expiredText =
-        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|再ログイン|セッション|タイムアウト|ログインしてください|操作されなかった/.test(
+        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|再ログイン|セッション|タイムアウト|ログインしてください|操作されなかった|ログインTOP画面より再度やり直して|エラーが発生しました/.test(
           body,
         );
+      // SalonBoard のセッション/認証エラーコード (KPCL018V01 等) を検出。
+      // 「KPCL018V01」「KPCL017V01」などが本文に出たら未ログイン扱いにする。
+      const errorCode = /KPCL\d{3}V\d{2}/.test(body);
       // 「予約一覧/管理画面に居る」と言えるための前向きな手がかり (どれも無ければ不確実)
       const looksLikeApp =
         !!document.getElementById('resultList') ||
         document.querySelectorAll('input, select, textarea').length > 0 ||
         /予約|スタッフ|シフト|メニュー|売上|店舗/.test(body);
-      return { errorTitle, expiredText, hasLoginLink, looksLikeApp };
+      return { errorTitle, expiredText, errorCode, hasLoginLink, looksLikeApp };
     });
-    if (expired.expiredText || (expired.errorTitle && expired.hasLoginLink)) {
+    // KPCL系エラーコード / セッション切れ文言 / (エラー画面+ログイン導線) なら再ログイン。
+    if (expired.errorCode || expired.expiredText || (expired.errorTitle && expired.hasLoginLink)) {
       return 'needs_login';
     }
     // エラー画面でなくても、管理画面らしさが全く無ければ未ログイン扱い (安全側)
