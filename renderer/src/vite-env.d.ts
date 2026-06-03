@@ -285,6 +285,10 @@ type DeviceConfigTestResult = {
     consent_status: string;
     sync_status: string;
     enabled: boolean;
+    /** 取得側(SalonBoard→KIREIDOT)の連携が有効か */
+    sync_fetch_enabled?: boolean;
+    /** 登録側(KIREIDOT→SalonBoard)の連携が有効か */
+    sync_push_enabled?: boolean;
     blocked_until: string | null;
     last_success_at: string | null;
     last_error_at: string | null;

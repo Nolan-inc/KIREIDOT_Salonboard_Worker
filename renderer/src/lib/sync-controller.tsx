@@ -552,10 +552,13 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
         ? await bridge.deviceConfig.test()
         : { ok: false, shops: [] as never[] };
       let intervals: number[] = [];
+      let fetchShopIds: string[] = [];
       if (overview.ok) {
+        // 取得側 (sync_fetch_enabled) が有効な active 店舗のみ取得対象。
         const activeShops = (overview.shops ?? []).filter(
-          (s) => s.credential_status === 'active' && s.enabled,
+          (s) => s.credential_status === 'active' && s.enabled && s.sync_fetch_enabled !== false,
         );
+        fetchShopIds = activeShops.map((s) => s.shop_id);
         if (activeShops.length > 0) intervals = [12];
       }
       if (intervals.length === 0) return;
@@ -565,7 +568,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       // 実行
       lastAutoSyncAtRef.current = Date.now();
       if (!bridge) return;
-      await bridge.workerSync({ channels: DEFAULT_CHANNELS });
+      // 取得が有効な店舗だけを対象にする (sync_fetch_enabled)
+      await bridge.workerSync({ shopIds: fetchShopIds, channels: DEFAULT_CHANNELS });
     };
 
     // 起動直後にも 1 回判定 (短い遅延を入れて初期化完了を待つ)
@@ -605,6 +609,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
           .filter((s) => {
             if (s.credential_status !== 'active') return false;
             if (!s.enabled) return false;
+            // 取得側の連携がOFFの店舗は取得対象から外す
+            if (s.sync_fetch_enabled === false) return false;
             if (s.blocked_until && new Date(s.blocked_until).getTime() > now)
               return false;
             return true;
