@@ -166,6 +166,8 @@ async function initSupabase({
   // 親プロセス (renderer/main) で取得したセッションをそのまま注入する。
   // これで RLS が super_owner / admin として評価される。
   await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+  // Realtime の認証にもアクセストークンを渡す (postgres_changes の RLS 評価に必要)。
+  try { supabase.realtime.setAuth(accessToken); } catch (_e) { /* 古いSDKでは無くてもよい */ }
 
   // device 認証で credentials を取りに行く先を覚えておく。
   // どれか欠けていると revealCredentials が必ず失敗する (= 同期不能になる) ので、
@@ -233,6 +235,7 @@ function subscribeToPushJobs() {
         },
       )
       .subscribe((status) => {
+        log(`Realtime 購読ステータス: ${status}`, 'info');
         if (status === 'SUBSCRIBED') {
           log('Realtime: salonboard_sync_jobs を購読開始 (予約作成→即SB反映)', 'info');
           // 起動時/再購読時に、購読前に積まれていた未処理ジョブをまとめて処理する。
@@ -244,6 +247,32 @@ function subscribeToPushJobs() {
   } catch (e) {
     log(`Realtime 購読の開始に失敗: ${e?.message ?? e}`, 'warn');
   }
+
+  // Realtime が (RLS/接続の都合で) 効かないケースに備えた保険ポーリング。
+  // queued の push/cancel ジョブが残っていれば runPushJobs で消化する。
+  // (Admin API claim 任せだとアプリ側で件数を見られないので、DB を直接 count する)
+  startPushJobPoller();
+}
+
+let pushJobPollTimer = null;
+const PUSH_JOB_POLL_MS = 45_000;
+function startPushJobPoller() {
+  if (pushJobPollTimer) return; // 多重起動防止
+  pushJobPollTimer = setInterval(async () => {
+    try {
+      if (!supabase || running || pushJobsRunning) return;
+      const { count, error } = await supabase
+        .from('salonboard_sync_jobs')
+        .select('id', { count: 'exact', head: true })
+        .in('job_type', ['push_booking', 'cancel_booking'])
+        .eq('status', 'queued');
+      if (error) return;
+      if ((count ?? 0) > 0) {
+        log(`保険ポーリング: 未処理ジョブ ${count} 件を検知 → push 処理`, 'info');
+        runPushJobs({ showBrowser: false }).catch(() => {});
+      }
+    } catch (_e) { /* noop */ }
+  }, PUSH_JOB_POLL_MS);
 }
 
 /** Supabase client が確実に使える状態になるまで待つ */
