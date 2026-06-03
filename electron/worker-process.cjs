@@ -1275,33 +1275,46 @@ async function tryLogin(page, c) {
   }
 
   const idInput = page
-    .locator('input[name="userId"], input[name="loginId"], input[type="text"]')
+    .locator('input[name="userId"], input[name="loginId"], input[name="loginCd"], input[id*="login" i], input[type="email"], input[type="text"]:visible')
     .first();
   const pwInput = page
     .locator('input[name="password"], input[type="password"]')
     .first();
 
-  // slow モード (テスト時): 人間らしくゆっくり・1文字ずつ入力する。
+  // ID 欄の出現を明示的に待つ (headless で描画が遅い/別物のケースに備える)。
+  await idInput.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {});
+
+  // slow モード: 人間らしくゆっくり・1文字ずつ。ただし pressSequentially が失敗したら
+  // fill() にフォールバックする (headless で 1文字入力がタイムアウトしてもログインを通す)。
   const slow = !!(c && c.slow);
   const wait = (ms) => page.waitForTimeout(ms).catch(() => {});
-  try {
+  const typeInto = async (loc, value) => {
+    const v = String(value ?? '');
     if (slow) {
-      await idInput.click({ timeout: 10_000 }).catch(() => {});
-      await wait(700);
-      await idInput.pressSequentially(String(c.loginId ?? ''), { delay: 140, timeout: 20_000 });
-      await wait(900);
-      await pwInput.click({ timeout: 10_000 }).catch(() => {});
-      await wait(700);
-      await pwInput.pressSequentially(String(c.password ?? ''), { delay: 140, timeout: 20_000 });
-      await wait(1200);
-    } else {
-      await idInput.fill(c.loginId, { timeout: 10_000 });
-      await pwInput.fill(c.password, { timeout: 10_000 });
+      await loc.click({ timeout: 8_000 }).catch(() => {});
+      await wait(500);
+      try {
+        await loc.pressSequentially(v, { delay: 120, timeout: 8_000 });
+        // 入力が反映されたか確認。空ならフォールバック。
+        const got = await loc.inputValue().catch(() => '');
+        if (got && got.length >= Math.min(v.length, 1)) return true;
+      } catch (_e) { /* fallthrough to fill */ }
     }
-  } catch (e) {
+    // 通常 / フォールバック: fill で確実に入れる
+    try {
+      await loc.fill(v, { timeout: 8_000 });
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  };
+  const okId = await typeInto(idInput, c.loginId);
+  if (slow) await wait(600);
+  const okPw = await typeInto(pwInput, c.password);
+  if (!okId || !okPw) {
     return {
       status: 'failed',
-      reason: `cannot find login inputs: ${e instanceof Error ? e.message : e}`,
+      reason: `cannot find login inputs (id=${okId}, pw=${okPw})`,
     };
   }
 
