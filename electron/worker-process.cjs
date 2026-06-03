@@ -1689,13 +1689,12 @@ async function runPushJobs({ showBrowser } = {}) {
         break;
       }
       const claimed = jobs[0];
-      if (claimed.job_type !== 'push_booking') {
-        // desktop worker が扱わない種別 (cancel_booking 等) は cancelled で返して
-        // 次のジョブへ進む (break しない = push_booking が後ろにあっても到達できる)。
+      // push_booking (新規/変更) と cancel_booking を処理する。それ以外は整理して次へ。
+      if (claimed.job_type !== 'push_booking' && claimed.job_type !== 'cancel_booking') {
         await postCallback({
           job_id: claimed.id,
           status: 'cancelled',
-          error: `worker (desktop) は ${claimed.job_type} を処理しません (MVP は push_booking のみ)`,
+          error: `worker (desktop) は ${claimed.job_type} を処理しません`,
         });
         drainedOther++;
         continue;
@@ -1762,42 +1761,101 @@ async function runPushJobs({ showBrowser } = {}) {
         await saveStorageState(ctx, ssPath);
       }
 
-      // 登録フォーム実行
-      const result = await pushBookingViaForm(page, payload, { baseUrl, enablePush });
+      // ジョブ種別で分岐: cancel_booking=キャンセル / push_booking(action=update)=変更 / それ以外=新規登録
+      const isCancel = job.job_type === 'cancel_booking';
+      const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
-      if (result.status === 'ok') {
-        await postCallback({
-          job_id: job.id, job_type: 'push_booking', status: 'succeeded',
-          booking_id: payload.booking_id,
-          external_booking_id: result.externalId ?? null,
-          salonboard_detail_url: result.detailUrl ?? null,
-          result_payload: result.confirmed,
-          summary: `push_booking 登録完了 (external_id=${result.externalId ?? '?'})`,
-        });
-        emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}`, at: new Date().toISOString() });
-        emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
-      } else if (result.status === 'confirm_only') {
-        await postCallback({
-          job_id: job.id, job_type: 'push_booking', status: 'manual_required',
-          booking_id: payload.booking_id, error_code: 'PUSH_DISABLED',
-          error: '入力まで成功しましたが、実登録 (SALONBOARD_ENABLE_PUSH) が無効のため登録ボタンを押していません。設定で有効化してください。',
-          manual_required: true, result_payload: result.confirmed,
-        });
-        emit('log', { level: 'warn', msg: `[${tag}] 🟡 入力のみ (実登録OFF)`, at: new Date().toISOString() });
-        emit('push:done', { bookingId: payload.booking_id, ok: false, reason: 'push_disabled' });
+      const cap = job.max_attempts || 3;
+      const exhausted = (job.attempts || 0) + 1 >= cap;
+
+      if (isCancel) {
+        // ---- キャンセル ----
+        const result = await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'cancel_booking', status: 'succeeded',
+            booking_id: payload.booking_id, summary: 'cancel_booking 完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard キャンセル完了`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'cancel_booking', status: 'manual_required',
+            booking_id: payload.booking_id, error_code: 'PUSH_DISABLED',
+            error: 'キャンセル操作まで到達しましたが、実登録(実書込)が無効のため確定していません。設定で有効化してください。',
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 キャンセル未確定 (実登録OFF)`, at: new Date().toISOString() });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'cancel_booking',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 キャンセル失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isUpdate) {
+        // ---- 変更 (時間/所要/担当) ----
+        const result = await changeBookingViaForm(page, payload, { baseUrl, enableChange: enablePush });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking', status: 'succeeded',
+            booking_id: payload.booking_id, external_booking_id: payload.external_booking_id ?? null,
+            summary: 'push_booking(変更) 完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard 変更完了`, at: new Date().toISOString() });
+          emit('push:done', { bookingId: payload.booking_id, ok: true });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking', status: 'manual_required',
+            booking_id: payload.booking_id, error_code: 'PUSH_DISABLED',
+            error: '変更入力まで到達しましたが、実登録(実書込)が無効のため確定していません。', manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 変更未確定 (実登録OFF)`, at: new Date().toISOString() });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 変更失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+        }
       } else {
-        const cap = job.max_attempts || 3;
-        const exhausted = (job.attempts || 0) + 1 >= cap;
-        const toManual = result.manualRequired || exhausted;
-        const isCaptcha = result.errorCode === 'RECAPTCHA_REQUIRED';
-        await postCallback({
-          job_id: job.id, job_type: 'push_booking',
-          status: isCaptcha ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
-          booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason,
-          manual_required: toManual,
-        });
-        emit('log', { level: 'warn', msg: `[${tag}] 🔴 失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
-        emit('push:done', { bookingId: payload.booking_id, ok: false, reason: result.reason, errorCode: result.errorCode });
+        // ---- 新規登録 ----
+        const result = await pushBookingViaForm(page, payload, { baseUrl, enablePush });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking', status: 'succeeded',
+            booking_id: payload.booking_id,
+            external_booking_id: result.externalId ?? null,
+            salonboard_detail_url: result.detailUrl ?? null,
+            result_payload: result.confirmed,
+            summary: `push_booking 登録完了 (external_id=${result.externalId ?? '?'})`,
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}`, at: new Date().toISOString() });
+          emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking', status: 'manual_required',
+            booking_id: payload.booking_id, error_code: 'PUSH_DISABLED',
+            error: '入力まで成功しましたが、実登録 (SALONBOARD_ENABLE_PUSH) が無効のため登録ボタンを押していません。設定で有効化してください。',
+            manual_required: true, result_payload: result.confirmed,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 入力のみ (実登録OFF)`, at: new Date().toISOString() });
+          emit('push:done', { bookingId: payload.booking_id, ok: false, reason: 'push_disabled' });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          const isCaptcha = result.errorCode === 'RECAPTCHA_REQUIRED';
+          await postCallback({
+            job_id: job.id, job_type: 'push_booking',
+            status: isCaptcha ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason,
+            manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+          emit('push:done', { bookingId: payload.booking_id, ok: false, reason: result.reason, errorCode: result.errorCode });
+        }
       }
       await browser.close().catch(() => {});
       processed++;
