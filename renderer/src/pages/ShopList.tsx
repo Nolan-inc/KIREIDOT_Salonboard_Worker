@@ -13,6 +13,8 @@ import { useSelection } from '../lib/selection-context';
 import { useAuth } from '../lib/auth-context';
 import {
   fetchCredentialOverview,
+  setSalonboardCredentialEnabled,
+  setSalonboardSyncDirection,
   type CredentialOverviewRow,
 } from '../lib/salonboard';
 import type { NavKey } from '../lib/nav';
@@ -88,6 +90,16 @@ export function ShopList({ onPickShop }: { onPickShop: (key: NavKey) => void }) 
     onPickShop('dashboard');
   }
 
+  // 連携トグルの楽観更新 (credByShop の該当行を書き換える)
+  function patchCred(shopId: string, patch: Partial<CredentialOverviewRow>) {
+    setCredByShop((prev) => {
+      const next = new Map(prev);
+      const cur = next.get(shopId);
+      if (cur) next.set(shopId, { ...cur, ...patch });
+      return next;
+    });
+  }
+
   if (!selectedOrgId) {
     return (
       <div className="flex flex-col gap-5 pt-4">
@@ -131,11 +143,13 @@ export function ShopList({ onPickShop }: { onPickShop: (key: NavKey) => void }) 
               {shops.map((s) => {
                 const cred = credByShop.get(s.id);
                 return (
-                  <button
+                  <div
                     key={s.id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => pick(s.id)}
-                    className="group flex flex-col items-start gap-2 rounded-[14px] border border-hairline bg-white/85 p-4 text-left transition hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-card"
+                    onKeyDown={(e) => { if (e.key === 'Enter') pick(s.id); }}
+                    className="group flex cursor-pointer flex-col items-start gap-2 rounded-[14px] border border-hairline bg-white/85 p-4 text-left transition hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-card"
                   >
                     <div className="flex w-full items-start gap-3">
                       <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white shadow-brand-sm">
@@ -155,13 +169,107 @@ export function ShopList({ onPickShop }: { onPickShop: (key: NavKey) => void }) 
                     </div>
 
                     <ShopCredBadge cred={cred} />
-                  </button>
+                    {cred?.has_credential && (
+                      <SyncToggles shopId={s.id} cred={cred} onPatch={patchCred} />
+                    )}
+                  </div>
                 );
               })}
             </div>
           )}
         </CardBody>
       </Card>
+    </div>
+  );
+}
+
+// 店舗カード内の連携トグル: 連携(全体) / 取得 / 登録 を個別 ON/OFF。
+// カードのクリック(店舗選択)と分離するため stopPropagation する。
+function SyncToggles({
+  shopId,
+  cred,
+  onPatch,
+}: {
+  shopId: string;
+  cred: CredentialOverviewRow;
+  onPatch: (shopId: string, patch: Partial<CredentialOverviewRow>) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const enabled = cred.enabled !== false;
+  const fetchOn = cred.sync_fetch_enabled !== false;
+  const pushOn = cred.sync_push_enabled !== false;
+
+  const Chip = ({
+    label,
+    on,
+    disabled,
+    onToggle,
+  }: {
+    label: string;
+    on: boolean;
+    disabled?: boolean;
+    onToggle: () => void;
+  }) => (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-disabled={disabled || busy === label}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled && busy !== label) onToggle();
+      }}
+      title={`${label}: ${on ? 'ON（クリックでOFF）' : 'OFF（クリックでON）'}`}
+      className={
+        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition ' +
+        (disabled
+          ? 'cursor-not-allowed border-hairline text-muted opacity-50'
+          : on
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 cursor-pointer'
+            : 'border-hairline bg-white text-ink-soft hover:bg-brand-light/40 cursor-pointer')
+      }
+    >
+      <span className={'h-1.5 w-1.5 rounded-full ' + (on && !disabled ? 'bg-emerald-500' : 'bg-zinc-300')} />
+      {busy === label ? '…' : label}
+    </span>
+  );
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <Chip
+        label="連携"
+        on={enabled}
+        onToggle={async () => {
+          setBusy('連携');
+          const next = !enabled;
+          const r = await setSalonboardCredentialEnabled(shopId, next);
+          if (r.ok) onPatch(shopId, { enabled: next });
+          setBusy(null);
+        }}
+      />
+      <Chip
+        label="取得"
+        on={fetchOn}
+        disabled={!enabled}
+        onToggle={async () => {
+          setBusy('取得');
+          const next = !fetchOn;
+          const r = await setSalonboardSyncDirection(shopId, 'fetch', next);
+          if (r.ok) onPatch(shopId, { sync_fetch_enabled: next });
+          setBusy(null);
+        }}
+      />
+      <Chip
+        label="登録"
+        on={pushOn}
+        disabled={!enabled}
+        onToggle={async () => {
+          setBusy('登録');
+          const next = !pushOn;
+          const r = await setSalonboardSyncDirection(shopId, 'push', next);
+          if (r.ok) onPatch(shopId, { sync_push_enabled: next });
+          setBusy(null);
+        }}
+      />
     </div>
   );
 }

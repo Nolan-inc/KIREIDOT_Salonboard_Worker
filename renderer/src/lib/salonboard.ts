@@ -20,6 +20,10 @@ export type CredentialOverviewRow = {
   login_id: string | null;
   base_url: string | null;
   enabled: boolean | null;
+  /** 取得側(SalonBoard→KIREIDOT)の連携 */
+  sync_fetch_enabled: boolean | null;
+  /** 登録側(KIREIDOT→SalonBoard)の連携 */
+  sync_push_enabled: boolean | null;
   sync_interval_minutes: number | null;
   last_login_at: string | null;
   last_success_at: string | null;
@@ -318,6 +322,26 @@ export async function setSalonboardCredentialEnabled(
     p_shop_id: shopId,
     p_enabled: enabled,
   });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+/**
+ * 取得(fetch)/登録(push) の連携を店舗ごとに個別 ON/OFF する。
+ * salonboard_credentials を直接更新する (owner/shop_manager の RLS で許可)。
+ *   direction: 'fetch' = 取得側 (SalonBoard→KIREIDOT)
+ *              'push'  = 登録側 (KIREIDOT→SalonBoard)
+ */
+export async function setSalonboardSyncDirection(
+  shopId: string,
+  direction: 'fetch' | 'push',
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const col = direction === 'fetch' ? 'sync_fetch_enabled' : 'sync_push_enabled';
+  const { error } = await supabase
+    .from('salonboard_credentials')
+    .update({ [col]: enabled })
+    .eq('shop_id', shopId);
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }
