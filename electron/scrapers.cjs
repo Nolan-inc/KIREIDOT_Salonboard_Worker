@@ -2142,11 +2142,48 @@ async function postBlogViaForm(page, payload, opts = {}) {
     return fail(`ブログ投稿フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 入力: タイトル / 本文 (+ 任意で投稿者スタッフ)
+  // 入力: タイトル / 本文 / 投稿者 / カテゴリ (投稿者・カテゴリ・本文は SalonBoard 必須)
   await page.locator('input#blogTitle').first().fill(title, { timeout: 8_000 }).catch(() => {});
+  // 本文 (必須)。空ならタイトルで埋める。
   await page.locator('textarea#blogContents1').first().fill(bodyPlain || title, { timeout: 8_000 }).catch(() => {});
-  if (p.author_external_id) {
-    await page.locator('select#staffId').first().selectOption({ value: String(p.author_external_id) }).catch(() => {});
+
+  // 投稿者 (select#staffId, 必須)。指定があればそれ、無ければ最初の有効スタッフを選ぶ。
+  {
+    const staffSel = page.locator('select#staffId').first();
+    if ((await staffSel.count().catch(() => 0)) > 0) {
+      let picked = false;
+      if (p.author_external_id) {
+        picked = await staffSel.selectOption({ value: String(p.author_external_id) }).then(() => true).catch(() => false);
+      }
+      if (!picked) {
+        // 先頭の value 非空 option を選ぶ
+        const val = await staffSel.evaluate((el) => {
+          const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
+          if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); return opt.value; }
+          return null;
+        }).catch(() => null);
+        if (!val) {
+          const cap = await captureScrapeDebug(page, 'blog', 'no_author', { diagnostics: { url: page.url() } });
+          return fail(`ブログ投稿者(staffId)の選択肢がありません。SalonBoardで投稿者を登録してください (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+        }
+      }
+    }
+  }
+
+  // カテゴリ (select#blogCategoryCd, 必須)。指定が無ければ最初の有効カテゴリを選ぶ。
+  {
+    const catSel = page.locator('select#blogCategoryCd').first();
+    if ((await catSel.count().catch(() => 0)) > 0) {
+      const want = (p.category_code && String(p.category_code)) || null;
+      let picked = false;
+      if (want) picked = await catSel.selectOption({ value: want }).then(() => true).catch(() => false);
+      if (!picked) {
+        await catSel.evaluate((el) => {
+          const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
+          if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        }).catch(() => {});
+      }
+    }
   }
 
   if (!enablePost) {
