@@ -44,6 +44,8 @@ let running = false;
 let runStartedAt = 0;
 let abortRequested = false;
 let currentBrowser = null;
+// runPushJobs の二重起動防止 (Realtime トリガー + 自動同期が重なるケース)
+let pushJobsRunning = false;
 
 /**
  * 全体同期 (runSync) の stale タイムアウト。
@@ -186,6 +188,62 @@ async function initSupabase({
   }
 
   initReady = true;
+
+  // KIREIDOT/Admin で予約が作成されると salonboard_sync_jobs に push_booking ジョブが
+  // 投入される。それを Realtime で購読し、投入された瞬間に push を実行する
+  // (= 予約作成→即SB反映)。Worker が落ちている間のジョブはキューに残り、起動時の
+  // 自動同期/この購読の初回トリガーでまとめて処理される。
+  subscribeToPushJobs();
+}
+
+// ---- push_booking ジョブの Realtime 購読 (即時 push トリガー) ----
+let pushJobChannel = null;
+let pushTriggerTimer = null;
+
+/**
+ * salonboard_sync_jobs の INSERT を購読し、push_booking / cancel_booking ジョブが
+ * 積まれたら runPushJobs を (デバウンスして) 起動する。
+ * 連続作成に備え 1.5 秒デバウンス。実行中(running)なら runPushJobs 側でスキップされる。
+ */
+function subscribeToPushJobs() {
+  if (!supabase) return;
+  try {
+    if (pushJobChannel) {
+      try { supabase.removeChannel(pushJobChannel); } catch (_e) { /* noop */ }
+      pushJobChannel = null;
+    }
+    pushJobChannel = supabase
+      .channel('salonboard-push-jobs')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
+        (payload) => {
+          const jt = payload?.new?.job_type;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking') return;
+          log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
+          if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
+          pushTriggerTimer = setTimeout(() => {
+            pushTriggerTimer = null;
+            // 全体同期中は runPushJobs を呼ばない (runSync 末尾で処理されるため二重実行回避)。
+            if (running) return;
+            runPushJobs({ showBrowser: false }).catch((e) =>
+              log(`Realtime トリガーの push 処理でエラー: ${e?.message ?? e}`, 'warn'),
+            );
+          }, 1500);
+        },
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          log('Realtime: salonboard_sync_jobs を購読開始 (予約作成→即SB反映)', 'info');
+          // 起動時/再購読時に、購読前に積まれていた未処理ジョブをまとめて処理する。
+          if (!running) {
+            runPushJobs({ showBrowser: false }).catch(() => {});
+          }
+        }
+      });
+  } catch (e) {
+    log(`Realtime 購読の開始に失敗: ${e?.message ?? e}`, 'warn');
+  }
 }
 
 /** Supabase client が確実に使える状態になるまで待つ */
@@ -1543,11 +1601,18 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
  * @param showBrowser ブラウザ画面を表示するか
  */
 async function runPushJobs({ showBrowser } = {}) {
+  // 二重起動防止 (Realtime トリガーと自動同期が重なってもブラウザを二重に立てない)
+  if (pushJobsRunning) {
+    log('予約書き込み: 既に処理中のためスキップ', 'info');
+    return;
+  }
   const headers = buildDeviceHeaders();
   if (!headers) {
     log('予約書き込み: 認証情報が未設定のためスキップしました', 'warn');
     return;
   }
+  pushJobsRunning = true;
+  try {
   const enablePush = !!deviceAuth.enablePush;
   // 開始を必ずログに出す (ユーザーが「実行されたか」を確認できるように)。
   log(
@@ -1709,6 +1774,9 @@ async function runPushJobs({ showBrowser } = {}) {
       (processed === 0 && drainedOther === 0 ? ' (キューに対象なし)' : ''),
     'info',
   );
+  } finally {
+    pushJobsRunning = false;
+  }
 }
 
 /** /api/salonboard/callback に結果を POST する。 */
