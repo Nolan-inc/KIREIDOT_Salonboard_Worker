@@ -250,6 +250,22 @@ interface Window {
         bookingId?: string;
         syncStatus?: 'pending_push' | 'not_enqueued';
       }>;
+      /** ブログ記事を作成し、公開+連携ONなら push_blog ジョブまで積む */
+      createContent: (payload: {
+        shopId: string;
+        title: string;
+        body?: string | null;
+        coverImageUrl?: string | null;
+        tags?: string[];
+        syncToSalonboard?: boolean;
+        publish?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        status?: number;
+        contentPostId?: string;
+        enqueued?: boolean;
+      }>;
       /** 実登録トグルのみ更新 */
       setEnablePush: (
         enablePush: boolean,

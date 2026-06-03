@@ -31,6 +31,8 @@ export function Blog() {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<PostRow[]>([]);
   const [previewing, setPreviewing] = useState<PostRow | null>(null);
+  const [composing, setComposing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!scope) return;
@@ -42,7 +44,7 @@ export function Blog() {
     return () => {
       cancelled = true;
     };
-  }, [scope?.shopId, scope?.organizationId]);
+  }, [scope?.shopId, scope?.organizationId, reloadKey]);
 
   return (
     <div className="flex flex-col gap-5 pt-4">
@@ -54,7 +56,13 @@ export function Blog() {
           <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
             <Send className="h-3.5 w-3.5" /> サロンボードへ同期
           </button>
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
+          <button
+            type="button"
+            onClick={() => setComposing(true)}
+            disabled={!scope?.shopId}
+            title={scope?.shopId ? '記事を作成' : '先に店舗を選択してください'}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand disabled:opacity-40"
+          >
             <Plus className="h-3.5 w-3.5" /> 記事を書く
           </button>
         </div>
@@ -250,6 +258,142 @@ export function Blog() {
           </div>
         </div>
       )}
+
+      {/* 記事作成モーダル */}
+      {composing && scope?.shopId && (
+        <ComposeModal
+          shopId={scope.shopId}
+          onClose={() => setComposing(false)}
+          onCreated={() => {
+            setComposing(false);
+            setTimeout(() => setReloadKey((k) => k + 1), 800);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// 記事作成モーダル。タイトル/本文/カバー画像/SB連携を入力 → device API でブログ作成。
+// 公開 + SB連携ON のとき push_blog ジョブが積まれ、予約同期くんが SalonBoard へ自動投稿する。
+function ComposeModal({
+  shopId,
+  onClose,
+  onCreated,
+}: {
+  shopId: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [coverUrl, setCoverUrl] = useState('');
+  const [syncSb, setSyncSb] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  async function submit() {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.deviceConfig?.createContent) {
+      setResult({ ok: false, msg: 'この機能はデスクトップアプリでのみ利用できます' });
+      return;
+    }
+    if (!title.trim()) {
+      setResult({ ok: false, msg: 'タイトルを入力してください' });
+      return;
+    }
+    setSubmitting(true);
+    setResult(null);
+    const r = await bridge.deviceConfig.createContent({
+      shopId,
+      title: title.trim(),
+      body: body.trim() || null,
+      coverImageUrl: coverUrl.trim() || null,
+      syncToSalonboard: syncSb,
+      publish: true,
+    });
+    setSubmitting(false);
+    if (r.ok) {
+      setResult({
+        ok: true,
+        msg: syncSb
+          ? (r.enqueued
+              ? '✅ 記事を作成しました。SalonBoard へ自動投稿します（数分後に反映）。'
+              : '✅ 記事を作成しました（SalonBoard 投稿ジョブは積まれませんでした。連携設定をご確認ください）。')
+          : '✅ 記事を作成しました（SalonBoard には投稿しません）。',
+      });
+      setTimeout(onCreated, 1200);
+    } else {
+      setResult({ ok: false, msg: `失敗: ${r.error ?? 'unknown'}` });
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-hairline px-5 py-4">
+          <div className="text-[15px] font-bold text-ink">記事を書く</div>
+          <button type="button" onClick={onClose} className="text-ink-soft hover:text-ink" aria-label="閉じる">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto px-5 py-4">
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-semibold text-ink-soft">タイトル *</span>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="例: 6月のおすすめメニュー"
+              className="w-full rounded-lg border border-hairline px-3 py-2 text-[14px] text-ink"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-semibold text-ink-soft">本文</span>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={8}
+              placeholder="本文を入力（改行可）"
+              className="w-full resize-y rounded-lg border border-hairline px-3 py-2 text-[13px] leading-relaxed text-ink"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[12px] font-semibold text-ink-soft">カバー画像URL (任意)</span>
+            <input
+              value={coverUrl}
+              onChange={(e) => setCoverUrl(e.target.value)}
+              placeholder="https://…"
+              className="w-full rounded-lg border border-hairline px-3 py-2 text-[13px] text-ink"
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={syncSb} onChange={(e) => setSyncSb(e.target.checked)} className="h-4 w-4" />
+            <span className="text-[13px] text-ink">SalonBoard にも自動投稿する</span>
+          </label>
+          {result && (
+            <div className={`rounded-lg px-3 py-2 text-[12px] ${result.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+              {result.msg}
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-hairline px-5 py-3">
+          <button type="button" onClick={onClose} className="rounded-lg border border-hairline px-4 py-1.5 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40">
+            キャンセル
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={submitting || !title.trim()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-brand-gradient px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-40"
+          >
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            {submitting ? '作成中…' : '作成して公開'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
