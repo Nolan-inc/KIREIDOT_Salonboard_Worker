@@ -1759,7 +1759,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   for (const path of candidates) {
     await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
-    if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
+    if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#change, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -1794,11 +1794,10 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return { status: 'confirm_only' };
   }
 
-  // 4) 確定: 「登録する」(a#regist) もしくは「変更を確定」等。
-  //    確認は登録フォームと同じくネイティブ confirm の場合と、キャンセルのような
-  //    HTMLダイアログ(a.accept)の場合の両方に備える。
+  // 4) 確定: 実DOMでは画面下部の <a id="change" class="mod_btn_50">確定する</a> が
+  //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
   const submitBtn = page
-    .locator('a#regist, a:has-text("登録する"), a:has-text("変更を確定"), a:has-text("変更する"):not([href*="extReserveChange"]), button:has-text("登録する")')
+    .locator('a#change:visible, a.mod_btn_50:has-text("確定する"), a#regist, a:has-text("登録する")')
     .first();
   if ((await submitBtn.count().catch(() => 0)) === 0) {
     const cap = await captureScrapeDebug(page, 'change', `no_submit_${reserveId}`, { diagnostics: { reserveId, url: page.url() } });
@@ -1811,19 +1810,23 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let confirmClicked = false;
   try {
     await submitBtn.click({ timeout: 12_000 }).catch(() => {});
-    // HTMLダイアログ「はい」(.accept) が出れば押す
-    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
-    await yesBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
-    if ((await yesBtn.count().catch(() => 0)) > 0) {
+    await page.waitForTimeout(1500);
+    // 「確定する」後に確認画面/ダイアログが出る場合があるので、最終確定ボタンを押す。
+    //   ① HTMLダイアログ「はい」(a.accept) ② 確認画面の「登録する」(a#regist) / 「確定する」(a#change)
+    const finalBtn = page
+      .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a#change:visible')
+      .first();
+    await finalBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
+    if ((await finalBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
         page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
-        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmClicked = true;
+      await page.waitForTimeout(1500);
     } else {
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
     }
-    await page.waitForTimeout(1500);
   } finally {
     page.off('dialog', onDialog);
   }
