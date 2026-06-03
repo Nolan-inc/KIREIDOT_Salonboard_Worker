@@ -1746,8 +1746,8 @@ async function runPushJobs({ showBrowser } = {}) {
       const exhausted = (job.attempts || 0) + 1 >= cap;
 
       if (isBlog) {
-        // ---- ブログ投稿 (現状は DOM キャプチャのみ。実投稿は DOM 確定後) ----
-        const result = await postBlogViaForm(page, payload, { baseUrl });
+        // ---- ブログ投稿 ----
+        const result = await postBlogViaForm(page, payload, { baseUrl, enablePost: enablePush });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_blog', status: 'succeeded',
@@ -1755,13 +1755,14 @@ async function runPushJobs({ showBrowser } = {}) {
             external_id: result.externalId ?? null,
             summary: 'push_blog 投稿完了',
           });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ ブログ投稿完了`, at: new Date().toISOString() });
-        } else if (result.status === 'captured') {
+          emit('log', { level: 'info', msg: `[${tag}] ✅ ブログ投稿完了${result.externalId ? ` (id=${result.externalId})` : ''}`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
           await postCallback({
             job_id: job.id, job_type: 'push_blog', status: 'manual_required',
             content_post_id: payload.content_post_id ?? null,
-            error_code: 'BLOG_FORM_DOM_CAPTURED', error: 'ブログ投稿フォームのDOMを取得しました(実投稿は未実装)', manual_required: true,
+            error_code: 'PUSH_DISABLED', error: '入力まで成功しましたが、実登録(実書込)が無効のため投稿していません。設定で有効化してください。', manual_required: true,
           });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 ブログ入力のみ (実登録OFF)`, at: new Date().toISOString() });
         } else {
           const toManual = result.manualRequired || exhausted;
           await postCallback({

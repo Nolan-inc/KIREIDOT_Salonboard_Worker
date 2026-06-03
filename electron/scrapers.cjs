@@ -2097,58 +2097,112 @@ const BLOG_LIST_URL = 'https://salonboard.com/KLP/blog/blogList/';
 const BLOG_FORM_URL = 'https://salonboard.com/KLP/blog/blog/';
 
 // =====================================================================
-// ブログ投稿フォームの実 DOM をキャプチャする (実装前の調査用 / Step1)。
-// /KLP/blog/blog/ を開いて HTML + スクショを debug capture に保存し、
-// フォームのフィールド名/ボタンを後で確認できるようにする。
-// 実際の投稿はまだ行わない (DOM 確定後に postBlogViaForm を実装する)。
+// ブログを SalonBoard に投稿する (KIREIDOT → SalonBoard)。
+// 実 DOM (確認済み):
+//   URL     : /KLP/blog/blog/  (title="SALON BOARD : ブログ編集 入力")
+//   タイトル: input#blogTitle (name=title)
+//   本文    : textarea#blogContents1 (段落1。複数段落 blogContents1..5)
+//   投稿者  : select#staffId   カテゴリ: select#blogCategoryCd
+//   画像    : input[name=sendFile] (今回は未対応。本文のみ)
+//   確認へ  : <a id="confirm" class="mod_btn_confirm_03">
+//             → 確認画面で最終「登録する」(a#regist 等 / a.accept ダイアログ)
 //
-// payload: { title, body_html, cover_image_url?, tags?, ... }
-// 戻り値: { status:'captured', capturePath } | { status:'failed', reason, errorCode }
+// payload: { content_post_id, title, body_html, cover_image_url?, tags?, author_external_id? }
+// opts: { baseUrl, enablePost }  enablePost=false なら確認まで(投稿確定しない)。
+// 戻り値: { status:'ok', externalId? } | { status:'confirm_only' } | { status:'failed', ... }
 // =====================================================================
 async function postBlogViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePost = opts.enablePost !== false;
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
+  const title = (p.title && String(p.title).trim()) || '';
+  if (!title) return fail('ブログのタイトルが空です', 'UNKNOWN_ERROR', true);
+  // 本文: HTML タグを除いたプレーン化 (SalonBoard の textarea はプレーンテキスト想定)。
+  const bodyPlain = String(p.body_html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
   let formUrl;
-  try {
-    formUrl = new URL('/KLP/blog/blog/', baseUrl).toString();
-  } catch (_e) {
-    formUrl = BLOG_FORM_URL;
-  }
+  try { formUrl = new URL('/KLP/blog/blog/', baseUrl).toString(); } catch (_e) { formUrl = BLOG_FORM_URL; }
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
+  // フォームに到達しているか
+  if ((await page.locator('input#blogTitle, textarea#blogContents1').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'blog', `no_form`, { diagnostics: { url: page.url(), title: await page.title().catch(() => '') } });
+    return fail(`ブログ投稿フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
 
-  // フォーム要素の手がかりを集めて診断に残す (title/body/画像/送信ボタンの候補)。
-  const diag = await page.evaluate(() => {
-    const names = (sel) => Array.from(document.querySelectorAll(sel)).map((el) => el.getAttribute('name') || el.id || '').filter(Boolean);
-    const btns = Array.from(document.querySelectorAll('a,button,input[type="submit"]'))
-      .map((el) => ({ tag: el.tagName.toLowerCase(), id: el.id || '', cls: el.className || '', text: (el.textContent || el.getAttribute('value') || '').trim().slice(0, 20) }))
-      .filter((b) => /登録|投稿|保存|確定|公開|submit|entry/i.test(b.text + b.id + b.cls))
-      .slice(0, 20);
-    return {
-      url: location.href,
-      title: document.title,
-      inputs: names('input'),
-      textareas: names('textarea'),
-      selects: names('select'),
-      fileInputs: names('input[type="file"]'),
-      buttons: btns,
-    };
-  }).catch(() => ({}));
+  // 入力: タイトル / 本文 (+ 任意で投稿者スタッフ)
+  await page.locator('input#blogTitle').first().fill(title, { timeout: 8_000 }).catch(() => {});
+  await page.locator('textarea#blogContents1').first().fill(bodyPlain || title, { timeout: 8_000 }).catch(() => {});
+  if (p.author_external_id) {
+    await page.locator('select#staffId').first().selectOption({ value: String(p.author_external_id) }).catch(() => {});
+  }
 
-  const cap = await captureScrapeDebug(page, 'blog', 'form_dom', { diagnostics: diag });
+  if (!enablePost) {
+    return { status: 'confirm_only' };
+  }
 
-  // Step1: まだ実投稿しない。DOM を撮って手動対応に倒す (DOM 確定後に実装)。
-  return fail(
-    `ブログ投稿フォームの DOM をキャプチャしました (実投稿は DOM 確定後に実装)。capture=${cap || '?'} / title="${diag.title || ''}" textareas=[${(diag.textareas || []).join(',')}] inputs=[${(diag.inputs || []).slice(0, 12).join(',')}]`,
-    'BLOG_FORM_DOM_CAPTURED',
-    true,
-  );
+  // 「確認する」→ 確認画面 → 最終「登録する」。ネイティブ confirm / HTMLダイアログ両対応。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let confirmed = false;
+  try {
+    const confirmBtn = page.locator('a#confirm, a.mod_btn_confirm_03, a:has-text("確認する")').first();
+    if ((await confirmBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'blog', `no_confirm`, { diagnostics: { url: page.url() } });
+      return fail(`ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    // 確認画面の最終確定ボタン (登録する/投稿する/確定 など) or HTMLダイアログ
+    const finalBtn = page
+      .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a:has-text("投稿する"):visible, a.mod_btn_submit_01:visible, input[type="submit"][value*="登録"]')
+      .first();
+    await finalBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    if ((await finalBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmed = true;
+      await page.waitForTimeout(1500);
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'blog', `after`, { diagnostics: { confirmed, nativeDialogAccepted, url: page.url() } });
+
+  // 検証
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /投稿しました|登録しました|公開しました|完了|受け付け/.test(bodyText);
+  const looksError = /エラー|失敗|入力してください|必須/.test(bodyText) && !looksDone;
+  if (looksError) {
+    return fail(`ブログ投稿でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !confirmed && !nativeDialogAccepted) {
+    return fail(`ブログ投稿の完了を確認できませんでした (confirmed=${confirmed}${cap2 ? `, capture=${cap2}` : ''})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+  // 投稿後のブログ詳細URLから blogId を回収できれば external_id に
+  let externalId = null;
+  const m = page.url().match(/blogId=([A-Za-z0-9]+)/);
+  if (m) externalId = m[1];
+  return { status: 'ok', externalId };
 }
 
 async function scrapeBlogs(page, opts = {}) {
