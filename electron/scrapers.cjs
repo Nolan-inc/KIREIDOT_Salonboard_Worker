@@ -2205,14 +2205,55 @@ async function uploadBlogCoverImage(page, coverUrl) {
         return false;
       }
       await fileInput.setInputFiles(tmpFile, { timeout: 8_000 }).catch(() => {});
+      // ファイルを選ぶとモーダル内にプレビューが出る。描画を少し待つ。
+      await page.waitForTimeout(1_200);
 
-      // 4) アップロード実行ボタン (モーダル内)。候補を順に試す。
-      //    setInputFiles の change で自動アップロードされる実装もあるため、無ければスキップ。
-      const uploadBtn = page
-        .locator('.jscImageUploaderModal a:has-text("アップロード"), .modal a:has-text("アップロード"), .jscImageUploaderModal a.mod_btn_upload_01, a.jscImageUploadExec, .modal a.accept, .modal input[type="submit"]')
-        .first();
-      if ((await uploadBtn.count().catch(() => 0)) > 0) {
-        await uploadBtn.click({ timeout: 8_000 }).catch(() => {});
+      // 4) モーダル内の「登録する」を押してアップロードを確定する。
+      //    実DOM (確認済み, スクショ): 画像アップロードモーダル下部に「閉じる」「登録する」が並ぶ。
+      //    ファイル選択でプレビューが出た後、「登録する」で imagePath* が確定する。
+      //    ブログ本体にも「登録する」があるため、モーダルコンテナ内 or 最前面の visible な
+      //    「登録する」に限定して誤爆を防ぐ。コンテナ class は不定なので候補を広く持つ。
+      const modalContainers = [
+        '.jscImageUploaderModal',
+        '.imageUploaderModal',
+        '.modaal-content',
+        '.mod_modal',
+        '.modal',
+        '[role="dialog"]',
+        '.ui-dialog',
+        '.remodal',
+      ];
+      const regSelectors = [];
+      for (const c of modalContainers) {
+        regSelectors.push(`${c} a:has-text("登録する")`);
+        regSelectors.push(`${c} button:has-text("登録する")`);
+        regSelectors.push(`${c} input[type="button"][value*="登録"]`);
+        regSelectors.push(`${c} input[type="submit"][value*="登録"]`);
+      }
+      regSelectors.push('a.jscImageUploadExec');
+      // 最後の保険: 画面に見えている「登録する」(モーダルが最前面なので通常これが掴める)
+      regSelectors.push('a:visible:has-text("登録する")');
+      regSelectors.push('button:visible:has-text("登録する")');
+
+      let clickedRegister = false;
+      for (const sel of regSelectors) {
+        const btn = page.locator(sel).first();
+        if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+          await btn.click({ timeout: 8_000 }).catch(() => {});
+          clickedRegister = true;
+          break;
+        }
+      }
+      if (!clickedRegister) {
+        // 「登録する」が掴めない場合のフォールバック (旧来の「アップロード」系)
+        const uploadBtn = page
+          .locator('.jscImageUploaderModal a:has-text("アップロード"), .modal a:has-text("アップロード"), .jscImageUploaderModal a.mod_btn_upload_01, .modal a.accept, .modal input[type="submit"]')
+          .first();
+        if ((await uploadBtn.count().catch(() => 0)) > 0) {
+          await uploadBtn.click({ timeout: 8_000 }).catch(() => {});
+        } else {
+          await captureScrapeDebug(page, 'blog', 'image_no_register_btn', { diagnostics: { url: page.url() } }).catch(() => {});
+        }
       }
     }
 
