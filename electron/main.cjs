@@ -268,6 +268,19 @@ ipcMain.handle('device:save', async (_event, payload) => {
     ...cfg,
     lastVerifiedAt: test.ok ? new Date().toISOString() : null,
   });
+  // 既に起動済みの worker に device 設定を即反映する。
+  // これをやらないと「ログイン後に Token を保存」したケースで worker 内の deviceAuth が
+  // 空のままになり、「サロンボードに挿入」で『device設定が未完了』エラーになる。
+  postToWorker({
+    type: 'device-config',
+    payload: {
+      apiBaseUrl: cfg.apiUrl,
+      deviceId: cfg.deviceId || null,
+      deviceToken: cfg.deviceToken,
+      workerId: cfg.workerId || 'electron-worker',
+      ...(cfg.enablePush !== undefined ? { enablePush: !!cfg.enablePush } : {}),
+    },
+  });
   return {
     ok: test.ok,
     code: test.code,

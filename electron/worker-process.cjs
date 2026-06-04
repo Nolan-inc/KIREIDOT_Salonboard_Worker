@@ -2437,6 +2437,30 @@ process.parentPort?.on('message', async (event) => {
           emit('error', { msg: `init failed: ${e instanceof Error ? e.message : e}` });
         }
         break;
+      case 'device-config':
+        // 設定画面で device 設定 (API URL / Worker Token 等) を保存・変更したとき、
+        // worker を作り直さずに deviceAuth だけを更新する。
+        // これをやらないと、ログイン後に Token を保存しても worker 内の deviceAuth が
+        // 空のままで revealCredentials が「device設定が未完了」を返してしまう。
+        {
+          const d = m.payload ?? {};
+          deviceAuth = {
+            ...deviceAuth,
+            apiBaseUrl:
+              d.apiBaseUrl != null
+                ? String(d.apiBaseUrl).replace(/\/+$/, '') || null
+                : deviceAuth.apiBaseUrl,
+            deviceId: d.deviceId !== undefined ? d.deviceId || null : deviceAuth.deviceId,
+            deviceToken:
+              d.deviceToken !== undefined ? d.deviceToken || null : deviceAuth.deviceToken,
+            workerId: d.workerId || deviceAuth.workerId || 'electron-worker',
+            ...(d.enablePush !== undefined ? { enablePush: !!d.enablePush } : {}),
+          };
+          log(
+            `device設定を更新しました (apiBaseUrl=${deviceAuth.apiBaseUrl ? 'set' : 'null'}, token=${deviceAuth.deviceToken ? 'set' : 'null'})`,
+          );
+        }
+        break;
       case 'sync':
         // init 完了を確実に待ってから sync。supabase が null のまま走ると
         // 「Cannot read properties of null (reading 'from')」になる。
