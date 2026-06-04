@@ -87,7 +87,9 @@ export function Bookings() {
 
   // --- 行ごと「サロンボードに挿入」 ---
   const [staffOptions, setStaffOptions] = useState<StaffRow[]>([]);
-  const [insertingId, setInsertingId] = useState<string | null>(null);
+  // 挿入中の booking id 集合 (複数同時挿入に対応。worker 側で直列実行される)。
+  const [insertingIds, setInsertingIds] = useState<Set<string>>(new Set());
+  const isInserting = (id: string) => insertingIds.has(id);
   // bookingId -> { ok, msg }
   const [insertResults, setInsertResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
   // スタッフ未紐付けの予約をどのスタッフで入れるか選ばせる対象 booking
@@ -132,7 +134,8 @@ export function Bookings() {
     };
   }, [scope?.shopId, scope?.organizationId, reloadKey]);
 
-  // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する
+  // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する。
+  // 複数同時挿入に対応するため、結果はイベントの bookingId で正しい行に紐付ける。
   useEffect(() => {
     const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
     if (!bridge?.onWorkerEvent) return;
@@ -140,24 +143,27 @@ export function Bookings() {
       if (msg.type !== 'push:test') return;
       const p = msg.payload;
       if (p.step !== 'done') return;
-      setInsertingId((cur) => {
-        const target = cur;
-        if (target) {
-          setInsertResults((r) => ({
-            ...r,
-            [target]: {
-              ok: !!p.ok,
-              msg: p.ok
-                ? (p.registered ? `✅ SalonBoardに登録しました${p.externalId ? ` (ID: ${p.externalId})` : ''}` : '入力のみ完了 (実登録OFF)')
-                : `失敗: ${p.error || p.errorCode || 'unknown'}`,
-            },
-          }));
-          if (p.ok && p.registered) {
-            // 成功したら少し後に一覧を更新 (sync状態反映)
-            setTimeout(() => setReloadKey((k) => k + 1), 2000);
-          }
+      // どの予約の結果か。bookingId があればそれ、無ければ挿入中が1件のときのみそれを使う。
+      setInsertingIds((cur) => {
+        let target = p.bookingId ?? null;
+        if (!target && cur.size === 1) target = Array.from(cur)[0];
+        if (!target) return cur;
+        setInsertResults((r) => ({
+          ...r,
+          [target as string]: {
+            ok: !!p.ok,
+            msg: p.ok
+              ? (p.registered ? `✅ SalonBoardに登録しました${p.externalId ? ` (ID: ${p.externalId})` : ''}` : '入力のみ完了 (実登録OFF)')
+              : `失敗: ${p.error || p.errorCode || 'unknown'}`,
+          },
+        }));
+        if (p.ok && p.registered) {
+          // 成功したら少し後に一覧を更新 (sync状態反映)
+          setTimeout(() => setReloadKey((k) => k + 1), 2000);
         }
-        return null;
+        const next = new Set(cur);
+        next.delete(target);
+        return next;
       });
     });
   }, []);
@@ -334,7 +340,7 @@ export function Bookings() {
     }
     const staffExt = resolved.ext;
     setStaffPickFor(null);
-    setInsertingId(b.id);
+    setInsertingIds((cur) => new Set(cur).add(b.id));
     setInsertResults((r) => {
       const { [b.id]: _omit, ...rest } = r;
       return rest;
@@ -351,7 +357,16 @@ export function Bookings() {
       bookingId: b.id, // 成功時に DB の同期状態を synced に更新する
     });
     // 安全網: 90秒で in-flight 解除
-    setTimeout(() => setInsertingId((cur) => (cur === b.id ? null : cur)), 90_000);
+    setTimeout(
+      () =>
+        setInsertingIds((cur) => {
+          if (!cur.has(b.id)) return cur;
+          const next = new Set(cur);
+          next.delete(b.id);
+          return next;
+        }),
+      90_000,
+    );
   }
 
   const displayName = (b: BookingRow) =>
@@ -578,7 +593,7 @@ export function Bookings() {
           targetDay={calendarTarget}
           displayName={displayName}
           classify={classifySbSync}
-          insertingId={insertingId}
+          isInserting={isInserting}
           insertResults={insertResults}
           onInsert={insertToSalonboard}
           cancelingId={cancelingId}
@@ -698,16 +713,16 @@ export function Bookings() {
                           <button
                             type="button"
                             onClick={() => insertToSalonboard(b)}
-                            disabled={insertingId === b.id || (!!insertingId && insertingId !== b.id)}
+                            disabled={isInserting(b.id)}
                             title="この予約を SalonBoard に登録する"
                             className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[10px] font-semibold text-white shadow-brand-sm disabled:opacity-40"
                           >
-                            {insertingId === b.id ? (
+                            {isInserting(b.id) ? (
                               <Loader2 className="h-3 w-3 animate-spin" />
                             ) : (
                               <UploadCloud className="h-3 w-3" />
                             )}
-                            {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+                            {isInserting(b.id) ? '挿入中…' : 'SalonBoardに挿入'}
                           </button>
                         );
                       })()}
@@ -821,7 +836,7 @@ export function Bookings() {
                       ) : (
                         <button
                           type="button"
-                          disabled={!scope?.shopId || insertingId === b.id}
+                          disabled={!scope?.shopId || isInserting(b.id)}
                           onClick={() => insertToSalonboard(b)}
                           title={
                             scope?.shopId
@@ -830,12 +845,12 @@ export function Bookings() {
                           }
                           className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
                         >
-                          {insertingId === b.id ? (
+                          {isInserting(b.id) ? (
                             <Loader2 className="h-3 w-3 animate-spin" />
                           ) : (
                             <UploadCloud className="h-3 w-3" />
                           )}
-                          {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+                          {isInserting(b.id) ? '挿入中…' : 'SalonBoardに挿入'}
                         </button>
                       )}
                     </td>
@@ -1417,7 +1432,7 @@ function LedgerView({
   targetDay,
   displayName,
   classify,
-  insertingId,
+  isInserting,
   insertResults,
   onInsert,
   cancelingId,
@@ -1434,7 +1449,7 @@ function LedgerView({
   targetDay?: string | null;
   displayName: (b: BookingRow) => string;
   classify: (b: BookingRow) => SbBadge;
-  insertingId: string | null;
+  isInserting: (id: string) => boolean;
   insertResults: Record<string, { ok: boolean; msg: string }>;
   onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
   cancelingId: string | null;
@@ -1635,12 +1650,12 @@ function LedgerView({
                                 tabIndex={0}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (!insertingId) onInsert(b);
+                                  if (!isInserting(b.id)) onInsert(b);
                                 }}
                                 title="この予約を SalonBoard に挿入"
                                 className="inline-flex shrink-0 items-center rounded bg-brand-gradient px-1 py-px text-[9px] font-bold text-white"
                               >
-                                {insertingId === b.id ? '…' : 'SB挿入'}
+                                {isInserting(b.id) ? '…' : 'SB挿入'}
                               </span>
                             ))}
                         </div>
@@ -1660,7 +1675,7 @@ function LedgerView({
           booking={detail}
           displayName={displayName}
           classify={classify}
-          insertingId={insertingId}
+          isInserting={isInserting}
           insertResults={insertResults}
           onInsert={onInsert}
           cancelingId={cancelingId}
@@ -1681,7 +1696,7 @@ function LedgerDetailModal({
   booking: b,
   displayName,
   classify,
-  insertingId,
+  isInserting,
   insertResults,
   onInsert,
   cancelingId,
@@ -1695,7 +1710,7 @@ function LedgerDetailModal({
   booking: BookingRow;
   displayName: (b: BookingRow) => string;
   classify: (b: BookingRow) => SbBadge;
-  insertingId: string | null;
+  isInserting: (id: string) => boolean;
   insertResults: Record<string, { ok: boolean; msg: string }>;
   onInsert: (b: BookingRow, staffExt?: string, staffName?: string) => void;
   cancelingId: string | null;
@@ -1879,11 +1894,11 @@ function LedgerDetailModal({
             <button
               type="button"
               onClick={() => onInsert(b)}
-              disabled={!!insertingId}
+              disabled={isInserting(b.id)}
               className="inline-flex items-center gap-1 rounded-lg bg-brand-gradient px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-40"
             >
               <UploadCloud className="h-4 w-4" />
-              {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+              {isInserting(b.id) ? '挿入中…' : 'SalonBoardに挿入'}
             </button>
           )}
         </div>

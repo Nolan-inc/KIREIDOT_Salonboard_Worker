@@ -127,6 +127,30 @@ function releaseShopLock(shopId) {
   inProgressShops.delete(shopId);
 }
 
+/**
+ * ブラウザ操作 (挿入 / キャンセル / 変更) の直列化キュー。
+ *
+ * UI から複数の予約を同時に「SalonBoard に挿入」すると、runTestPush 等が
+ * 並列に chromium.launch → 同一 SalonBoard アカウントへ同時ログイン →
+ * 同じスケジュール画面を同時操作してしまい、SalonBoard が
+ * 「既に操作されています (2度押しエラー)」を返す。
+ * (storageState ファイルも shop 単位で共有しているためセッションが競合する)
+ *
+ * そこで、これらの操作は何件並列で要求されても 1 件ずつ順番に実行する。
+ * Promise チェーンで前のタスクの完了を待ってから次を走らせるだけのシンプルな
+ * 直列キュー。タスクが throw / reject してもチェーンは切らさない。
+ */
+let serialTail = Promise.resolve();
+function enqueueSerial(task) {
+  const run = serialTail.then(() => task());
+  // 次のタスクが前タスクの失敗で巻き込まれないよう、tail は常に解決にする。
+  serialTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 function emit(type, payload) {
   try {
     process.parentPort?.postMessage({ type, payload });
@@ -2425,31 +2449,39 @@ process.parentPort?.on('message', async (event) => {
         await runSync(m.payload ?? {});
         break;
       case 'test-push':
-        try {
-          await ensureReady();
-        } catch (e) {
-          emit('push:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
-          break;
-        }
-        await runTestPush(m.payload ?? {});
+        // 直列キュー経由で実行。複数同時に「SalonBoardに挿入」されても
+        // 1件ずつ順番に処理し、SalonBoard のセッション競合 (2度押しエラー) を防ぐ。
+        await enqueueSerial(async () => {
+          try {
+            await ensureReady();
+          } catch (e) {
+            emit('push:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
+            return;
+          }
+          await runTestPush(m.payload ?? {});
+        });
         break;
       case 'cancel-booking':
-        try {
-          await ensureReady();
-        } catch (e) {
-          emit('cancel:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
-          break;
-        }
-        await runCancel(m.payload ?? {});
+        await enqueueSerial(async () => {
+          try {
+            await ensureReady();
+          } catch (e) {
+            emit('cancel:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
+            return;
+          }
+          await runCancel(m.payload ?? {});
+        });
         break;
       case 'change-booking':
-        try {
-          await ensureReady();
-        } catch (e) {
-          emit('change:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
-          break;
-        }
-        await runChange(m.payload ?? {});
+        await enqueueSerial(async () => {
+          try {
+            await ensureReady();
+          } catch (e) {
+            emit('change:test', { ok: false, step: 'init', error: e instanceof Error ? e.message : String(e) });
+            return;
+          }
+          await runChange(m.payload ?? {});
+        });
         break;
       case 'abort':
         abortRequested = true;

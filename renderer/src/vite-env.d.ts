@@ -91,6 +91,8 @@ type WorkerEvent =
         errorCode?: string;
         externalId?: string | null;
         detailUrl?: string | null;
+        /** どの予約の結果か (複数同時挿入の結果を正しい行に紐付けるため) */
+        bookingId?: string;
       };
     }
   | {
