@@ -149,8 +149,10 @@ export async function fetchUnmatchedBookings(scope: StaffScope): Promise<Booking
     )
     .order('scheduled_at', { ascending: true })
     .limit(500);
+  // bookings には organization_id カラムが無い (shops 経由) ため applyOrg は使わない。
+  // 店舗が選ばれていれば shop_id で絞り、未選択なら RLS の範囲 (自組織) を全件返す。
+  // fetchRecentBookings と同じ挙動に揃える。
   q = applyShop(q, scope);
-  q = applyOrg(q, scope);
   const { data, error } = await q;
   if (error) {
     console.warn('[data] fetchUnmatchedBookings error:', error.message);
