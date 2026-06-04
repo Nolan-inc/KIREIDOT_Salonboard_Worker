@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Plus, ChevronLeft, ChevronRight, Search, Filter, Loader2, X, CheckCircle2, AlertTriangle, UploadCloud, CalendarDays } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchRecentBookings, fetchStaffList, fetchMenuList, cancelBookingLocal, updateBookingTimeLocal, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
+import { fetchRecentBookings, fetchUnmatchedBookings, fetchStaffList, fetchMenuList, cancelBookingLocal, updateBookingTimeLocal, type BookingRow, type StaffRow, type MenuRow } from '../lib/data';
 import { bookingStatusJp, formatTime, formatYen } from '../lib/format';
 import { createBookingViaDevice } from '../lib/salonboard';
 
@@ -72,6 +72,8 @@ export function Bookings() {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('すべて');
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingRow[]>([]);
+  // 「キレイドットだけにあって SalonBoard に未登録」な未来の予約 (期間非依存・別取得)
+  const [unmatched, setUnmatched] = useState<BookingRow[]>([]);
   const [search, setSearch] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -116,6 +118,19 @@ export function Bookings() {
       cancelled = true;
     };
   }, [scope?.shopId, scope?.organizationId, reloadKey, rangeOffset]);
+
+  // 未連携リスト (本日以降・未来分) は表示期間に依存しないので別取得。
+  // 予約作成/挿入/キャンセル等で reloadKey が変わったときも更新する。
+  useEffect(() => {
+    if (!scope) return;
+    let cancelled = false;
+    fetchUnmatchedBookings(scope)
+      .then((data) => !cancelled && setUnmatched(data))
+      .catch(() => !cancelled && setUnmatched([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [scope?.shopId, scope?.organizationId, reloadKey]);
 
   // worker からの単発書き込み結果 (push:test) を購読し、対象行に反映する
   useEffect(() => {
@@ -726,6 +741,111 @@ export function Bookings() {
           onPick={(ext, name) => insertToSalonboard(staffPickFor, ext, name)}
         />
       )}
+
+      {/* ── キレイドットだけにあって SalonBoard に追加できていない予約 ──
+          表示中の 30 日間に関係なく、本日以降・キャンセル以外・未連携の予約を
+          別取得 (fetchUnmatchedBookings) してページ最下部に常に表示する。 */}
+      <Card>
+        <div className="flex items-center gap-2 border-b border-rose-200 bg-rose-50 px-4 py-3">
+          <span className="inline-block h-2 w-2 rounded-full bg-rose-500" />
+          <h2 className="text-[13px] font-bold text-rose-900">
+            キレイドットだけにあって SalonBoard に追加できていない予約
+          </h2>
+          <span className="ml-1 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+            {unmatched.length}件
+          </span>
+          <span className="ml-auto text-[11px] text-muted">本日以降・キャンセル除外</span>
+        </div>
+        {!scope?.shopId && !scope?.organizationId ? (
+          <div className="px-4 py-10 text-center text-[12px] text-ink-soft">
+            右上で会社・店舗を選択すると、その範囲の未登録予約が表示されます。
+          </div>
+        ) : unmatched.length === 0 ? (
+          <div className="px-4 py-10 text-center text-[12px] text-ink-soft">
+            SalonBoard に未登録の予約はありません。
+          </div>
+        ) : (
+          <table className="w-full text-[12px]">
+            <thead className="bg-surface-soft text-[10px] uppercase tracking-wider text-muted">
+              <tr>
+                <th className="px-4 py-2.5 text-left">日時</th>
+                <th className="px-4 py-2.5 text-left">顧客</th>
+                <th className="px-4 py-2.5 text-left">スタッフ</th>
+                <th className="px-4 py-2.5 text-left">メニュー</th>
+                {!scope?.shopId && <th className="px-4 py-2.5 text-left">店舗</th>}
+                <th className="px-4 py-2.5 text-left">状態</th>
+                <th className="px-4 py-2.5 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {unmatched.map((b) => {
+                const badge = classifySbSync(b);
+                const dt = new Date(b.scheduled_at);
+                const staffName =
+                  b.staff?.full_name ?? b.salonboard_staff_name ?? '未割当';
+                const menuName = b.menus?.name ?? '—';
+                const res = insertResults[b.id];
+                return (
+                  <tr key={b.id} className="border-t border-hairline hover:bg-rose-50/40">
+                    <td className="whitespace-nowrap px-4 py-2.5 text-ink">
+                      {dt.toLocaleString('ja-JP', {
+                        month: 'numeric',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </td>
+                    <td className="px-4 py-2.5">{displayName(b)}</td>
+                    <td className="px-4 py-2.5 text-ink-soft">{staffName}</td>
+                    <td className="px-4 py-2.5 text-ink-soft">{menuName}</td>
+                    {!scope?.shopId && (
+                      <td className="px-4 py-2.5 text-ink-soft">{b.shops?.name ?? '—'}</td>
+                    )}
+                    <td className="px-4 py-2.5">
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${badge.cls}`}
+                      >
+                        {badge.label}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right">
+                      {res ? (
+                        <span
+                          className={
+                            'text-[11px] font-semibold ' +
+                            (res.ok ? 'text-emerald-700' : 'text-red-700')
+                          }
+                        >
+                          {res.msg}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={!scope?.shopId || insertingId === b.id}
+                          onClick={() => insertToSalonboard(b)}
+                          title={
+                            scope?.shopId
+                              ? 'この予約を SalonBoard に登録する'
+                              : '店舗を選択すると挿入できます'
+                          }
+                          className="inline-flex items-center gap-1 rounded-[8px] bg-brand-gradient px-2.5 py-1 text-[11px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+                        >
+                          {insertingId === b.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <UploadCloud className="h-3 w-3" />
+                          )}
+                          {insertingId === b.id ? '挿入中…' : 'SalonBoardに挿入'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </div>
   );
 }

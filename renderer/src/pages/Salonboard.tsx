@@ -828,7 +828,7 @@ function ShopCredentialCard({
   );
 }
 
-function EditModal({
+export function EditModal({
   row,
   onClose,
   onSaved,

@@ -8,6 +8,8 @@ import {
   FileText,
   ExternalLink,
   X,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import { Card, CardBody } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
@@ -32,6 +34,7 @@ export function Blog() {
   const [posts, setPosts] = useState<PostRow[]>([]);
   const [previewing, setPreviewing] = useState<PostRow | null>(null);
   const [composing, setComposing] = useState(false);
+  const [deleting, setDeleting] = useState<PostRow | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -175,6 +178,17 @@ export function Blog() {
                         URL なし
                       </span>
                     )}
+                    {p.source === 'kireidot' && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleting(p)}
+                        title="この記事を削除"
+                        aria-label="この記事を削除"
+                        className="shrink-0 rounded-[10px] border border-red-200 bg-white px-2.5 py-1.5 text-red-600 hover:bg-red-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
                 </CardBody>
               </Card>
@@ -259,6 +273,20 @@ export function Blog() {
         </div>
       )}
 
+      {/* 削除確認モーダル */}
+      {deleting && deleting.shop_id && (
+        <DeleteModal
+          post={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => {
+            setDeleting(null);
+            // 楽観的に一覧から除去しつつ、少し後に再取得
+            setPosts((prev) => prev.filter((x) => x.id !== deleting.id));
+            setTimeout(() => setReloadKey((k) => k + 1), 600);
+          }}
+        />
+      )}
+
       {/* 記事作成モーダル */}
       {composing && scope?.shopId && (
         <ComposeModal
@@ -270,6 +298,101 @@ export function Blog() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// 削除確認モーダル。KIREIDOT 側のブログ (content_posts) を削除する。
+// SalonBoard に投稿済み (salonboard_external_id あり) の場合は、SalonBoard 側の記事は
+// 自動削除されない旨を警告する。
+function DeleteModal({
+  post,
+  onClose,
+  onDeleted,
+}: {
+  post: PostRow;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const postedToSb = !!post.salonboard_external_id;
+
+  async function confirmDelete() {
+    const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+    if (!bridge?.deviceConfig?.deleteContent) {
+      setError('この機能はデスクトップアプリでのみ利用できます');
+      return;
+    }
+    if (!post.shop_id) {
+      setError('店舗が特定できません');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    const r = await bridge.deviceConfig.deleteContent({
+      shopId: post.shop_id,
+      contentPostId: post.id,
+    });
+    setSubmitting(false);
+    if (r.ok) {
+      onDeleted();
+    } else {
+      setError(`削除に失敗しました: ${r.error ?? 'unknown'}`);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-hairline px-5 py-4">
+          <div className="flex items-center gap-2 text-[15px] font-bold text-ink">
+            <Trash2 className="h-4 w-4 text-red-500" /> 記事を削除
+          </div>
+          <button type="button" onClick={onClose} className="text-ink-soft hover:text-ink" aria-label="閉じる">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 px-5 py-4">
+          <p className="text-[13px] text-ink">
+            「<span className="font-semibold">{post.title ?? '(無題)'}</span>」を削除します。よろしいですか？
+          </p>
+          {postedToSb && (
+            <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                この記事は SalonBoard に投稿済みです。削除すると
+                <b>SalonBoard 側のブログも自動的に削除されます</b>（数十秒後に反映）。
+              </span>
+            </div>
+          )}
+          {error && (
+            <div className="rounded-lg bg-red-50 px-3 py-2 text-[12px] text-red-700">{error}</div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-hairline px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            className="rounded-lg border border-hairline px-4 py-1.5 text-[13px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:opacity-40"
+          >
+            キャンセル
+          </button>
+          <button
+            type="button"
+            onClick={confirmDelete}
+            disabled={submitting}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-1.5 text-[13px] font-semibold text-white hover:bg-red-700 disabled:opacity-40"
+          >
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            {submitting ? '削除中…' : '削除する'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

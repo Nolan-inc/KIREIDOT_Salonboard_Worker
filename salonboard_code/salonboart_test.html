@@ -1,0 +1,852 @@
+<div class="contents">
+	<!-- section -->
+	<div class="section">
+		<!-- mod_title01 -->
+		<div class="mod_title01_02 cf">
+			<h1 class="ttl">予約一覧</h1>
+			<p class="btn_help01"><a href="javascript:void(0);" id="questionManual"><img src="https://imgbp.salonboard.com/KLP/img/btn_help_01.png" width="29" height="29" alt="ヘルプ" class="rollover" id="btn_help"></a></p>
+		</div>
+		<!-- /mod_title01 -->
+
+		<form id="reserveList" method="post" action="/KLP/reserve/reserveList/" autocomplete="off"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="d14f965f3870a61b63f1fcab6e099866"></div><input type="hidden" name="storeIdForMultipleTabCheck" value="aa3132a51481b791a14775d3e0863e62"><!-- mod_box_05 -->
+			<div class="mod_box_05 mt20" id="mod_box_05_reserve">
+				<!-- head01 -->
+				<div class="head nborder_thin" id="head_mod_column02">
+					<div class="cf nborder_thin_inner">
+						<p class="txt_shortCut fl mt6">ショートカット検索</p>
+						<ul class="mod_column03 cf fl ml40">
+							<li class="columnBlock mr7"><a href="javascript:void(0);" id="searchNonRead" class="mod_btn_64">未読</a></li>
+							<li class="columnBlock mr7"><a href="javascript:void(0);" id="searchTempReserve" class="mod_btn_65">仮予定未確定</a></li>
+							<li class="columnBlock"><a href="javascript:void(0);" id="searchAccountant" class="mod_btn_66">来店処理未登録</a></li>
+						</ul>
+					</div>
+				</div>
+				<!-- /head01 -->
+
+				<!-- inner -->
+				<div class="inner" id="inner">
+					<input type="hidden" name="rsvDateFrom" value="" id="rsvDateFrom"><input type="hidden" name="rsvDateTo" value="" id="rsvDateTo"><table class="w737">
+						<tbody>
+						<tr class="mod_left">
+							<th class="w126">来店日：</th>
+							<td colspan="3" class="w611">
+								<p class="mod_column04 pr5"><input type="text" name="dispDateFrom" value="" readonly="readonly" id="dispDateFrom" class="w120 calendar_readonly icon_calendar"></p>
+								<p class="mod_column04 pr10"><a href="javascript:void(0);" id="dateFromButton" class="mod_btn_clear">カレンダーから表示</a></p>
+								<p class="mod_column04 pr10"><span class="mod_txt_23 ml5 mr5">～</span></p>
+								<p class="mod_column04 pr5"><input type="text" name="dispDateTo" value="" readonly="readonly" id="dispDateTo" class="w120 calendar_readonly icon_calendar"></p>
+								<p class="mod_column04 pr10"><a href="javascript:void(0);" id="dateToButton" class="mod_btn_clear">カレンダーから表示</a></p>
+								<ul class="mod_column04">
+									<li class="mod_column04 pr5"><a href="javascript:void(0);" id="yesterdaySet" class="mod_btn_72">昨日</a></li>
+									<li class="mod_column04 pr5"><a href="javascript:void(0);" id="todaySet" class="mod_btn_73">本日</a></li>
+									<li class="mod_column04"><a href="javascript:void(0);" id="tomorrowSet" class="mod_btn_74">明日</a></li>
+								</ul>
+							</td>
+						</tr>
+						<tr class="mod_left">
+							<th>ステータス：</th>
+							<td colspan="3">
+								<ul class="check_list cf">
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="1" class="reserveDispStatusCdArray">仮予約確定待ち</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="2" class="reserveDispStatusCdArray">受付待ち</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="3" class="reserveDispStatusCdArray">施術中</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="4" class="reserveDispStatusCdArray">来店処理待ち</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="5" class="reserveDispStatusCdArray">済み</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="11" class="reserveDispStatusCdArray">会計済み</label></li>
+									</ul>
+										<ul class="check_list">
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="6" class="reserveDispStatusCdArray">お断り</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="7" class="reserveDispStatusCdArray">お客様キャンセル</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="8" class="reserveDispStatusCdArray">サロンキャンセル</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="9" class="reserveDispStatusCdArray">無断キャンセル</label></li>
+									<li><label><input type="checkbox" name="reserveDispStatusCdArray" value="10" class="reserveDispStatusCdArray">自動キャンセル</label></li>
+									</ul>
+									</td>
+						</tr>
+						<tr class="mod_left">
+							<th>確認状況：</th>
+							<td colspan="3">
+								<ul class="check_list">
+									<li><label><input type="checkbox" name="readingConditionArray" value="0" class="readingConditionArray">未読</label></li>
+									<li><label><input type="checkbox" name="readingConditionArray" value="1" class="readingConditionArray">既読</label></li>
+									</ul>
+							</td>
+						</tr>
+						<tr class="mod_left">
+							<th>お客様名（カナ）：</th>
+						<td>
+								<input type="text" name="rsvCustomerNameSeiKana" maxlength="30" value="" id="rsvCustomerNameSeiKana" class="fl w120"><input type="text" name="rsvCustomerNameMeiKana" maxlength="30" value="" id="rsvCustomerNameMeiKana" class="fl ml10 w120"></td>
+							<th>予約番号：</th>
+							<td><input type="text" name="reserveId" maxlength="10" value="" id="reserveId" class="w202"></td>
+						</tr>
+						<tr class="mod_left">
+							<th>スタッフ：</th>
+							<td>
+							<select name="staffId" id="stylistId" class="w207"><option value="" selected="selected">すべてのスタッフ</option><option value="W001411297">momoka</option>
+<option value="W001411300">cheka</option>
+<option value="W001422855">cobo</option></select></td>
+							<th>予約経路：</th>
+							<td>
+							<select name="rsvRouteId" id="reservationCategoryId" class="w207"><option value="" selected="selected">すべての予約経路</option><option value="K000000001">電話(自社)</option>
+<option value="K000000002">電話(HOT PEPPER Beauty)</option>
+<option value="K000000003">HOT PEPPER Beauty</option>
+<option value="K000000004">ポンパレ</option>
+<option value="K000000005">直接来店</option></select></td>
+						</tr>
+						</tbody>
+					</table>
+					<div class="btn_area">
+						<p class="mb10"><a href="javascript:void(0);" id="clear" class="mod_btn_75">条件をクリア</a></p>
+						<p><a href="javascript:void(0);" id="search" class="mod_btn_76">検索する</a></p>
+					</div>
+    			</div>
+				<!-- /inner -->
+
+				<span id="yesterday" class="display_none">20260531</span>
+				<span id="today" class="display_none">20260601</span>
+				<span id="tomorrow" class="display_none">20260602</span>
+				<span id="downloadAuthRequired" class="display_none">0</span>
+			</div>
+			<!-- /mod_box_05 -->
+			<input type="hidden" name="watchword" value="" id="csvPassword"></form><form id="amountRegist" method="post" action="/KLP/reserve/reserveList/" autocomplete="off"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="d14f965f3870a61b63f1fcab6e099866"></div><input type="hidden" name="storeIdForMultipleTabCheck" value="aa3132a51481b791a14775d3e0863e62"><input type="hidden" name="registReserveId" value=""><input type="hidden" name="registTotalPrice" value=""></form><!-- mod_column02 -->
+		<div class="mod_column02 mt15 cf">
+			<div class="columnBlock01"><p class="ttl mod_font01">該当する予約が<b class="mod_color_e50000 ml10 mr10">15</b>件あります</p></div>
+			<ul class="columnBlock mod_column03 cf fr">
+				<li class="columnBlock"><a href="javascript:void(0);" id="csvOutput" class="mod_btn_67">CSV出力</a></li>
+				<li class="columnBlock ml5"><a href="javascript:void(0);" id="printList" class="mod_btn_68">印刷</a></li>
+			</ul>
+		</div>
+		<!-- /mod_column02 -->
+		<hr class="reservelist_splitline">
+		<div class="w980">
+			<p class="mod_font01"><span>予約の変更、キャンセルおよび仮予約の確定などをする場合は予約番号を押して、詳細画面から行ってください。</span></p>
+
+			<p class="mod_font01"><span class="mod_color_e50000">利用ポイントおよび利用ギフト券をSALON BOARDで変更することはできません。お会計時には利用ポイント計を差し引いた額で精算してください。</span></p>
+			</div>
+
+		<form id="sortList" method="post" action="/KLP/reserve/reserveList/" autocomplete="off"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="d14f965f3870a61b63f1fcab6e099866"></div><input type="hidden" name="storeIdForMultipleTabCheck" value="aa3132a51481b791a14775d3e0863e62"><input type="hidden" name="sortKey" value="rsvDate_desc" id="sortKey"><!-- paging -->
+			<div class="cf mt20">
+				<!-- paging -->
+<div class="paging">
+<p class="prev_disable"><span>前へ</span></p>
+<p class="page mod_font01">1/1ページ</p>
+<p class="next_disable"><span>次へ</span></p>
+</div>
+<!-- /paging -->
+</div>
+
+		<div class="fr pt16 pb8">
+				<input type="checkbox" id="dispChart" class="dibBL vaM jscDispChart" checked=""><label class="dibBL vaM" for="dispChart">カルテ列を表示する</label>
+			</div>
+		<span class="dn" id="jsiWidthCustomerWithChart">w112</span>
+		<span class="dn" id="jsiwidthStaffWithChart">w76</span>
+		<span class="dn" id="jsiWidthRsvRouteWithChart">w82</span>
+		<span class="dn" id="jsiWidthMenuWithChart">w154</span>
+		<span class="dn" id="jsiWidthUsePointWithChart">w68</span>
+		<span class="dn" id="jsiWidthPaymentCdWithChart">w104</span>
+		<span class="dn" id="jsiWidthPriceWithChart">w94</span>
+		<span class="dn" id="jsiWidthRegisterAmountWithChart">w84</span>
+		<span class="dn" id="jsiWidthCustomerWithoutChart">w120</span>
+		<span class="dn" id="jsiwidthStaffWithoutChart">w86</span>
+		<span class="dn" id="jsiWidthRsvRouteWithoutChart">w90</span>
+		<span class="dn" id="jsiWidthMenuWithoutChart">w180</span>
+		<span class="dn" id="jsiWidthUsePointWithoutChart">w76</span>
+		<span class="dn" id="jsiWidthPaymentCdWithoutChart">w106</span>
+		<span class="dn" id="jsiWidthPriceWithoutChart">w100</span>
+		<span class="dn" id="jsiWidthRegisterAmountWithoutChart">w100</span>
+
+		<!-- mod_table02 -->
+        <table class="reserveSearchResultTable mt15 w980" id="resultList">
+		<thead>
+			<tr>
+				<th class="sorter w52" id="comingDate">
+					<div class="reserveSearchResultSortWrap">
+						<span class="tal">来店<br>日時</span>
+							<span class="mod_icon_sort sort_down"></span>
+							</div>
+				</th>
+				<th class="sorter w70" id="status">
+					<div class="reserveSearchResultSortWrap">
+						<span class="tal">ステー<br>タス</span>
+						<span class="mod_icon_sort"></span>
+							</div>
+				</th>
+				<th class="w112 jscColCustomer">お客様名<br>（予約番号）</th>
+				<th class="sorter w76 jscColStaff" id="stylistSort">
+					<div class="reserveSearchResultSortWrap">
+						<span class="tal">スタッフ</span>
+						<span class="mod_icon_sort"></span>
+							</div>
+				</th>
+				<th class="sorter w82 jscColRsvRoute" id="rsvRoute">
+					<div class="reserveSearchResultSortWrap">
+						<span class="mod_text_center">予約経路</span>
+						<span class="mod_icon_sort"></span>
+							</div>
+				</th>
+				<th class="w154 jscColMenu">メニュー・店販割引・<br>サービス・オプション</th>
+				<th class="w68 jscColUsePoint">利用<br>ポイント</th>
+				<th class="w104 jscColPaymentCd">支払い種別</th>
+				<th class="w94 jscColPrice">お支払金額<br>（pt利用前）</th>
+				<th class="w84 jscColRegisterAmount">
+					
+						来店処理
+						</th>
+				<th class="w84 jscColChart ">カルテ</th>
+			</tr>
+		</thead>
+		<tbody id="reserveListArea">
+		<tr class="bold">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260623">06/23<br>12:30</a></td>
+			<td>
+				受付待ち<br><span class="mod_color_e50000">(未読)</span>
+				</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="wordBreak">伊坂 祐奈</p>
+			<p>
+			<a href="/KLP/reserve/net/reserveDetail/?reserveId=BF05251180">(BF05251180)</a>
+					</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				<center><p class="mod_icon_15">NHPB</p></center></td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					<ul><li>(ｸｰﾎﾟﾝ)★OPEN記念50名様限定CP★silkリセットピール¥25,000→¥7,400</li></ul></div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			<p class="nowrap">
+							7,400 円<br>
+							(7,400)
+						</p>
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/BF05251180/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="bold">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260616">06/16<br>18:00</a></td>
+			<td>
+				受付待ち<br><span class="mod_color_e50000">(未読)</span>
+				</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="wordBreak">笠見 りりか</p>
+			<p>
+			<a href="/KLP/reserve/net/reserveDetail/?reserveId=BF05583592">(BF05583592)</a>
+					</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				<center><p class="mod_icon_15">NHPB</p></center></td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					<ul><li>(ｸｰﾎﾟﾝ)★OPEN記念50名様限定CP★silkリセットピール¥25,000→¥7,400</li></ul></div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			<p class="nowrap">
+							7,400 円<br>
+							(7,400)
+						</p>
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/BF05583592/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="bg_eaeaea ">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260610">06/10<br>13:00</a></td>
+			<td>
+				サロン<br>キャンセル</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="wordBreak">ウエダ ヒカル</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64326801">(YG64326801)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64326801/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="bg_eaeaea ">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260610">06/10<br>13:00</a></td>
+			<td>
+				サロン<br>キャンセル</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">テスト 予約</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64367158">(YG64367158)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">cheka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64367158/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260609">06/09<br>19:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">Minagiさん インフル回目</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64378493">(YG64378493)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64378493/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260609">06/09<br>14:30</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">七瀬 らんさんインフルさん</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64377238">(YG64377238)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64377238/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="bold">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260609">06/09<br>13:30</a></td>
+			<td>
+				受付待ち<br><span class="mod_color_e50000">(未読)</span>
+				</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">堂田 史菜</p>
+			<p>
+			<a href="/KLP/reserve/net/reserveDetail/?reserveId=BF05514081">(BF05514081)</a>
+					</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">cheka</p>
+						</td>
+			<td class="mod_center">
+				<center><p class="mod_icon_15">NHPB</p></center></td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					<ul><li>(ｸｰﾎﾟﾝ)【1番人気！！】silk式オーダーメイドプランニング【肌診断→施術】</li></ul></div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			<p class="nowrap">
+							0 円<br>
+							(0)
+						</p>
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/BF05514081/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260609">06/09<br>11:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="wordBreak">吉瀬 奈那</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64619915">(YG64619915)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">cheka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64619915/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260607">06/07<br>18:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">makiさん インフルさん</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64618405">(YG64618405)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64618405/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>14:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">まいかさん 様</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64371949">(YG64371949)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">cheka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64371949/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>13:30</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="wordBreak">リサ リサ</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64616073">(YG64616073)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64616073/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>12:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">Mayuさん インフル２回目</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64370373">(YG64370373)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">momoka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64370373/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>12:00</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">りさこさん 様</p>
+			<p>
+			<a href="/KLP/reserve/ext/extReserveDetail/?reserveId=YG64371720">(YG64371720)</a>
+				</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">cheka</p>
+						</td>
+			<td class="mod_center">
+				電話予約</td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					-</div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			
+							-
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/YG64371720/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>10:15</a></td>
+			<td>
+				受付待ち</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">木村 真理</p>
+			<p>
+			<a href="/KLP/reserve/net/reserveDetail/?reserveId=BF04479303">(BF04479303)</a>
+					</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">(指)momoka</p>
+						</td>
+			<td class="mod_center">
+				<center><p class="mod_icon_15">NHPB</p></center></td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					<ul><li>(ｸｰﾎﾟﾝ)★OPEN記念50名様限定CP★高濃度炭酸トリートメント¥21,000→¥6,000</li></ul></div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			<b class="mod_color_e50000">
+										100</b>
+								</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			<p class="nowrap">
+							5,900 円<br>
+							(6,000)
+						</p>
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/BF04479303/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		<tr class="bg_eaeaea bold">
+			<td class="mod_center rsv_date">
+				<a href="/KLP/schedule/salonSchedule/?date=20260606">06/06<br>10:15</a></td>
+			<td>
+				お客様<br>キャンセル<br><span class="mod_color_e50000">(未読)</span>
+				</td>
+			<td class="">
+			<!-- 情報 -->
+			<p class="icon02 wordBreak">木村 真理</p>
+			<p>
+			<a href="/KLP/reserve/net/reserveDetail/?reserveId=BF04475737">(BF04475737)</a>
+					</p>
+			</td>
+			<td class="mod_center">
+				<p class="wordBreak">(指)momoka</p>
+						</td>
+			<td class="mod_center">
+				<center><p class="mod_icon_15">NHPB</p></center></td>
+			<td>
+				<!-- mod_list03 -->
+				<div class="reserveListAreaCouponName tal">
+					<ul><li>(ｸｰﾎﾟﾝ)★OPEN記念50名様限定CP★高濃度炭酸トリートメント¥21,000→¥6,000</li></ul></div>
+				<!-- /mod_list03 -->
+			</td>
+			<td class="mod_center">
+			
+						-
+						</td>
+			<td class="mod_center">
+			現地支払い</td>
+			<td class="mod_center">
+			<p class="nowrap">
+							6,000 円<br>
+							(6,000)
+						</p>
+						</td>
+			<td class="mod_center">-</td>
+								<td class="mod_center jscColChart ">
+						<div class="reserveListChartLink">
+							<center><a href="/KLP/kirei/charts/BF04475737/" class="primaryBtn btnSizeChartDetail jscChartTreatments">詳細</a></center>
+							<span>（未記載）</span>
+								</div>
+					</td>
+				</tr>
+		</tbody>
+		</table>
+		<!-- /mod_table02 -->
+
+		<!-- mod_column02 -->
+		<div class="mod_column02 mt15 cf">
+			<div class="columnBlock01 mod_txt_34 ml3">転記済</div>
+			<div class="columnBlock02">
+				<!-- paging -->
+<div class="paging">
+<p class="prev_disable"><span>前へ</span></p>
+<p class="page mod_font01">1/1ページ</p>
+<p class="next_disable"><span>次へ</span></p>
+</div>
+<!-- /paging -->
+</div>
+		</div>
+		<!-- /mod_column02 -->
+		</form><!-- mod_pagetop01 -->
+		<div class="mod_pagetop01 cf">
+			<a href="#top">ページのトップへ</a>
+		</div>
+		<!-- /mod_pagetop01 -->
+	</div>
+	<!-- /section -->
+</div>

@@ -412,6 +412,44 @@ ipcMain.handle('device:create-content', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('device:delete-content', async (_event, payload) => {
+  // ブログ記事を削除する (Admin device API)。未処理の push_blog ジョブもキャンセルされる。
+  const cfg = deviceConfig.readDeviceConfig(app);
+  if (!cfg || !cfg.apiUrl || !cfg.deviceToken) {
+    return { ok: false, error: 'SalonBoard 連携が未設定です (設定画面で API URL と Worker Token を登録してください)' };
+  }
+  const base = String(cfg.apiUrl).replace(/\/+$/, '');
+  const headers = {
+    Authorization: `Bearer ${cfg.deviceToken}`,
+    'Content-Type': 'application/json',
+    'X-Worker-Id': cfg.workerId || 'electron-worker',
+    'X-Platform': process.platform,
+    ...(cfg.deviceId ? { 'X-Device-Id': cfg.deviceId } : {}),
+  };
+  try {
+    const res = await fetch(`${base}/api/salonboard/device/content/delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        shop_id: payload?.shopId,
+        content_post_id: payload?.contentPostId,
+      }),
+    });
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (_e) {
+      /* ignore */
+    }
+    if (!res.ok) {
+      return { ok: false, error: (body && (body.message || body.error)) || `HTTP ${res.status}`, status: res.status };
+    }
+    return { ok: true, deleted: !!body?.deleted, sbExternalId: body?.sb_external_id ?? null };
+  } catch (e) {
+    return { ok: false, error: `Admin API に接続できません: ${e instanceof Error ? e.message : String(e)}` };
+  }
+});
+
 // ---------------------------------------------------------------------
 // Worker 操作系 IPC (renderer → main → utilityProcess)
 // ---------------------------------------------------------------------

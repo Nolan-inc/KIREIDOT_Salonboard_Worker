@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('kireidotApp', {
     // 予約を作成し SalonBoard へ push (保存済み設定の apiUrl/token を使用)
     createBooking: (payload) => ipcRenderer.invoke('device:create-booking', payload),
     createContent: (payload) => ipcRenderer.invoke('device:create-content', payload),
+    deleteContent: (payload) => ipcRenderer.invoke('device:delete-content', payload),
     // 実登録トグルのみ更新
     setEnablePush: (enablePush) =>
       ipcRenderer.invoke('device:set-enable-push', { enablePush }),

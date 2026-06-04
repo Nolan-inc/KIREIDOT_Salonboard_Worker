@@ -118,6 +118,47 @@ export async function fetchRecentBookings(
   return (data ?? []) as BookingRow[];
 }
 
+/**
+ * 「キレイドットだけにあって SalonBoard に追加できていない予約」を取得する。
+ *
+ * 予約一覧 (fetchRecentBookings) は表示中の 30 日ぶんしか取らないため、
+ * このリストは表示期間に依存させず「本日以降・キャンセル以外・未連携」の
+ * 予約だけを別クエリで全件取得する (Admin Web と同じ考え方)。
+ *
+ * 判定条件 (SQL で検証済み):
+ *   source in ('kireidot','manual')          … KIREIDOT / 手動作成 (SB 由来ではない)
+ *   status <> 'cancelled'                     … 有効な予約のみ
+ *   scheduled_at >= now                       … 未来分のみ
+ *   salonboard_sync_status is null            … 一度も push されていない / 送信待ち /
+ *     OR in (pending_push, pushing,              送信中 / 失敗 / 手動対応要 / 連携不要
+ *            failed, manual_required,            (= 'synced' / 'cancelled_synced' 以外)
+ *            not_required)
+ */
+export async function fetchUnmatchedBookings(scope: StaffScope): Promise<BookingRow[]> {
+  const nowIso = new Date().toISOString();
+  let q: any = supabase
+    .from('bookings')
+    .select(
+      'id, scheduled_at, duration_min, status, amount, customer_name, user_id, customer_id, staff_id, shop_id, menu_id, salonboard_staff_name, salonboard_staff_external_id, external_booking_id, source, salonboard_sync_status, salonboard_detail_url, shops(name), profiles!bookings_user_id_fkey(full_name), menus(name), customers(full_name, customer_code)',
+    )
+    .in('source', ['kireidot', 'manual'])
+    .neq('status', 'cancelled')
+    .gte('scheduled_at', nowIso)
+    .or(
+      'salonboard_sync_status.is.null,salonboard_sync_status.in.(pending_push,pushing,failed,manual_required,not_required)',
+    )
+    .order('scheduled_at', { ascending: true })
+    .limit(500);
+  q = applyShop(q, scope);
+  q = applyOrg(q, scope);
+  const { data, error } = await q;
+  if (error) {
+    console.warn('[data] fetchUnmatchedBookings error:', error.message);
+    return [];
+  }
+  return (data ?? []) as BookingRow[];
+}
+
 // =========================
 // スタッフ (サロンボード由来)
 //

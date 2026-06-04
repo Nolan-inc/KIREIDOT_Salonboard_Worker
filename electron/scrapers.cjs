@@ -2144,8 +2144,59 @@ async function postBlogViaForm(page, payload, opts = {}) {
 
   // 入力: タイトル / 本文 / 投稿者 / カテゴリ (投稿者・カテゴリ・本文は SalonBoard 必須)
   await page.locator('input#blogTitle').first().fill(title, { timeout: 8_000 }).catch(() => {});
-  // 本文 (必須)。空ならタイトルで埋める。
-  await page.locator('textarea#blogContents1').first().fill(bodyPlain || title, { timeout: 8_000 }).catch(() => {});
+
+  // 本文 (必須)。SalonBoard の本文は nicEdit リッチエディタで、送信用 textarea は
+  // class="display_none" の hidden。隠し textarea に fill しても反映されないため、
+  // contenteditable(.nicEdit-main) に入力し、hidden textarea(#blogContents/#blogContents1)
+  // にも値を流し込んで input/change を発火させる。
+  {
+    const bodyText = (bodyPlain || title);
+    const editor = page.locator('.nicEdit-main[contenteditable="true"]').first();
+    if ((await editor.count().catch(() => 0)) > 0) {
+      // 1) contenteditable に実際にフォーカスして type 入力。
+      //    nicEdit は keyup/内部 instance.content を更新し、確認時に textarea へ saveContent する。
+      await editor.click({ timeout: 6_000 }).catch(() => {});
+      // 既存内容(<br>等)をクリア
+      await page.keyboard.press('Control+A').catch(() => {});
+      await page.keyboard.press('Delete').catch(() => {});
+      await editor.type(bodyText, { delay: 5 }).catch(async () => {
+        // type が効かない場合は innerHTML 直書き + イベント発火にフォールバック
+        await editor.evaluate((el, text) => {
+          el.innerHTML = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+        }, bodyText).catch(() => {});
+      });
+      await editor.evaluate((el) => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }).catch(() => {});
+    }
+    // 2) nicEditors があれば saveContent() を呼んで全インスタンス→textarea を同期。
+    //    さらに送信用 hidden textarea にも値を直書き (二重の保険)。
+    await page.evaluate((text) => {
+      const html = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+      try {
+        if (typeof window !== 'undefined' && window.nicEditors && typeof window.nicEditors.findEditor === 'function') {
+          // findEditor(textareaId) → instance.saveContent()
+          for (const id of ['blogContents', 'blogContents1']) {
+            const inst = window.nicEditors.findEditor(id);
+            if (inst) {
+              if (typeof inst.setContent === 'function') inst.setContent(html);
+              if (typeof inst.saveContent === 'function') inst.saveContent();
+            }
+          }
+        }
+      } catch (_e) { /* noop */ }
+      for (const id of ['blogContents', 'blogContents1']) {
+        const ta = document.getElementById(id);
+        if (ta && !String(ta.value || '').trim()) {
+          ta.value = html;
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          ta.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+    }, bodyText).catch(() => {});
+  }
 
   // 投稿者 (select#staffId, 必須)。指定があればそれ、無ければ最初の有効スタッフを選ぶ。
   {
@@ -2206,9 +2257,13 @@ async function postBlogViaForm(page, payload, opts = {}) {
       confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
     ]);
     await page.waitForTimeout(1500);
-    // 確認画面の最終確定ボタン (登録する/投稿する/確定 など) or HTMLダイアログ
+    // 確認画面の最終確定ボタン。
+    // SalonBoard ブログ確認画面 (/KLP/blog/blog/confirm) の確定ボタンは
+    //   a#reflect  「登録・反映する」 (= 公開してサロンボードに反映)
+    //   a#unReflect「登録・未反映にする」(= 下書き)
+    // 公開したいので #reflect / 「登録・反映する」を最優先。旧来の登録する/投稿する等も保険で残す。
     const finalBtn = page
-      .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a:has-text("投稿する"):visible, a.mod_btn_submit_01:visible, input[type="submit"][value*="登録"]')
+      .locator('a#reflect:visible, a:has-text("登録・反映する"):visible, a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a:has-text("投稿する"):visible, a.mod_btn_submit_01:visible, input[type="submit"][value*="登録"]')
       .first();
     await finalBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
     if ((await finalBtn.count().catch(() => 0)) > 0) {
@@ -2227,7 +2282,8 @@ async function postBlogViaForm(page, payload, opts = {}) {
 
   // 検証
   const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
-  const looksDone = /投稿しました|登録しました|公開しました|完了|受け付け/.test(bodyText);
+  const looksDone = /投稿しました|登録しました|公開しました|反映しました|登録が完了|完了|受け付け/.test(bodyText)
+    || /\/blog\/blog\/(complete|done)/.test(page.url());
   const looksError = /エラー|失敗|入力してください|必須/.test(bodyText) && !looksDone;
   if (looksError) {
     return fail(`ブログ投稿でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
@@ -2776,6 +2832,132 @@ async function scrapeShifts(page) {
   };
 }
 
+// ---------------------------------------------------------------------
+// ブログ削除 (SalonBoard 上のブログを削除する)
+//
+// 入口: payload.external_blog_id (= SalonBoard の blogId, 例 "A116474081")
+//   ・ブログ一覧 (/KLP/blog/blogList/) を開く
+//   ・該当 blogId の削除リンク <a class="mod_btn_delete_01" href="#blogId"> をクリック
+//   ・確認ダイアログ (HTMLダイアログ a.accept / ネイティブ confirm) を受け付ける
+//   ・一覧から該当 blogId が消えたこと / 完了文言で成否を判定
+//
+// 戻り値: { status:'ok' } | { status:'confirm_only' } | { status:'failed', reason, errorCode, manualRequired }
+//   enableDelete=false のとき実削除せず confirm_only を返す (安全弁)。
+// ---------------------------------------------------------------------
+async function deleteBlogViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enableDelete = opts.enableDelete !== false;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const blogId = String(p.external_blog_id || p.salonboard_external_id || '').trim();
+  if (!blogId) {
+    return fail('削除対象の blogId (external_blog_id) がありません', 'UNKNOWN_ERROR', true);
+  }
+
+  let listUrl;
+  try { listUrl = new URL('/KLP/blog/blogList/', baseUrl).toString(); } catch (_e) { listUrl = BLOG_LIST_URL; }
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // 一覧に該当 blogId が存在するか確認 (タイトルリンク or 削除リンク)
+  const presentBefore = await page.evaluate((id) => {
+    const hit = (sel) => Array.from(document.querySelectorAll(sel)).some((a) => (a.getAttribute('href') || '').includes(id));
+    return hit('a[href*="blogId="]') || hit('a.mod_btn_delete_01');
+  }, blogId).catch(() => false);
+
+  if (!presentBefore) {
+    // 既に SalonBoard 上に無い = 冪等に成功扱い (KIREIDOT 側だけ消したケース等)
+    return { status: 'ok', alreadyAbsent: true };
+  }
+
+  if (!enableDelete) {
+    return { status: 'confirm_only' };
+  }
+
+  // 削除リンクを特定: href に blogId を含む a.mod_btn_delete_01 を優先。
+  // 無ければ blogId 行の中の削除ボタンを辿る。
+  let deleteLink = page.locator(`a.mod_btn_delete_01[href*="${blogId}"]`).first();
+  if ((await deleteLink.count().catch(() => 0)) === 0) {
+    // フォールバック: タイトル行(tr)→ 同ブログの削除ボタン
+    const viaRow = await page.evaluate((id) => {
+      const titleA = Array.from(document.querySelectorAll('a[href*="blogId="]'))
+        .find((a) => (a.getAttribute('href') || '').includes(id));
+      if (!titleA) return false;
+      const tr = titleA.closest('tr');
+      const del = tr && tr.querySelector('a.mod_btn_delete_01');
+      if (del) { del.setAttribute('data-kireidot-del', '1'); return true; }
+      return false;
+    }, blogId).catch(() => false);
+    if (viaRow) deleteLink = page.locator('a.mod_btn_delete_01[data-kireidot-del="1"]').first();
+  }
+
+  if ((await deleteLink.count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'blog', `no_delete_${blogId}`, { diagnostics: { blogId, url: page.url() } });
+    return fail(`ブログ削除ボタンが見つかりませんでした (blogId=${blogId}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // ネイティブ confirm が出るケースに備えて accept ハンドラを張る
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let confirmClicked = false;
+  try {
+    await deleteLink.click({ timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(800);
+    // HTMLダイアログ「はい/OK/削除する」(.accept) をクリック
+    const yesBtn = page
+      .locator('a.accept:visible, .buttons a.accept, a:has-text("削除する"):visible, a:has-text("はい"):visible')
+      .first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
+    if ((await yesBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmClicked = true;
+    }
+    await page.waitForTimeout(1200);
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'blog', `deleted_${blogId}`, {
+    diagnostics: { blogId, confirmClicked, nativeDialogAccepted, url: page.url() },
+  });
+
+  // 検証1: 完了文言
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /削除しました|削除が完了|削除を受け付け|削除済/.test(bodyText);
+  const looksError = /エラー|失敗/.test(bodyText) && !looksDone;
+
+  // 検証2: 一覧を再読込し、該当 blogId が消えたか
+  let stillPresent = true;
+  try {
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    stillPresent = await page.evaluate((id) => {
+      const hit = (sel) => Array.from(document.querySelectorAll(sel)).some((a) => (a.getAttribute('href') || '').includes(id));
+      return hit('a[href*="blogId="]') || hit('a.mod_btn_delete_01');
+    }, blogId).catch(() => true);
+  } catch (_e) { /* noop */ }
+
+  if (!stillPresent || looksDone) {
+    return { status: 'ok', externalId: blogId };
+  }
+  if (looksError) {
+    return fail(`ブログ削除でエラー (${(bodyText.match(/.{0,30}(エラー|失敗).{0,30}/)?.[0] || '').trim()}, capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!confirmClicked && !nativeDialogAccepted) {
+    return fail(`ブログ削除の確認ダイアログを操作できませんでした (blogId=${blogId}, capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+  return fail(`ブログ削除の完了を確認できませんでした (blogId=${blogId}, capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
@@ -2787,6 +2969,7 @@ module.exports = {
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
+  deleteBlogViaForm,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

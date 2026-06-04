@@ -328,7 +328,9 @@ export async function setSalonboardCredentialEnabled(
 
 /**
  * 取得(fetch)/登録(push) の連携を店舗ごとに個別 ON/OFF する。
- * salonboard_credentials を直接更新する (owner/shop_manager の RLS で許可)。
+ * salonboard_credentials には UPDATE の RLS ポリシーが無いため直接更新は弾かれる。
+ * SECURITY DEFINER の RPC salonboard_set_sync_direction 経由で更新する
+ * (関数内で owner/shop_manager/admin/super_owner の権限を検証)。
  *   direction: 'fetch' = 取得側 (SalonBoard→KIREIDOT)
  *              'push'  = 登録側 (KIREIDOT→SalonBoard)
  */
@@ -337,11 +339,11 @@ export async function setSalonboardSyncDirection(
   direction: 'fetch' | 'push',
   enabled: boolean,
 ): Promise<{ ok: boolean; error?: string }> {
-  const col = direction === 'fetch' ? 'sync_fetch_enabled' : 'sync_push_enabled';
-  const { error } = await supabase
-    .from('salonboard_credentials')
-    .update({ [col]: enabled })
-    .eq('shop_id', shopId);
+  const { error } = await supabase.rpc('salonboard_set_sync_direction', {
+    p_shop_id: shopId,
+    p_direction: direction,
+    p_enabled: enabled,
+  });
   if (error) return { ok: false, error: error.message };
   return { ok: true };
 }

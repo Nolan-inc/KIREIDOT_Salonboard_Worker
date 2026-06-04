@@ -15,12 +15,20 @@ import {
   Save,
   Trash2,
   PlugZap,
+  KeyRound,
+  Pencil,
+  ShieldOff,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Card, CardBody, CardHeader } from '../components/Card';
 import { useAuth } from '../lib/auth-context';
 import { useSelection } from '../lib/selection-context';
 import { supabase } from '../lib/supabase';
+import { EditModal } from './Salonboard';
+import {
+  fetchCredentialOverview,
+  type CredentialOverviewRow,
+} from '../lib/salonboard';
 
 export function Settings() {
   const auth = useAuth();
@@ -59,6 +67,9 @@ export function Settings() {
 
       {/* SalonBoard 連携デバイス設定 (v0.2.5) */}
       <DeviceConfigSection />
+
+      {/* 店舗ごとのサロンボード ID / パスワード (入力・表示・編集) */}
+      <ShopCredentialsSection />
 
       {/* 同期 */}
       <Card>
@@ -735,6 +746,173 @@ function DeviceConfigSection() {
         )}
       </CardBody>
     </Card>
+  );
+}
+
+// =====================================================================
+// 店舗ごとのサロンボード ID / パスワード (入力・表示・編集)
+//
+// 「サロンボード連携」ページと同じ認証情報をこの設定ページからも編集できる
+// ようにするセクション。実体の入力フォーム (ID / パスワード平文表示トグル /
+// 既存値の復号 prefill) は Salonboard.tsx の EditModal を再利用する。
+//
+// 表示対象は「操作中の会社」(selectedOrgId) の店舗。店舗まで選択中
+// (selectedShopId) ならその 1 店舗のみに絞る。会社未選択なら案内を出す。
+// 編集できるロールは owner / shop_manager / admin / super_owner のみ。
+// =====================================================================
+function ShopCredentialsSection() {
+  const auth = useAuth();
+  const { selectedOrgId, selectedShopId } = useSelection();
+
+  const canEdit =
+    auth.status === 'signed-in' &&
+    (auth.scope.role === 'super_owner' ||
+      auth.scope.role === 'admin' ||
+      auth.scope.role === 'owner' ||
+      auth.scope.role === 'shop_manager');
+
+  const [rows, setRows] = useState<CredentialOverviewRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<CredentialOverviewRow | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await fetchCredentialOverview();
+      setRows(list);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'データ取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  // 操作中の会社で絞り込み。店舗まで選択中なら 1 店舗に絞る。
+  const scopedRows = (() => {
+    if (!selectedOrgId) return [] as CredentialOverviewRow[];
+    let list = rows.filter((r) => r.organization_id === selectedOrgId);
+    if (selectedShopId) list = list.filter((r) => r.shop_id === selectedShopId);
+    return list;
+  })();
+
+  return (
+    <Card>
+      <CardHeader
+        title="店舗のサロンボード ID / パスワード"
+        subtitle="各店舗のサロンボード ログイン ID とパスワードを登録・表示・編集します"
+      />
+      <CardBody className="space-y-3">
+        {loading ? (
+          <div className="flex items-center gap-2 text-[12px] text-ink-soft">
+            <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
+          </div>
+        ) : error ? (
+          <div className="rounded-[10px] bg-red-50 px-3 py-2 text-[11px] text-red-700">
+            {error}
+          </div>
+        ) : !selectedOrgId ? (
+          <p className="text-[12px] text-ink-soft">
+            右上で操作対象の会社を選択すると、その会社の店舗が表示されます。
+          </p>
+        ) : scopedRows.length === 0 ? (
+          <p className="text-[12px] text-ink-soft">
+            この会社にはサロンボード連携対象の店舗がありません。
+          </p>
+        ) : (
+          <>
+            {!canEdit && (
+              <div className="rounded-[10px] bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                認証情報の編集は <strong>owner / shop_manager / admin / super_owner</strong>{' '}
+                ロールのみ可能です。閲覧モードで表示しています。
+              </div>
+            )}
+            {scopedRows.map((row) => (
+              <CredentialRow
+                key={row.shop_id}
+                row={row}
+                canEdit={canEdit}
+                onEdit={() => setEditing(row)}
+              />
+            ))}
+          </>
+        )}
+      </CardBody>
+
+      {editing && (
+        <EditModal
+          row={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            await reload();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+/** 1 店舗ぶんの認証情報サマリ行 (ログイン ID 表示 + 設定/編集ボタン)。 */
+function CredentialRow({
+  row,
+  canEdit,
+  onEdit,
+}: {
+  row: CredentialOverviewRow;
+  canEdit: boolean;
+  onEdit: () => void;
+}) {
+  const linked = row.has_credential;
+  return (
+    <div className="flex items-center justify-between rounded-[12px] border border-hairline bg-white/85 px-3 py-2.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-light text-brand-700">
+          <Store className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-[13px] font-semibold text-ink">
+              {row.shop_name}
+            </span>
+            {linked ? (
+              row.enabled ? (
+                <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">
+                  <ShieldCheck className="h-2.5 w-2.5" /> 連携中
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-0.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+                  <ShieldOff className="h-2.5 w-2.5" /> 停止中
+                </span>
+              )
+            ) : (
+              <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700">
+                <AlertCircle className="h-2.5 w-2.5" /> 未設定
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 text-[11px] text-ink-soft">
+            ログイン ID:{' '}
+            <code className="font-mono">{linked ? row.login_id ?? '—' : '未登録'}</code>
+          </div>
+        </div>
+      </div>
+      {canEdit && (
+        <button
+          type="button"
+          onClick={onEdit}
+          className="inline-flex shrink-0 items-center gap-1 rounded-[8px] border border-hairline bg-white px-3 py-1.5 text-[11px] font-semibold text-brand-700 hover:bg-brand-light/40"
+        >
+          {linked ? <Pencil className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
+          {linked ? 'ID/パスワードを編集' : 'ID/パスワードを設定'}
+        </button>
+      )}
+    </div>
   );
 }
 

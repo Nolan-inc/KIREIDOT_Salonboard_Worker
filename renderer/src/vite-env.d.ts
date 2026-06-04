@@ -266,6 +266,18 @@ interface Window {
         contentPostId?: string;
         enqueued?: boolean;
       }>;
+      /** ブログ記事を削除 (KIREIDOT 側)。未処理の push_blog ジョブもキャンセルされる */
+      deleteContent: (payload: {
+        shopId: string;
+        contentPostId: string;
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        status?: number;
+        deleted?: boolean;
+        /** SalonBoard に投稿済みだった場合の blogId (SalonBoard 側は自動削除されない) */
+        sbExternalId?: string | null;
+      }>;
       /** 実登録トグルのみ更新 */
       setEnablePush: (
         enablePush: boolean,
