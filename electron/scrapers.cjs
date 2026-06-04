@@ -2103,7 +2103,9 @@ const BLOG_FORM_URL = 'https://salonboard.com/KLP/blog/blog/';
 //   タイトル: input#blogTitle (name=title)
 //   本文    : textarea#blogContents1 (段落1。複数段落 blogContents1..5)
 //   投稿者  : select#staffId   カテゴリ: select#blogCategoryCd
-//   画像    : input[name=sendFile] (今回は未対応。本文のみ)
+//   画像    : a#upload.jscImageUploaderModalTrigger でモーダルを開き、
+//             モーダル内 input[type=file] にセット → imagePath1..4 に格納
+//             (uploadBlogCoverImage で payload.cover_image_url を添付)
 //   確認へ  : <a id="confirm" class="mod_btn_confirm_03">
 //             → 確認画面で最終「登録する」(a#regist 等 / a.accept ダイアログ)
 //
@@ -2111,6 +2113,147 @@ const BLOG_FORM_URL = 'https://salonboard.com/KLP/blog/blog/';
 // opts: { baseUrl, enablePost }  enablePost=false なら確認まで(投稿確定しない)。
 // 戻り値: { status:'ok', externalId? } | { status:'confirm_only' } | { status:'failed', ... }
 // =====================================================================
+// =====================================================================
+// ブログのカバー画像を SalonBoard にアップロードする。
+//
+// SalonBoard ブログ編集フォームの画像アップロードは以下の構造 (実DOM):
+//   トリガー : <a id="upload" class="jscImageUploaderModalTrigger">画像アップロード</a>
+//   結果格納 : <input type="hidden" name="imagePath1..4" id="imagePath1..4">
+//             (アップロード成功で imagePath1 などに画像パスが入る)
+//   ファイル : モーダル内の <input type="file"> (name は sendFile 等)
+//
+// モーダル内部の DOM は固定でないため、複数のセレクタ候補でフォールバックし、
+// 完了は「imagePath* に値が入る」か「サムネイルが増える」かで判定する。
+// 各段でキャプチャを残し、失敗時に次回修正できるようにする。
+//
+// 戻り値: true=添付できた / false=添付できなかった (本文投稿は継続させる)
+// =====================================================================
+async function uploadBlogCoverImage(page, coverUrl) {
+  // 1) 画像を公開URLからダウンロードして一時ファイルに保存
+  let tmpFile = null;
+  try {
+    const resp = await page.context().request.get(coverUrl, { timeout: 20_000 });
+    if (!resp.ok()) {
+      await captureScrapeDebug(page, 'blog', 'image_download_failed', {
+        diagnostics: { coverUrl, status: resp.status() },
+      }).catch(() => {});
+      return false;
+    }
+    const buf = await resp.body();
+    const ct = (resp.headers()['content-type'] || '').toLowerCase();
+    let ext = 'jpg';
+    if (ct.includes('png')) ext = 'png';
+    else if (ct.includes('gif')) ext = 'gif';
+    else if (ct.includes('webp')) ext = 'webp';
+    else {
+      const um = coverUrl.split('?')[0].match(/\.(jpe?g|png|gif|webp)$/i);
+      if (um) ext = um[1].toLowerCase().replace('jpeg', 'jpg');
+    }
+    tmpFile = path.join(os.tmpdir(), `sb_blog_cover_${Date.now()}.${ext}`);
+    fs.writeFileSync(tmpFile, buf);
+  } catch (e) {
+    await captureScrapeDebug(page, 'blog', 'image_download_error', {
+      diagnostics: { coverUrl, error: e?.message ?? String(e) },
+    }).catch(() => {});
+    return false;
+  }
+
+  const cleanup = () => { try { if (tmpFile) fs.unlinkSync(tmpFile); } catch (_e) { /* noop */ } };
+
+  // アップロード前の imagePath* の値を記録 (完了判定の基準)
+  const beforePaths = await page.evaluate(() => {
+    const out = {};
+    for (let i = 1; i <= 4; i++) {
+      const el = document.getElementById('imagePath' + i);
+      out[i] = el ? (el.value || '') : '';
+    }
+    return out;
+  }).catch(() => ({ 1: '', 2: '', 3: '', 4: '' }));
+
+  try {
+    // 2) 「画像アップロード」モーダルを開く。クリックで file chooser が直接開く実装も
+    //    あり得るので fileChooser イベントを先に待ち受けておく。
+    const trigger = page
+      .locator('a#upload.jscImageUploaderModalTrigger, a#upload, a.jscImageUploaderModalTrigger, a:has-text("画像アップロード")')
+      .first();
+    if ((await trigger.count().catch(() => 0)) === 0) {
+      await captureScrapeDebug(page, 'blog', 'image_no_trigger', { diagnostics: { url: page.url() } }).catch(() => {});
+      cleanup();
+      return false;
+    }
+
+    // クリックで file chooser が直接開くケースに備える
+    let chooserFile = false;
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
+      await chooser.setFiles(tmpFile).catch(() => {});
+      chooserFile = true;
+    }).catch(() => { /* モーダル方式ならここには来ない */ });
+
+    await trigger.click({ timeout: 8_000 }).catch(() => {});
+    await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
+
+    // 3) file chooser で入れられなかった場合はモーダル内の input[type=file] に直接セット。
+    if (!chooserFile) {
+      // モーダルが描画されるのを少し待つ
+      await page.waitForTimeout(800);
+      const fileInput = page
+        .locator('input[type="file"][name="sendFile"], input[type="file"]#sendFile, .jscImageUploaderModal input[type="file"], .modal input[type="file"], input[type="file"]')
+        .first();
+      if ((await fileInput.count().catch(() => 0)) === 0) {
+        await captureScrapeDebug(page, 'blog', 'image_no_file_input', { diagnostics: { url: page.url() } }).catch(() => {});
+        cleanup();
+        return false;
+      }
+      await fileInput.setInputFiles(tmpFile, { timeout: 8_000 }).catch(() => {});
+
+      // 4) アップロード実行ボタン (モーダル内)。候補を順に試す。
+      //    setInputFiles の change で自動アップロードされる実装もあるため、無ければスキップ。
+      const uploadBtn = page
+        .locator('.jscImageUploaderModal a:has-text("アップロード"), .modal a:has-text("アップロード"), .jscImageUploaderModal a.mod_btn_upload_01, a.jscImageUploadExec, .modal a.accept, .modal input[type="submit"]')
+        .first();
+      if ((await uploadBtn.count().catch(() => 0)) > 0) {
+        await uploadBtn.click({ timeout: 8_000 }).catch(() => {});
+      }
+    }
+
+    // 5) 完了判定: imagePath* のいずれかに新しい値が入るのを最大15秒待つ。
+    const done = await page.waitForFunction((before) => {
+      for (let i = 1; i <= 4; i++) {
+        const el = document.getElementById('imagePath' + i);
+        const v = el ? (el.value || '') : '';
+        if (v && v !== before[i]) return true;
+      }
+      return false;
+    }, beforePaths, { timeout: 15_000 }).then(() => true).catch(() => false);
+
+    if (!done) {
+      await captureScrapeDebug(page, 'blog', 'image_upload_unconfirmed', {
+        diagnostics: { url: page.url(), chooserFile },
+      }).catch(() => {});
+      cleanup();
+      return false;
+    }
+
+    // モーダルを閉じる (OK/完了/閉じるボタンがあれば)。無ければそのまま。
+    const closeBtn = page
+      .locator('.jscImageUploaderModal a:has-text("OK"), .jscImageUploaderModal a:has-text("完了"), .jscImageUploaderModal a:has-text("挿入"), .modal a:has-text("OK"), .modal a:has-text("挿入"), .modal a.accept, .modal a.close, a.jsImageModalClose')
+      .first();
+    if ((await closeBtn.count().catch(() => 0)) > 0) {
+      await closeBtn.click({ timeout: 5_000 }).catch(() => {});
+      await page.waitForTimeout(600);
+    }
+
+    cleanup();
+    return true;
+  } catch (e) {
+    await captureScrapeDebug(page, 'blog', 'image_upload_exception', {
+      diagnostics: { url: page.url(), error: e?.message ?? String(e) },
+    }).catch(() => {});
+    cleanup();
+    return false;
+  }
+}
+
 async function postBlogViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePost = opts.enablePost !== false;
@@ -2234,6 +2377,20 @@ async function postBlogViaForm(page, payload, opts = {}) {
           if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
         }).catch(() => {});
       }
+    }
+  }
+
+  // カバー画像アップロード (任意)。payload.cover_image_url の公開URLから画像を取得し、
+  // SalonBoard のブログ画像アップロード(モーダル経由)で添付する。
+  // 画像が無い/失敗しても本文投稿は継続する (画像で投稿全体を止めない)。
+  if (p.cover_image_url) {
+    try {
+      await uploadBlogCoverImage(page, String(p.cover_image_url));
+    } catch (e) {
+      // 失敗は警告キャプチャのみ残して継続。
+      await captureScrapeDebug(page, 'blog', 'image_upload_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e), coverUrl: String(p.cover_image_url) },
+      }).catch(() => {});
     }
   }
 
