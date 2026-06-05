@@ -365,13 +365,18 @@ export type CouponRow = {
   category: string | null;
   expires_label: string | null;
   photo_url: string | null;
+  price: number | null;
+  duration_min: number | null;
+  content: string | null;
+  condition_label: string | null;
+  use_condition: string | null;
 };
 
 export async function fetchCouponList(scope: StaffScope): Promise<CouponRow[]> {
   if (!scope.shopId) return [];
   const { data, error } = await supabase
     .from('salonboard_coupon_imports')
-    .select('id, external_id, name, category, expires_label, photo_url, is_active')
+    .select('id, external_id, name, category, expires_label, photo_url, price, duration_min, content, condition_label, use_condition, is_active')
     .eq('shop_id', scope.shopId)
     .eq('is_active', true)
     .order('category', { nullsFirst: false })
@@ -387,6 +392,11 @@ export async function fetchCouponList(scope: StaffScope): Promise<CouponRow[]> {
     category: r.category ?? null,
     expires_label: r.expires_label ?? null,
     photo_url: r.photo_url ?? null,
+    price: r.price ?? null,
+    duration_min: r.duration_min ?? null,
+    content: r.content ?? null,
+    condition_label: r.condition_label ?? null,
+    use_condition: r.use_condition ?? null,
   })) as CouponRow[];
 }
 

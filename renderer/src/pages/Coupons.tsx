@@ -76,15 +76,17 @@ export function Coupons() {
             <thead className="border-b border-hairline/70 bg-white/50">
               <tr className="text-[11px] uppercase tracking-wider text-muted">
                 <th className="px-5 py-3">写真</th>
-                <th className="px-3 py-3">クーポン名</th>
+                <th className="px-3 py-3">クーポン名 / 内容</th>
                 <th className="px-3 py-3">種別</th>
+                <th className="px-3 py-3 text-right">金額</th>
+                <th className="px-3 py-3">所要</th>
                 <th className="px-3 py-3">有効期限</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-hairline/60">
               {coupons.map((c) => (
                 <tr key={c.id} className="transition hover:bg-brand-light/30">
-                  <td className="px-5 py-3">
+                  <td className="px-5 py-3 align-top">
                     {c.photo_url ? (
                       <img
                         src={c.photo_url}
@@ -98,10 +100,16 @@ export function Coupons() {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-3 font-medium text-ink">
-                    <span className="line-clamp-2">{c.name}</span>
+                  <td className="px-3 py-3 align-top">
+                    <div className="font-medium text-ink line-clamp-2">{c.name}</div>
+                    {c.content && (
+                      <div className="mt-0.5 text-[11px] text-ink-soft line-clamp-2">{c.content}</div>
+                    )}
+                    {c.use_condition && (
+                      <div className="mt-0.5 text-[10px] text-muted">条件: {c.use_condition}</div>
+                    )}
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-3 py-3 align-top">
                     {c.category ? (
                       <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-700">
                         {c.category}
@@ -110,7 +118,13 @@ export function Coupons() {
                       <span className="text-ink-soft">—</span>
                     )}
                   </td>
-                  <td className="px-3 py-3 text-ink-soft">{c.expires_label ?? '—'}</td>
+                  <td className="px-3 py-3 text-right align-top font-semibold text-ink">
+                    {c.price != null ? `¥${c.price.toLocaleString('ja-JP')}` : '—'}
+                  </td>
+                  <td className="px-3 py-3 align-top text-ink-soft">
+                    {c.duration_min != null ? `${c.duration_min}分` : '—'}
+                  </td>
+                  <td className="px-3 py-3 align-top text-ink-soft">{c.expires_label ?? '—'}</td>
                 </tr>
               ))}
             </tbody>

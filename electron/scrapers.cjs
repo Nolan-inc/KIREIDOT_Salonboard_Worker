@@ -1295,19 +1295,107 @@ async function scrapeCoupons(page) {
     };
   });
 
-  const rows = (raw.items ?? []).map((it) => ({
-    external_id: it.external_id,
-    name: it.name,
-    category: it.category,
-    expires_label: it.expires_label,
-    photo_url: it.photo_url,
-    is_active: true,
-  }));
+  const baseItems = raw.items ?? [];
+
+  // ---- 各クーポンの編集ページ (couponEdit) から詳細 (金額/所要時間/内容/条件) を取得 ----
+  // 一覧には金額・所要時間・内容が無く、編集ページにのみ存在するため 1 件ずつ開く。
+  // 一覧ページ内の #couponEditForm に couponId をセットして submit すると編集ページへ遷移する
+  // (CSRF / userId / couponSortDate は既にフォームに入っている)。
+  const details = {};
+  let detailOk = 0;
+  let detailFail = 0;
+  for (const it of baseItems) {
+    try {
+      // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
+      if (!page.url().includes('/CNK/draft/couponList')) {
+        await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      }
+      // couponEditForm に couponId をセットして submit
+      const submitted = await page.evaluate((couponId) => {
+        const form = document.querySelector('#couponEditForm');
+        if (!form) return false;
+        let idInput = form.querySelector('input[name="couponId"]');
+        if (!idInput) {
+          idInput = document.createElement('input');
+          idInput.type = 'hidden';
+          idInput.name = 'couponId';
+          form.appendChild(idInput);
+        }
+        idInput.value = couponId;
+        form.submit();
+        return true;
+      }, it.external_id);
+      if (!submitted) { detailFail++; continue; }
+
+      // 編集ページのクーポン名フィールドが現れるまで待つ
+      await page
+        .waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 })
+        .catch(() => {});
+
+      const d = await page.evaluate(() => {
+        const val = (sel) => {
+          const el = document.querySelector(sel);
+          return el ? (el.value ?? '').trim() : '';
+        };
+        const selectedText = (sel) => {
+          const el = document.querySelector(sel);
+          if (!el || el.selectedIndex < 0) return '';
+          return (el.options[el.selectedIndex]?.textContent ?? '').trim();
+        };
+        const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
+        const price = onlyDigits(val('input[name="frmCouponEditCnkDto.price"]'));
+        const duration = onlyDigits(val('input[name="frmCouponEditCnkDto.sejyutsuAimTime"]'));
+        const content = val('textarea[name="frmCouponEditCnkDto.contentExplanation"]');
+        // 提示条件 select は name が確実でないため ID ベースでフォールバック
+        const condition =
+          selectedText('select[name="frmCouponEditCnkDto.selectedCouponConditionCd"]') ||
+          selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
+          selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
+        const useCondition = val('input[name="frmCouponEditCnkDto.useCondition"]');
+        return {
+          ok: !!document.querySelector('input[name="frmCouponEditCnkDto.couponName"]'),
+          price: price || null,
+          duration_min: duration || null,
+          content: content || null,
+          condition_label: condition || null,
+          use_condition: useCondition || null,
+        };
+      });
+      if (d?.ok) {
+        details[it.external_id] = d;
+        detailOk++;
+      } else {
+        detailFail++;
+      }
+    } catch (_e) {
+      detailFail++;
+    }
+  }
+
+  const rows = baseItems.map((it) => {
+    const d = details[it.external_id] || {};
+    return {
+      external_id: it.external_id,
+      name: it.name,
+      category: it.category,
+      expires_label: it.expires_label,
+      photo_url: it.photo_url,
+      price: d.price != null ? Number(d.price) : null,
+      duration_min: d.duration_min != null ? Number(d.duration_min) : null,
+      content: d.content ?? null,
+      condition_label: d.condition_label ?? null,
+      use_condition: d.use_condition ?? null,
+      is_active: true,
+    };
+  });
   return {
     rows,
     debug: {
       itemsFound: rows.length,
       fieldsTotal: raw.total,
+      detailOk,
+      detailFail,
       url: raw.url,
       title: raw.title,
       trCount: raw.trCount,
