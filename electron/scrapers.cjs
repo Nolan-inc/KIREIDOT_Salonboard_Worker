@@ -685,6 +685,13 @@ async function scrapeBookings(page, opts = {}) {
     const items = await extractBookingItemsFromCurrentPage(page);
     allItems.push(...items);
     diag.push(`page ${pageNum}: ${items.length} rows`);
+    // 1 ページ目が 0 件のときは、原因切り分け用に DOM 診断を出す。
+    if (pageNum === 1 && items.length === 0 && lastBookingExtractDiag) {
+      const d = lastBookingExtractDiag;
+      diag.push(`extract diag: ${d.reason ?? '?'}`);
+      if (d.tableDiag?.length) diag.push(`tables: ${d.tableDiag.join(' ')}`);
+      if (d.reserveAreaHtml) diag.push(`reserveArea html: ${d.reserveAreaHtml.replace(/\s+/g, ' ').slice(0, 600)}`);
+    }
 
     // 同じページに留まり続けるのを避けるため、簡易ハッシュで判定
     const sig = items
@@ -934,6 +941,10 @@ async function enrichDurationsFromSchedule(page, rows, baseUrl) {
  * 現在表示されているページから予約行を抽出する。
  * scrapeBookings の旧 page.evaluate と同じロジック。
  */
+// extractBookingItemsFromCurrentPage が直近で 0 件だったときの診断情報。
+// (テーブルが見つからない/行が拾えない原因切り分け用)
+let lastBookingExtractDiag = null;
+
 async function extractBookingItemsFromCurrentPage(page) {
   const raw = await page.evaluate(() => {
     function txt(el) {
@@ -984,16 +995,49 @@ async function extractBookingItemsFromCurrentPage(page) {
     }
     let target = null;
     let bestScore = 0;
-    for (const t of tables) {
-      const sc = score(t);
-      if (sc > bestScore) {
-        bestScore = sc;
-        target = t;
+    // 最優先: SalonBoard 予約一覧の固定 ID / クラスを直接狙う。
+    // 結果テーブルは <table class="reserveSearchResultTable" id="resultList"> で、
+    // 予約行は <tbody id="reserveListArea"> 内。ヘッダー文言のスコアリングに頼ると
+    // <br> やレイアウト変更で取りこぼすため、まず ID/クラスで確実に掴む。
+    const fixedTarget =
+      document.querySelector('#resultList') ||
+      document.querySelector('table.reserveSearchResultTable') ||
+      (document.querySelector('#reserveListArea')?.closest('table')) ||
+      null;
+    if (fixedTarget) {
+      target = fixedTarget;
+      bestScore = 99;
+    } else {
+      for (const t of tables) {
+        const sc = score(t);
+        if (sc > bestScore) {
+          bestScore = sc;
+          target = t;
+        }
       }
     }
     if (!target || bestScore < 4) {
-      // 結果テーブル無し = 「該当する予約はありません」状態
-      return { items: [], reason: `no_result_table (best=${bestScore})` };
+      // 結果テーブル無し = 「該当する予約はありません」状態。
+      // 診断用に、ページ内テーブルの概況とメインエリアの HTML 断片を返す
+      // (0件継続時に実 DOM 構造を確認して原因切り分けするため)。
+      const tableDiag = tables.slice(0, 8).map((t) => {
+        const cls = (t.className || '').slice(0, 40);
+        const id = t.id || '';
+        const trs = t.querySelectorAll('tr').length;
+        const inputs = t.querySelectorAll('input,select').length;
+        return `[id=${id} cls="${cls}" tr=${trs} in=${inputs}]`;
+      });
+      const reserveAreaHtml =
+        (document.querySelector('#reserveListArea')?.outerHTML ||
+          document.querySelector('#resultList')?.outerHTML ||
+          document.querySelector('[class*="reserveSearch" i]')?.outerHTML ||
+          '').slice(0, 800);
+      return {
+        items: [],
+        reason: `no_result_table (best=${bestScore})`,
+        tableDiag,
+        reserveAreaHtml,
+      };
     }
 
     // 列順を th から推定 (なければ DOM 順)
@@ -1139,6 +1183,16 @@ async function extractBookingItemsFromCurrentPage(page) {
       .filter(Boolean);
     return { items };
   });
+  // 0 件時の診断情報をモジュール変数に保持 (呼び出し元がログ出力に使う)。
+  // 既存の戻り値 (配列) は変えないので後方互換。
+  lastBookingExtractDiag =
+    (raw.items ?? []).length === 0
+      ? {
+          reason: raw.reason ?? null,
+          tableDiag: raw.tableDiag ?? null,
+          reserveAreaHtml: raw.reserveAreaHtml ?? null,
+        }
+      : null;
   return raw.items ?? [];
 }
 
