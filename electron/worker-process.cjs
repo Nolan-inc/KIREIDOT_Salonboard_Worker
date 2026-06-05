@@ -933,6 +933,12 @@ async function processShop(target, channels, runId, opts = {}) {
       try {
         emit('shop:progress', { shopId, step: 'coupons', msg: 'クーポン一覧を取得中…' });
         const { rows, debug } = await scrapeCoupons(page);
+        // 診断ログ: 0 件のとき原因切り分けに使う (到達URL・検出数)
+        emit('log', {
+          level: debug?.itemsFound ? 'info' : 'warn',
+          msg: `[${shopId.slice(0, 8)}] coupon scrape: 検出${debug?.itemsFound ?? 0}件 / couponId hidden=${debug?.fieldsTotal ?? 0} / 写真=${debug?.couponImgCount ?? 0} / tr=${debug?.trCount ?? 0} / url=${debug?.url ?? '?'} / title=${debug?.title ?? '?'}`,
+          at: new Date().toISOString(),
+        });
         const sent = await sendCoupons(shopId, rows);
         counts.coupons = sent;
         summary.push(`クーポン ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);

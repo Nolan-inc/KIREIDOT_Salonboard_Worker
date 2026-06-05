@@ -1238,6 +1238,10 @@ const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
 async function scrapeCoupons(page) {
   await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  // 一覧テーブルが描画されるまで少し待つ (couponId hidden が現れるか、最大8秒)
+  await page
+    .waitForSelector('input[name^="frmCouponListDto"]', { timeout: 8_000 })
+    .catch(() => {});
 
   const raw = await page.evaluate(() => {
     const text = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
@@ -1249,14 +1253,29 @@ async function scrapeCoupons(page) {
       if (!externalId) continue;
       const tr = inp.closest('tr');
       if (!tr) continue;
-      const tds = Array.from(tr.querySelectorAll('td.td_value_store_c'));
-      // td が想定数に満たない行はスキップ (ヘッダや区切り行など)
-      if (tds.length < 5) continue;
-      const photo = tr.querySelector('img[name="couponPhoto"]');
-      const category = text(tds[2]) || null;          // 種別
-      const name = text(tds[3]);                        // クーポン名
+      // まず td.td_value_store_c を使い、無ければ行内の全 td にフォールバック。
+      let tds = Array.from(tr.querySelectorAll('td.td_value_store_c'));
+      if (tds.length < 4) tds = Array.from(tr.querySelectorAll('td'));
+      if (tds.length < 4) continue;
+      const photo = tr.querySelector('img[name="couponPhoto"], img.couponImgSize');
+      // 写真セル以降に「種別・クーポン名・有効期限」が並ぶ。
+      // 写真を含む td のインデックスを基準に相対参照し、列ズレに強くする。
+      let photoIdx = -1;
+      for (let i = 0; i < tds.length; i++) {
+        if (tds[i].querySelector('img[name="couponPhoto"], img.couponImgSize')) { photoIdx = i; break; }
+      }
+      let category, name, expires;
+      if (photoIdx >= 0) {
+        category = text(tds[photoIdx + 1]) || null;     // 種別
+        name = text(tds[photoIdx + 2]);                  // クーポン名
+        expires = text(tds[photoIdx + 3]) || null;       // 有効期限
+      } else {
+        // 写真が無いレイアウト: 固定インデックス (No, 写真, 種別, 名前, 期限)
+        category = text(tds[2]) || null;
+        name = text(tds[3]);
+        expires = text(tds[4]) || null;
+      }
       if (!name) continue;
-      const expires = text(tds[4]) || null;             // 有効期限
       items.push({
         external_id: externalId,
         name,
@@ -1265,7 +1284,15 @@ async function scrapeCoupons(page) {
         photo_url: photo ? (photo.getAttribute('src') || '').replace(/&amp;/g, '&') : null,
       });
     }
-    return { items, total: idInputs.length };
+    return {
+      items,
+      total: idInputs.length,
+      url: location.href,
+      title: document.title,
+      // 診断: 一覧の手掛かりになる要素数
+      trCount: document.querySelectorAll('tr').length,
+      couponImgCount: document.querySelectorAll('img.couponImgSize, img[name="couponPhoto"]').length,
+    };
   });
 
   const rows = (raw.items ?? []).map((it) => ({
@@ -1276,7 +1303,17 @@ async function scrapeCoupons(page) {
     photo_url: it.photo_url,
     is_active: true,
   }));
-  return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
+  return {
+    rows,
+    debug: {
+      itemsFound: rows.length,
+      fieldsTotal: raw.total,
+      url: raw.url,
+      title: raw.title,
+      trCount: raw.trCount,
+      couponImgCount: raw.couponImgCount,
+    },
+  };
 }
 
 // ----------------- 予約書き込み (push_booking) -----------------
