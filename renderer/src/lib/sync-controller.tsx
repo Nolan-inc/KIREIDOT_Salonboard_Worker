@@ -85,7 +85,7 @@ type SyncContextValue = {
   /** 自動同期が有効か (sync_interval_minutes に従って全チャネルを定期実行) */
   autoSyncEnabled: boolean;
   setAutoSyncEnabled: (v: boolean) => void;
-  /** 予約だけを 5 分おきに自動取得するモード */
+  /** 予約だけを店舗ごとに 50〜70 分間隔 (ほぼ毎時) で自動取得するモード */
   bookingsAutoSyncEnabled: boolean;
   setBookingsAutoSyncEnabled: (v: boolean) => void;
   /** 予約自動同期の最後の実行時刻 (ms, ローカル時刻基準) */
@@ -117,11 +117,13 @@ const BOOKINGS_AUTO_SYNC_KEY = 'salondesk.bookingsAutoSyncEnabled';
 /**
  * 「予約のみ」自動同期の実行間隔。
  * 固定間隔だと SalonBoard 側のアクセスパターン検知 (BAN) を招きやすいため、
- * 毎回 1〜10 分の範囲でランダムに選ぶ (実行のたびに再抽選)。
+ * 50〜70 分の範囲でランダムに選ぶ (中央値 60 分 = ほぼ毎時)。
+ * さらに「店舗ごとに」独立した間隔・次回時刻を持つため、店舗間でも
+ * アクセスタイミングが揃わない。実行のたびに各店舗で再抽選する。
  */
-const BOOKINGS_AUTO_SYNC_MIN_MS = 1 * 60_000; // 下限 1 分
-const BOOKINGS_AUTO_SYNC_MAX_MS = 10 * 60_000; // 上限 10 分
-/** 1〜10 分のランダムな間隔 (ms) を返す。 */
+const BOOKINGS_AUTO_SYNC_MIN_MS = 50 * 60_000; // 下限 50 分
+const BOOKINGS_AUTO_SYNC_MAX_MS = 70 * 60_000; // 上限 70 分
+/** 50〜70 分のランダムな間隔 (ms) を返す。 */
 function randomBookingsIntervalMs(): number {
   const span = BOOKINGS_AUTO_SYNC_MAX_MS - BOOKINGS_AUTO_SYNC_MIN_MS;
   return BOOKINGS_AUTO_SYNC_MIN_MS + Math.floor(Math.random() * (span + 1));
@@ -180,8 +182,14 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const lastBookingsAutoSyncAtRef = useRef<number>(0);
-  /** 次回「予約のみ」同期までの間隔 (ms)。1〜10 分でランダムに決め、実行のたびに再抽選。 */
-  const nextBookingsIntervalRef = useRef<number>(randomBookingsIntervalMs());
+  /**
+   * 店舗ごとの「次回実行時刻 (ms epoch)」。店舗が独立して 50〜70 分間隔で
+   * 取得されるようにするため、shop_id → nextRunAt の Map で管理する。
+   * 初回は起動直後にバラけて発火するよう 0〜interval のランダムオフセットを置く。
+   */
+  const shopNextRunAtRef = useRef<Map<string, number>>(new Map());
+  /** 最後に deviceConfig.test() (overview) を取得した時刻 (ms)。負荷軽減の判定に使う。 */
+  const lastOverviewAtRef = useRef<number>(0);
   const [lastBookingsAutoSyncAt, setLastBookingsAutoSyncAt] = useState<number | null>(
     null,
   );
@@ -582,9 +590,10 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     };
   }, [autoSyncEnabled, ready]);
 
-  // ---- 「予約のみ」5 分おき自動同期 ----
-  // 上の自動同期と独立した別ループ。連携済みかつ enabled な全店舗を対象に、
-  // channels=['bookings'] だけで workerSync を呼ぶ。
+  // ---- 「予約のみ」自動同期 (店舗ごとに 50〜70 分間隔) ----
+  // 上の自動同期と独立した別ループ。連携済みかつ enabled な店舗それぞれが
+  // 独立した 50〜70 分間隔で channels=['bookings'] の workerSync を呼ぶ。
+  // 店舗ごとに次回時刻を持つため、店舗間でアクセスタイミングが揃わない。
   useEffect(() => {
     if (!bookingsAutoSyncEnabled || !ready) return;
     let cancelled = false;
@@ -593,19 +602,30 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       // 既に同期が走っているならスキップ (全チャネル同期と競合させない)
       if (runningRef.current) return;
-      const elapsed = Date.now() - lastBookingsAutoSyncAtRef.current;
-      // 固定間隔だと BAN されやすいので、毎回 1〜10 分のランダム間隔で実行する。
-      if (elapsed < nextBookingsIntervalRef.current) return;
+
+      const now = Date.now();
+      const sched = shopNextRunAtRef.current;
+      // 最適化: どの店舗もまだ次回時刻に達しておらず、かつ直近 5 分以内に
+      // overview を取得済みなら、毎 30 秒の deviceConfig.test() をスキップして負荷を抑える。
+      // (新規店舗の検出のため 5 分ごとには必ず overview を取りに行く)
+      const earliestDue = sched.size > 0 ? Math.min(...sched.values()) : 0;
+      if (
+        sched.size > 0 &&
+        earliestDue > now &&
+        now - lastOverviewAtRef.current < 5 * 60_000
+      ) {
+        return;
+      }
 
       // 対象店舗: 認証情報があり enabled な店舗の shop_id 一覧
       // v0.2.5: device 設定 (userData) 経由で overview を取得 (main 経由)
-      const now = Date.now();
-      let shopIds: string[] = [];
+      let eligibleShopIds: string[] = [];
       const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
       if (!bridge?.deviceConfig) return;
       const overview = await bridge.deviceConfig.test();
+      lastOverviewAtRef.current = Date.now();
       if (overview.ok) {
-        shopIds = (overview.shops ?? [])
+        eligibleShopIds = (overview.shops ?? [])
           .filter((s) => {
             if (s.credential_status !== 'active') return false;
             if (!s.enabled) return false;
@@ -617,13 +637,33 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
           })
           .map((s) => s.shop_id);
       }
-      if (shopIds.length === 0) return;
+      if (eligibleShopIds.length === 0) return;
 
-      lastBookingsAutoSyncAtRef.current = Date.now();
-      setLastBookingsAutoSyncAt(lastBookingsAutoSyncAtRef.current);
-      // 次回の間隔を 1〜10 分で再抽選 (アクセス間隔を一定にしない)。
-      nextBookingsIntervalRef.current = randomBookingsIntervalMs();
-      await bridge.workerSync({ shopIds, channels: ['bookings'] });
+      // 対象から外れた店舗のスケジュールは掃除する
+      const eligibleSet = new Set(eligibleShopIds);
+      for (const id of Array.from(sched.keys())) {
+        if (!eligibleSet.has(id)) sched.delete(id);
+      }
+      // 新しく対象になった店舗には初回の次回時刻を割り当てる。
+      // 起動直後に全店が一斉に走らないよう、0〜interval のランダムオフセットで分散。
+      for (const id of eligibleShopIds) {
+        if (!sched.has(id)) {
+          sched.set(id, now + Math.floor(Math.random() * randomBookingsIntervalMs()));
+        }
+      }
+
+      // 次回時刻が到来した店舗だけを対象にする
+      const dueShopIds = eligibleShopIds.filter((id) => (sched.get(id) ?? 0) <= now);
+      if (dueShopIds.length === 0) return;
+
+      // 実行した店舗は次回時刻を 50〜70 分後に再設定 (店舗ごとに別々の間隔)
+      for (const id of dueShopIds) {
+        sched.set(id, now + randomBookingsIntervalMs());
+      }
+
+      lastBookingsAutoSyncAtRef.current = now;
+      setLastBookingsAutoSyncAt(now);
+      await bridge.workerSync({ shopIds: dueShopIds, channels: ['bookings'] });
     };
 
     // 起動直後にも 1 回判定

@@ -228,8 +228,8 @@ export function SalonboardPage() {
               }
               title={
                 sync.bookingsAutoSyncEnabled
-                  ? '予約だけを 1〜10 分のランダム間隔で自動取得 (BAN 回避のため間隔を一定にしない)'
-                  : '予約だけを 1〜10 分のランダム間隔で自動取得 (OFF)'
+                  ? '予約だけを店舗ごとに 50〜70 分のランダム間隔で自動取得 (ほぼ毎時 / BAN 回避のため間隔を一定にしない)'
+                  : '予約だけを店舗ごとに 50〜70 分のランダム間隔で自動取得 (OFF)'
               }
             >
               <input
@@ -240,7 +240,7 @@ export function SalonboardPage() {
                 disabled={!sync.ready}
               />
               <CalendarRange className="h-3.5 w-3.5" />
-              予約のみ 1〜10分ランダム
+              予約のみ 毎時(店舗ごと50〜70分)
               {sync.lastBookingsAutoSyncAt && (
                 <span className="ml-1 text-[10px] font-normal text-ink-soft">
                   ({new Date(sync.lastBookingsAutoSyncAt).toLocaleTimeString('ja-JP', {
