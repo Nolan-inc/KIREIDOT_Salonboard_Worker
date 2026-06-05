@@ -1935,7 +1935,7 @@ async function runPushJobs({ showBrowser } = {}) {
             result_payload: result.confirmed,
             summary: `push_booking 登録完了 (external_id=${result.externalId ?? '?'})`,
           });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}`, at: new Date().toISOString() });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}${result.confirmed?.equip_assigned ? ` / 設備:${result.confirmed.equip_assigned}` : ''}`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
         } else if (result.status === 'confirm_only') {
           await postCallback({
@@ -2258,12 +2258,14 @@ async function runTestPush(payload) {
         bookingId: realBookingId,
         externalId: result.externalId ?? null,
         detailUrl: result.detailUrl ?? null,
-        msg: gotId
+        msg: (gotId
           ? `✅ 登録完了 external_id=${result.externalId}`
-          : '✅ 登録完了 (ただし予約IDを取得できませんでした。次回の予約取得で補完されます)',
+          : '✅ 登録完了 (ただし予約IDを取得できませんでした。次回の予約取得で補完されます)')
+          + (result.confirmed?.equip_assigned ? ` / 設備: ${result.confirmed.equip_assigned}` : ''),
       });
     } else if (result.status === 'confirm_only') {
-      step('done', { ok: true, registered: false, msg: '🟡 入力まで成功 (実登録OFFのため登録ボタンは押していません)。ON にすると登録します。' });
+      const equipNote = result.confirmed?.equip_assigned ? ` / 設備: ${result.confirmed.equip_assigned}` : '';
+      step('done', { ok: true, registered: false, msg: `🟡 入力まで成功 (実登録OFFのため登録ボタンは押していません)。ON にすると登録します。${equipNote}` });
     } else {
       step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode}] ${result.reason}` });
     }

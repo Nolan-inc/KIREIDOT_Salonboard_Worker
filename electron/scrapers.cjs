@@ -1666,6 +1666,69 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     await page.locator('textarea#rsvEtc').first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
+  // 設備にデフォルトで「ベッド」を割り当てる。
+  // 予約登録フォームに設備セクション (#equipArea / select[name="equipIdList"]) があれば、
+  //   - 設備行が未選択なら「ベッド」を含む option を選ぶ
+  //   - 設備行自体が無ければ「追加する」(#equipAdd) を押してから選ぶ
+  // セクションが存在しないフォーム構成でも壊れないよう、全工程を try で保護し
+  // 失敗しても予約登録は続行する (設備は必須でない店舗もあるため)。
+  let equipResult = 'なし'; // 'ベッド設定' / '既存維持' / 'ベッドoption無し' / 'なし' / 'エラー'
+  try {
+    // 新規予約フォーム(booking_create)の #equipArea は既定で設備行が無く、
+    // 「追加する」(#equipAdd) を押すと equipIdList セレクトを持つ行が生成される。
+    const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList, #equipArea select';
+    const hasEquipArea =
+      (await page.locator('#equipArea, #equipAdd').first().count().catch(() => 0)) > 0;
+    if (hasEquipArea) {
+      // 設備行が無ければ「追加する」を押して 1 行作る
+      const rowCount = await page.locator(equipSelector).count().catch(() => 0);
+      if (rowCount === 0) {
+        const addBtn = page.locator('#equipAdd, a[id="equipAdd"]').first();
+        if ((await addBtn.count().catch(() => 0)) > 0) {
+          await addBtn.click().catch(() => {});
+          await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
+        }
+      }
+      // 各設備行セレクトについて、未選択(空)なら「ベッド」を含む option を選ぶ。
+      // 既に何か選ばれている行は尊重して上書きしない。
+      const equipSelects = page.locator(equipSelector);
+      const n = await equipSelects.count().catch(() => 0);
+      let setCount = 0;
+      let keptCount = 0;
+      let noBedOption = false;
+      for (let i = 0; i < n; i++) {
+        const sel = equipSelects.nth(i);
+        const needsSet = await sel.evaluate((el) => {
+          const cur = el.options[el.selectedIndex];
+          const curText = (cur?.textContent || '').replace(/[○×\s]/g, '');
+          // 未選択 (value 空) または現在値が空表示なら設定対象
+          return !el.value || curText === '';
+        }).catch(() => false);
+        if (!needsSet) { keptCount++; continue; }
+        // 「ベッド」を含む option の value を探して選択
+        const bedVal = await sel.evaluate((el) => {
+          const opt = Array.from(el.options).find((o) => (o.textContent || '').includes('ベッド'));
+          return opt ? opt.value : null;
+        }).catch(() => null);
+        if (bedVal) {
+          await sel.selectOption({ value: bedVal }).catch(() => {});
+          // change を発火して SB 側ハンドラ (時間欄の表示等) を起こす
+          await sel.evaluate((el) => {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }).catch(() => {});
+          setCount++;
+        } else {
+          noBedOption = true;
+        }
+      }
+      equipResult =
+        setCount > 0 ? `ベッド設定(${setCount}行)` : noBedOption ? 'ベッドoption無し' : keptCount > 0 ? '既存維持' : '行なし';
+    }
+  } catch (_e) {
+    equipResult = 'エラー';
+  }
+
   // ※ 旧実装はここで body 全文を /空いて|重複/ 等で検索していたが、フォームの
   //    説明文 (例「空いている時間を選択」) に誤反応して、実際は空いていても
   //    SLOT_NOT_AVAILABLE になっていた。空き枠/重複の本当のエラーは「登録する」
@@ -1676,6 +1739,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     confirmed_staff_name: p.staff_name ?? null,
     confirmed_menu_name: menuTarget,
     confirmed_scheduled_at: p.scheduled_at,
+    equip_assigned: equipResult,
   };
 
   if (!enablePush) {
