@@ -129,10 +129,14 @@ export async function fetchRecentBookings(
  *   source in ('kireidot','manual')          … KIREIDOT / 手動作成 (SB 由来ではない)
  *   status <> 'cancelled'                     … 有効な予約のみ
  *   scheduled_at >= now                       … 未来分のみ
- *   salonboard_sync_status is null            … 一度も push されていない / 送信待ち /
- *     OR in (pending_push, pushing,              送信中 / 失敗 / 手動対応要 / 連携不要
- *            failed, manual_required,            (= 'synced' / 'cancelled_synced' 以外)
- *            not_required)
+ *   かつ 次のいずれか:
+ *     (a) salonboard_sync_status is null / pending_push / pushing / failed /
+ *         manual_required / not_required … 一度も push されていない or 未完了 (= 明確に未連携)
+ *     (b) salonboard_sync_status = 'synced' だが external_booking_id が無い
+ *         … 「SBに登録は成功したが reserveId を取得できなかった」疑わしいケース。
+ *           SBに実在する可能性が高いが確証が無いので、要確認として併せて出す。
+ *
+ * UI 側 (classifySbSync) でバッジを分け、(b) を誤って「挿入」して二重登録しないようにする。
  */
 export async function fetchUnmatchedBookings(scope: StaffScope): Promise<BookingRow[]> {
   const nowIso = new Date().toISOString();
@@ -145,7 +149,10 @@ export async function fetchUnmatchedBookings(scope: StaffScope): Promise<Booking
     .neq('status', 'cancelled')
     .gte('scheduled_at', nowIso)
     .or(
-      'salonboard_sync_status.is.null,salonboard_sync_status.in.(pending_push,pushing,failed,manual_required,not_required)',
+      // (a) 明確に未連携 + (b) synced だが external_booking_id 無し (要確認)
+      'salonboard_sync_status.is.null,' +
+        'salonboard_sync_status.in.(pending_push,pushing,failed,manual_required,not_required),' +
+        'and(salonboard_sync_status.eq.synced,external_booking_id.is.null)',
     )
     .order('scheduled_at', { ascending: true })
     .limit(500);

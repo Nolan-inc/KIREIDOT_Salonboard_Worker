@@ -27,7 +27,7 @@ const SOURCE_FILTER_LABELS: Record<SourceFilter, string> = {
 
 type SbBadge = {
   /** 絞り込み用の分類キー */
-  kind: 'salonboard' | 'synced' | 'pending' | 'failed' | 'not_synced' | 'na';
+  kind: 'salonboard' | 'synced' | 'synced_noid' | 'pending' | 'failed' | 'not_synced' | 'na';
   label: string;
   cls: string;
   /** SalonBoard に存在することが確実か (✓ 表示用) */
@@ -38,7 +38,8 @@ type SbBadge = {
  * 予約の「出所」と「SalonBoard 同期状態」を1つのバッジに分類する。
  *   - source='salonboard' : SalonBoard から取得した予約 (= SB に存在確定)
  *   - source='kireidot' :
- *       synced            : KIREIDOT で作成し SB へ登録済み (SB に存在確定)
+ *       synced (ext_id あり)  : KIREIDOT で作成し SB へ登録済み (SB に存在確定)
+ *       synced (ext_id 無し)  : SB登録は成功扱いだが reserveId 未取得 → SBに在るか「要確認」
  *       pending_push/pushing : 同期待ち / 同期中
  *       failed/manual_required : 登録失敗 / 手動対応必要 (SB 未登録)
  *       それ以外 (null 等) : KIREIDOT のみ (SB 未登録)
@@ -51,6 +52,12 @@ function classifySbSync(b: BookingRow): SbBadge {
   }
   // ここから source = kireidot (または不明) の KIREIDOT 作成予約
   if (st === 'synced' || st === 'cancelled_synced') {
+    // synced でも SB 予約ID(external_booking_id)が無いものは「登録は成功したが
+    // reserveId を取れなかった」ケース。SBに在る可能性が高いが確証が無いので
+    // 「要確認」として区別する (誤って再挿入＝二重登録を防ぐ)。
+    if (st === 'synced' && !b.external_booking_id) {
+      return { kind: 'synced_noid', label: 'SB要確認(ID未取得)', cls: 'bg-amber-100 text-amber-800', inSalonboard: false };
+    }
     return { kind: 'synced', label: 'SB同期済み', cls: 'bg-emerald-100 text-emerald-700', inSalonboard: true };
   }
   if (st === 'pending_push' || st === 'pushing' || st === 'pending_cancel') {
@@ -769,7 +776,7 @@ export function Bookings() {
           <span className="ml-1 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
             {unmatched.length}件
           </span>
-          <span className="ml-auto text-[11px] text-muted">本日以降・キャンセル除外</span>
+          <span className="ml-auto text-[11px] text-muted">本日以降・キャンセル除外（要確認含む）</span>
         </div>
         {!scope?.shopId && !scope?.organizationId ? (
           <div className="px-4 py-10 text-center text-[12px] text-ink-soft">
@@ -833,6 +840,28 @@ export function Bookings() {
                         >
                           {res.msg}
                         </span>
+                      ) : badge.kind === 'synced_noid' ? (
+                        // SBに在る可能性が高い「要確認」。誤挿入(二重登録)を防ぐため、
+                        // 押す前に SB を確認するよう促し、確認後だけ挿入する。
+                        <button
+                          type="button"
+                          disabled={!scope?.shopId || isInserting(b.id)}
+                          onClick={() => {
+                            const ok = window.confirm(
+                              `この予約は SalonBoard に登録済みの可能性が高いです（登録は成功したが予約IDを取得できなかったケース）。\n\nSalonBoard に「${displayName(b)} / ${dt.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}」の予約が無いことを確認しましたか？\n\nOK を押すと SalonBoard に登録します（既にある場合は二重登録になります）。`,
+                            );
+                            if (ok) insertToSalonboard(b);
+                          }}
+                          title="SalonBoardに無いことを確認してから登録する"
+                          className="inline-flex items-center gap-1 rounded-[8px] border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                        >
+                          {isInserting(b.id) ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <AlertTriangle className="h-3 w-3" />
+                          )}
+                          {isInserting(b.id) ? '挿入中…' : '確認して挿入'}
+                        </button>
                       ) : (
                         <button
                           type="button"
