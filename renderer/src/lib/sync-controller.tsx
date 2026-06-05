@@ -34,7 +34,7 @@ export type SyncRunSummary = {
   done: boolean;
 };
 
-export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'shifts' | 'blog' | 'customers';
+export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'customers';
 
 /**
  * 店舗 PC 自体の設定状態 (preflight 結果)。
@@ -105,7 +105,7 @@ type SyncContextValue = {
 
 const SyncContext = createContext<SyncContextValue | null>(null);
 
-const DEFAULT_CHANNELS: ChannelKey[] = ['bookings', 'staff', 'menus', 'shifts', 'blog', 'customers'];
+const DEFAULT_CHANNELS: ChannelKey[] = ['bookings', 'staff', 'menus', 'coupons', 'shifts', 'blog', 'customers'];
 
 /** 自動同期 ON/OFF を localStorage に保存するキー */
 const AUTO_SYNC_KEY = 'salondesk.autoSyncEnabled';

@@ -20,7 +20,7 @@ type UpdaterStatus =
   | { type: 'error'; message: string };
 
 // utilityProcess (electron/worker-process.cjs) からのイベント。
-type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'shifts' | 'blog' | 'customers';
+type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'customers';
 type WorkerEvent =
   | { type: 'boot'; payload: { pid: number; at: string } }
   | { type: 'ready'; payload: { ok: boolean } }

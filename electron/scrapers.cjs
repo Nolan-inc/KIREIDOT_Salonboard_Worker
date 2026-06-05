@@ -1224,6 +1224,61 @@ async function scrapeMenus(page) {
   return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
 }
 
+// ----------------- クーポン一覧 (couponList) -----------------
+//
+// ホットペッパー(SalonBoard)ではメニューとクーポンは別概念。
+// クーポンは /CNK/draft/couponList の一覧テーブルから取得する。
+// 各行は <tr> 内に hidden input name="frmCouponListDto[N].couponId" を持ち、
+// 同じ <tr> 内の td.td_value_store_c が以下の列順で並ぶ:
+//   [0] 順番(No. の input)  [1] クーポン写真(img[name=couponPhoto])
+//   [2] 種別(新規/再来/全員) [3] クーポン名  [4] 有効期限(「YYYY/MM/DD まで」/「なし」)
+//   [5] チェック  [6] 詳細  [7] 非掲載/削除
+const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
+
+async function scrapeCoupons(page) {
+  await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+  const raw = await page.evaluate(() => {
+    const text = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const items = [];
+    // couponId の hidden input を起点に、その属する行 (tr) を特定する
+    const idInputs = document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]');
+    for (const inp of idInputs) {
+      const externalId = (inp.value || '').trim();
+      if (!externalId) continue;
+      const tr = inp.closest('tr');
+      if (!tr) continue;
+      const tds = Array.from(tr.querySelectorAll('td.td_value_store_c'));
+      // td が想定数に満たない行はスキップ (ヘッダや区切り行など)
+      if (tds.length < 5) continue;
+      const photo = tr.querySelector('img[name="couponPhoto"]');
+      const category = text(tds[2]) || null;          // 種別
+      const name = text(tds[3]);                        // クーポン名
+      if (!name) continue;
+      const expires = text(tds[4]) || null;             // 有効期限
+      items.push({
+        external_id: externalId,
+        name,
+        category,
+        expires_label: expires,
+        photo_url: photo ? (photo.getAttribute('src') || '').replace(/&amp;/g, '&') : null,
+      });
+    }
+    return { items, total: idInputs.length };
+  });
+
+  const rows = (raw.items ?? []).map((it) => ({
+    external_id: it.external_id,
+    name: it.name,
+    category: it.category,
+    expires_label: it.expires_label,
+    photo_url: it.photo_url,
+    is_active: true,
+  }));
+  return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
+}
+
 // ----------------- 予約書き込み (push_booking) -----------------
 //
 // 実登録フォーム (booking_create.html / form#extReserveRegist) に対応。
@@ -3160,6 +3215,7 @@ module.exports = {
   scrapeBookings,
   scrapeStaff,
   scrapeMenus,
+  scrapeCoupons,
   scrapeBlogs,
   scrapeShifts,
   scrapeCustomerDetails,

@@ -355,6 +355,42 @@ export async function fetchMenusMerged(scope: StaffScope): Promise<MergedMenuRow
 }
 
 // =========================
+// クーポン (サロンボード由来) — salonboard_coupon_imports を読む
+// ホットペッパー上ではメニューとクーポンは別概念なので別テーブル。
+// =========================
+export type CouponRow = {
+  id: string;
+  external_id: string;
+  name: string;
+  category: string | null;
+  expires_label: string | null;
+  photo_url: string | null;
+};
+
+export async function fetchCouponList(scope: StaffScope): Promise<CouponRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_coupon_imports')
+    .select('id, external_id, name, category, expires_label, photo_url, is_active')
+    .eq('shop_id', scope.shopId)
+    .eq('is_active', true)
+    .order('category', { nullsFirst: false })
+    .order('name');
+  if (error) {
+    console.warn('[data] fetchCouponList error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    external_id: r.external_id,
+    name: r.name,
+    category: r.category ?? null,
+    expires_label: r.expires_label ?? null,
+    photo_url: r.photo_url ?? null,
+  })) as CouponRow[];
+}
+
+// =========================
 // シフト (サロンボード由来)
 //
 // `salonboard_shift_imports` を読む。1行 = 1スタッフ × 1日 (date + time)。
