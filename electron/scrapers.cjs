@@ -2593,6 +2593,97 @@ async function uploadBlogCoverImage(page, coverUrl) {
   }
 }
 
+/**
+ * ブログ投稿フォームの「クーポン選択」モーダルで、紐付け済みクーポンを選択する。
+ *
+ * SalonBoard のクーポンモーダル DOM (2026-06 取得):
+ *   - トリガー: a:has-text("クーポン選択") (.jsc_SB_modal_coupon_wrapper 内)
+ *   - 一覧:     ul.jscCouponListArea > li > label.db
+ *               各 li に <input type="hidden" value="CP00000012857772"> でクーポンを識別、
+ *               同 li 内のクーポン名は p.jsc_SB_modal_coupon_text / p.couponText
+ *   - 確定:     a.jsc_SB_modal_setting_btn ("設定する")
+ *
+ * @param {{externalId: string|null, couponName: string|null}} target
+ * @returns {Promise<{ok: boolean, reason?: string, matchedExternalId?: string}>}
+ */
+async function selectBlogCoupon(page, target) {
+  const wantExt = (target.externalId || '').trim().toUpperCase();
+  const wantName = (target.couponName || '').replace(/\s+/g, '').trim();
+
+  // 1) モーダルを開く
+  const trigger = page
+    .locator('.jsc_SB_modal_coupon_wrapper a:has-text("クーポン選択"), a[modal-url*="coupon" i]:has-text("クーポン選択"), a:has-text("クーポン選択")')
+    .first();
+  if ((await trigger.count().catch(() => 0)) === 0) {
+    return { ok: false, reason: 'coupon_trigger_not_found' };
+  }
+  await trigger.click({ timeout: 6_000 }).catch(() => {});
+  // モーダル(クーポン一覧)が描画されるまで待つ
+  const listArea = page.locator('ul.jscCouponListArea, ul.couponListArea').first();
+  await listArea.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+  if ((await listArea.count().catch(() => 0)) === 0) {
+    return { ok: false, reason: 'coupon_list_not_visible' };
+  }
+
+  // 2) 対象クーポンの li を特定して、その中のチェック(label/checkbox)をクリック
+  const picked = await page.evaluate(
+    ({ wantExt, wantName }) => {
+      const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+      const lis = Array.from(document.querySelectorAll('ul.jscCouponListArea > li, ul.couponListArea > li'));
+      let matchedExternalId = null;
+      for (const li of lis) {
+        const hidden = li.querySelector('input[type="hidden"][value^="CP"]');
+        const ext = (hidden?.getAttribute('value') || '').toUpperCase();
+        const nameEl = li.querySelector('.jsc_SB_modal_coupon_text, .couponText, .couponMenuName');
+        const name = norm(nameEl?.textContent || '');
+        const hitByExt = wantExt && ext === wantExt;
+        const hitByName = !wantExt && wantName && name && (name === wantName || name.includes(wantName) || wantName.includes(name));
+        if (hitByExt || hitByName) {
+          // li 内のチェック可能要素を探してチェックする
+          let toggled = false;
+          const cb = li.querySelector('input[type="checkbox"], input[type="radio"]');
+          if (cb) {
+            if (!cb.checked) {
+              cb.checked = true;
+              cb.dispatchEvent(new Event('change', { bubbles: true }));
+              cb.dispatchEvent(new Event('click', { bubbles: true }));
+            }
+            toggled = true;
+          }
+          if (!toggled) {
+            // チェックボックスが無い実装では、チェック対象のテーブル/ラベルをクリック
+            const clickable =
+              li.querySelector('.jsc_SB_modal_table_check') ||
+              li.querySelector('label.db') ||
+              li;
+            clickable.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            toggled = true;
+          }
+          matchedExternalId = ext || null;
+          return { found: true, matchedExternalId };
+        }
+      }
+      return { found: false, matchedExternalId: null };
+    },
+    { wantExt, wantName },
+  );
+
+  if (!picked || !picked.found) {
+    // モーダルを閉じてから戻る (開いたまま投稿フローを汚さない)
+    await page.locator('.jsc_SB_modal_close_btn').first().click({ timeout: 3_000 }).catch(() => {});
+    return { ok: false, reason: wantExt ? `coupon_not_in_list(${wantExt})` : 'coupon_not_in_list_by_name' };
+  }
+
+  // 3) 「設定する」で確定
+  const setBtn = page.locator('.jsc_SB_modal_setting_btn, a:has-text("設定する")').first();
+  if ((await setBtn.count().catch(() => 0)) === 0) {
+    return { ok: false, reason: 'coupon_setting_btn_not_found', matchedExternalId: picked.matchedExternalId };
+  }
+  await setBtn.click({ timeout: 6_000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  return { ok: true, matchedExternalId: picked.matchedExternalId };
+}
+
 async function postBlogViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePost = opts.enablePost !== false;
@@ -2729,6 +2820,28 @@ async function postBlogViaForm(page, payload, opts = {}) {
       // 失敗は警告キャプチャのみ残して継続。
       await captureScrapeDebug(page, 'blog', 'image_upload_error', {
         diagnostics: { url: page.url(), error: e?.message ?? String(e), coverUrl: String(p.cover_image_url) },
+      }).catch(() => {});
+    }
+  }
+
+  // クーポン紐付け (任意)。payload.coupon_external_id (CP...) があれば、
+  // ブログ投稿フォームの「クーポン選択」モーダルで該当クーポンを選ぶ。
+  // external_id 一致を最優先、無ければ coupon_name のテキスト一致で補助。
+  // 見つからない/失敗しても警告キャプチャのみでブログ投稿は継続する。
+  if (p.coupon_external_id || p.coupon_name) {
+    try {
+      const sel = await selectBlogCoupon(page, {
+        externalId: p.coupon_external_id ? String(p.coupon_external_id) : null,
+        couponName: p.coupon_name ? String(p.coupon_name) : null,
+      });
+      if (!sel.ok) {
+        await captureScrapeDebug(page, 'blog', 'coupon_not_selected', {
+          diagnostics: { url: page.url(), reason: sel.reason, externalId: p.coupon_external_id ?? null, couponName: p.coupon_name ?? null },
+        }).catch(() => {});
+      }
+    } catch (e) {
+      await captureScrapeDebug(page, 'blog', 'coupon_select_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e), externalId: p.coupon_external_id ?? null },
       }).catch(() => {});
     }
   }
