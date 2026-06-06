@@ -589,6 +589,31 @@ async function scrapeBookings(page, opts = {}) {
   await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
+  // グループ店舗対応: 予約一覧へ goto した結果、ログアウト/ログイン画面 or
+  // サロン選択画面 (/CNC/groupTop/) に飛ばされていないか先に判定する。
+  // ここを「0件 ok」で握りつぶすと『取得できていないのに成功』に見えてしまうため、
+  // 明示的に失敗 (loggedOut) として扱い、呼び出し側で店舗選択やり直しに倒せるようにする。
+  {
+    const cur = page.url();
+    const onGroupTop = /\/CNC\/groupTop/i.test(cur);
+    const onLogin = /\/login/i.test(cur);
+    if (onGroupTop || onLogin) {
+      const capDir = await captureScrapeDebug(page, 'bookings', 'logged_out_or_group_top', {
+        secrets: [opts.loginId, opts.password].filter(Boolean),
+        diagnostics: { url: cur, onGroupTop, onLogin },
+      });
+      return {
+        rows: [],
+        debug: {
+          itemsFound: 0,
+          loggedOut: true,
+          landedOn: onGroupTop ? 'group_top' : 'login',
+          diag: [`予約一覧に到達できずログアウト/サロン選択へ遷移 (url=${cur}, capture=${capDir || '?'})`],
+        },
+      };
+    }
+  }
+
   // 予約一覧に到達できているかの即時診断 (検出0 の原因切り分け用)。
   // landing が login / 空ページ / interstitial だと search 以前に分かる。
   try {

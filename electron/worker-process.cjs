@@ -903,7 +903,31 @@ async function processShop(target, channels, runId, opts = {}) {
     if (channelSet.has('bookings')) {
       try {
         emit('shop:progress', { shopId, step: 'bookings', msg: '予約一覧を取得中…' });
-        const { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl });
+        let { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl });
+        // グループ店舗で予約一覧 goto 後にサロン選択へ戻された場合、サロンを選び直して
+        // 1 回だけ再取得する (selectStore→goto の競合で稀にセッション文脈が外れるため)。
+        if (debug && debug.loggedOut && debug.landedOn === 'group_top') {
+          emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] 予約一覧でサロン選択へ戻されたため、サロンを選び直して再取得します`, at: new Date().toISOString() });
+          const re = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName }).catch(() => ({ ok: false }));
+          if (re.ok) {
+            await page.waitForTimeout(800);
+            ({ rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl }));
+          }
+        }
+        // 予約一覧に到達できずログアウト/サロン選択へ飛ばされた場合は、
+        // 「0件成功」ではなく明確な失敗として店舗を止める (誤った成功表示を防ぐ)。
+        if (debug && debug.loggedOut) {
+          // 取得不能なのに「0件成功」と表示しないよう、明確な失敗として店舗を止める。
+          // ブラウザクローズ/ロック解除は外側の finally が行うのでここでは触らない。
+          const reason =
+            debug.landedOn === 'group_top'
+              ? 'サロン選択後に予約一覧へ進めずサロン選択画面へ戻されました (グループ店舗のセッション維持に失敗)。'
+              : '予約一覧に進む前にログアウトされました。';
+          await markCredentialError(shopId, `bookings_logged_out: ${debug.landedOn}`, null, 'session_lost');
+          emit('shop:end', { shopId, ok: false, error: reason, errorCode: 'session_lost' });
+          await recordShopRun(runId, shopId, false, null, `bookings_logged_out: ${debug.landedOn}`, counts);
+          return { ok: false, errorCode: 'session_lost' };
+        }
         const sent = await sendBookings(shopId, rows);
         counts.bookings = sent;
         const skipNote =
@@ -1461,7 +1485,13 @@ async function ensureStoreSelected(page, opts = {}) {
   if (stillGroup) {
     return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
   }
-  return { ok: true, selected: true, salonId: target.id };
+
+  // サロン選択は POST → サーバー側でアクティブ店舗セッションを確定 → リダイレクト、
+  // という流れのため、直後に別 URL へ goto するとセッション確定前で
+  // ログアウト/サロン選択に戻されることがある。少し待ってセッションを安定させる。
+  await page.waitForTimeout(1200);
+
+  return { ok: true, selected: true, salonId: target.id, topUrl: page.url() };
 }
 
 async function tryLogin(page, c) {
