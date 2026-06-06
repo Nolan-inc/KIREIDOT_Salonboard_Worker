@@ -11,11 +11,34 @@
 
 import { supabase } from './supabase';
 
+/** 店舗ジャンル (SalonBoard 取得方法の分岐に使う)。 */
+export type ShopGenre = 'hair' | 'nail' | 'esthetic' | 'eyelash' | 'other';
+
+/** 店舗ジャンルの日本語表示名。null/未知は「未設定」。 */
+export function shopGenreLabel(genre: string | null | undefined): string {
+  switch (genre) {
+    case 'esthetic':
+      return 'エステ';
+    case 'hair':
+      return '美容室';
+    case 'nail':
+      return 'ネイル';
+    case 'eyelash':
+      return 'まつげ';
+    case 'other':
+      return 'その他';
+    default:
+      return '未設定';
+  }
+}
+
 export type CredentialOverviewRow = {
   organization_id: string;
   organization_name: string;
   shop_id: string;
   shop_name: string;
+  /** 店舗ジャンル。null は未設定 (Worker 側で esthetic 扱い)。 */
+  shop_genre: ShopGenre | null;
   credential_id: string | null;
   login_id: string | null;
   base_url: string | null;
@@ -72,6 +95,8 @@ export type DeviceOverviewShop = {
   shop_id: string;
   shop_name: string;
   organization_id: string;
+  /** 店舗ジャンル。null は未設定 (Worker 側で esthetic 扱い)。 */
+  genre: ShopGenre | null;
   credential_status: 'active' | 'missing' | 'disabled' | 'blocked';
   consent_status: 'valid' | 'missing';
   sync_status:

@@ -27,6 +27,7 @@ import { supabase } from '../lib/supabase';
 import { EditModal } from './Salonboard';
 import {
   fetchCredentialOverview,
+  shopGenreLabel,
   type CredentialOverviewRow,
 } from '../lib/salonboard';
 
@@ -879,6 +880,9 @@ function CredentialRow({
           <div className="flex items-center gap-1.5">
             <span className="truncate text-[13px] font-semibold text-ink">
               {row.shop_name}
+            </span>
+            <span className="inline-flex shrink-0 items-center rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+              {shopGenreLabel(row.shop_genre)}
             </span>
             {linked ? (
               row.enabled ? (

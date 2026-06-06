@@ -430,6 +430,8 @@ async function fetchTargets(shopIds) {
       has_credential: true,
       enabled: !!s.enabled,
       blocked_until: s.blocked_until ?? null,
+      // 店舗ジャンル (hair/nail/esthetic/eyelash/other)。未設定は esthetic 扱い。
+      genre: s.genre ?? 'esthetic',
     }));
   }
 
@@ -473,7 +475,7 @@ async function fetchTargets(shopIds) {
   let q = supabase
     .from('salonboard_credentials_overview')
     .select(
-      'organization_id, organization_name, shop_id, shop_name, has_credential, enabled, blocked_until'
+      'organization_id, organization_name, shop_id, shop_name, shop_genre, has_credential, enabled, blocked_until'
     );
   q = q.eq('has_credential', true);
   if (Array.isArray(shopIds) && shopIds.length > 0) {
@@ -482,11 +484,13 @@ async function fetchTargets(shopIds) {
   const { data, error } = await q;
   if (error) throw new Error(`fetchTargets fallback failed: ${error.message}`);
   const now = Date.now();
-  return (data ?? []).filter((r) => {
-    if (!r.enabled) return false;
-    if (r.blocked_until && new Date(r.blocked_until).getTime() > now) return false;
-    return true;
-  });
+  return (data ?? [])
+    .filter((r) => {
+      if (!r.enabled) return false;
+      if (r.blocked_until && new Date(r.blocked_until).getTime() > now) return false;
+      return true;
+    })
+    .map((r) => ({ ...r, genre: r.shop_genre ?? 'esthetic' }));
 }
 
 /**
@@ -649,6 +653,10 @@ async function revealCredentials(shopId) {
 async function processShop(target, channels, runId, opts = {}) {
   const { shop_id: shopId, shop_name: shopName, organization_name: orgName } = target;
   const showBrowser = !!opts.showBrowser;
+  // 店舗ジャンル (hair/nail/esthetic/eyelash/other)。未設定は esthetic 扱い。
+  // スクレイパーはこれを見てジャンル別の取得方法に分岐する (現状 esthetic のみ実装、
+  // 美容室=hair はスタッフ→スタイリスト/メニュー→スタイルに差し替え)。
+  const genre = target.genre || 'esthetic';
 
   // 多重起動防止: 同じ shop_id がすでに同期中なら skip
   const lock = tryAcquireShopLock(shopId, deviceAuth.workerId ?? 'electron-worker');
@@ -664,7 +672,7 @@ async function processShop(target, channels, runId, opts = {}) {
     return { ok: false, errorCode: 'already_in_progress' };
   }
 
-  emit('shop:start', { shopId, shopName, orgName, channels });
+  emit('shop:start', { shopId, shopName, orgName, channels, genre });
   const counts = { bookings: 0, staff: 0, blogs: 0, customers: 0 };
 
   let creds;
@@ -893,11 +901,13 @@ async function processShop(target, channels, runId, opts = {}) {
 
     if (channelSet.has('staff')) {
       try {
-        emit('shop:progress', { shopId, step: 'staff', msg: 'スタッフ一覧を取得中…' });
-        const { rows, debug } = await scrapeStaff(page);
+        // 美容室(hair)はスタッフ→スタイリスト一覧 (/CNB/draft/stylistList) に分岐。
+        const staffLabel = genre === 'hair' ? 'スタイリスト' : 'スタッフ';
+        emit('shop:progress', { shopId, step: 'staff', msg: `${staffLabel}一覧を取得中…` });
+        const { rows, debug } = await scrapeStaff(page, { genre });
         const sent = await sendStaff(shopId, rows);
         counts.staff = sent;
-        summary.push(`スタッフ ${sent} 件 (検出${rows.length})`);
+        summary.push(`${staffLabel} ${sent} 件 (検出${rows.length})`);
         // v0.2.13: 診断ログを新仕様 (hidden input 起点) に対応
         emit('log', {
           level: 'info',
@@ -909,7 +919,7 @@ async function processShop(target, channels, runId, opts = {}) {
             `nameCollision=${debug?.nameCollisionCount ?? 0}`,
           at: new Date().toISOString(),
         });
-        emit('shop:progress', { shopId, step: 'staff', msg: `スタッフ ${sent} 件保存` });
+        emit('shop:progress', { shopId, step: 'staff', msg: `${staffLabel} ${sent} 件保存` });
       } catch (e) {
         emit('log', {
           level: 'warn',
@@ -921,12 +931,14 @@ async function processShop(target, channels, runId, opts = {}) {
 
     if (channelSet.has('menus')) {
       try {
-        emit('shop:progress', { shopId, step: 'menus', msg: 'メニュー一覧を取得中…' });
-        const { rows, debug } = await scrapeMenus(page);
+        // 美容室(hair)はメニュー→スタイル一覧 (/CNB/draft/styleList) に分岐。
+        const menuLabel = genre === 'hair' ? 'スタイル' : 'メニュー';
+        emit('shop:progress', { shopId, step: 'menus', msg: `${menuLabel}一覧を取得中…` });
+        const { rows, debug } = await scrapeMenus(page, { genre });
         const sent = await sendMenus(shopId, rows);
         counts.menus = sent;
-        summary.push(`メニュー ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
-        emit('shop:progress', { shopId, step: 'menus', msg: `メニュー ${sent} 件保存` });
+        summary.push(`${menuLabel} ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
+        emit('shop:progress', { shopId, step: 'menus', msg: `${menuLabel} ${sent} 件保存` });
       } catch (e) {
         emit('log', {
           level: 'warn',

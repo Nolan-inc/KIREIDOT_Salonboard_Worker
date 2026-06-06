@@ -11,6 +11,7 @@ import {
   EyeOff,
   Loader2,
   Lock,
+  Moon,
   Newspaper,
   Pause,
   Pencil,
@@ -36,6 +37,7 @@ import {
   fetchRecentSyncRuns,
   revealSalonboardCredentials,
   setSalonboardCredentialEnabled,
+  shopGenreLabel,
   upsertSalonboardCredentials,
   type CredentialOverviewRow,
   type SyncRunRow,
@@ -205,7 +207,7 @@ export function SalonboardPage() {
               className="inline-flex cursor-pointer items-center gap-2 rounded-[10px] border border-hairline bg-white px-3 py-1.5 text-[11px] font-semibold text-ink-soft hover:bg-brand-light/20"
               title={
                 sync.autoSyncEnabled
-                  ? '自動同期 ON: 設定された間隔で全項目を自動実行'
+                  ? '自動同期 ON: 設定された間隔で全項目を自動実行 (稼働は 6:00〜24:00 のみ。0:00〜6:00 は停止)'
                   : '自動同期 OFF: 手動で実行する必要があります'
               }
             >
@@ -228,7 +230,7 @@ export function SalonboardPage() {
               }
               title={
                 sync.bookingsAutoSyncEnabled
-                  ? '予約だけを店舗ごとに 50〜70 分のランダム間隔で自動取得 (ほぼ毎時 / BAN 回避のため間隔を一定にしない)'
+                  ? '予約だけを店舗ごとに 50〜70 分のランダム間隔で自動取得 (ほぼ毎時 / BAN 回避のため間隔を一定にしない)。稼働は 6:00〜24:00 のみ、0:00〜6:00 は停止'
                   : '予約だけを店舗ごとに 50〜70 分のランダム間隔で自動取得 (OFF)'
               }
             >
@@ -250,6 +252,17 @@ export function SalonboardPage() {
                 </span>
               )}
             </label>
+            {/* 自動取得 ON だが夜間 (0:00〜6:00) で停止中であることを示すバッジ */}
+            {(sync.autoSyncEnabled || sync.bookingsAutoSyncEnabled) &&
+              !sync.isAutoSyncActiveNow && (
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-[10px] border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-semibold text-indigo-700"
+                  title={`自動取得は ${sync.activeHours.startHour}:00〜${sync.activeHours.endHour === 24 ? '24:00' : `${sync.activeHours.endHour}:00`} のみ稼働します。夜間 (${sync.activeHours.endHour === 24 ? '0' : sync.activeHours.endHour}:00〜${sync.activeHours.startHour}:00) は停止中です。手動同期はいつでも実行できます。`}
+                >
+                  <Moon className="h-3.5 w-3.5" />
+                  夜間停止中（{sync.activeHours.startHour}:00〜再開）
+                </span>
+              )}
           </div>
 
           {/* 項目別の同期ボタン */}
@@ -666,6 +679,9 @@ function ShopCredentialCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="truncate text-[13px] font-semibold text-ink">{row.shop_name}</span>
+            <span className="inline-flex shrink-0 items-center rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+              {shopGenreLabel(row.shop_genre)}
+            </span>
             {linked ? (
               row.enabled ? (
                 <span className="inline-flex items-center gap-0.5 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">

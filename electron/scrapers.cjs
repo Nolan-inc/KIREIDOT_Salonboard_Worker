@@ -1226,7 +1226,12 @@ const MENU_EDIT_URL = 'https://salonboard.com/CNK/draft/menuEdit';
  *   <input    name="frmMenuEditMenuDetailList[N].sejyutsuAimTime" value="...">  (施術時間/分)
  * の連番フィールドで構成される。属性順に依存しないよう DOM の .value を読む。
  */
-async function scrapeMenus(page) {
+async function scrapeMenus(page, opts = {}) {
+  // ジャンル別分岐: 美容室(hair)はメニューではなく「スタイル一覧」を取得する。
+  // 他ジャンル(esthetic/nail/eyelash/other)は従来のメニュー編集画面 (/CNK/draft/menuEdit)。
+  if (opts.genre === 'hair') {
+    return scrapeStyles(page, opts);
+  }
   await page.goto(MENU_EDIT_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
 
@@ -2150,7 +2155,200 @@ async function changeBookingViaForm(page, payload, opts = {}) {
 
 const STAFF_LIST_URL = 'https://salonboard.com/CNK/draft/staffList';
 
-async function scrapeStaff(page) {
+// ===================== 美容室 (hair) 専用 =====================
+// 美容室はエステ(/CNK/...)と URL/DOM が異なり、/CNB/... 配下を使う。
+//   スタイリスト一覧: /CNB/draft/stylistList/
+//   スタイル一覧:     /CNB/draft/styleList/
+const STYLIST_LIST_URL = 'https://salonboard.com/CNB/draft/stylistList/';
+const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
+
+/**
+ * 美容室「スタイリスト掲載情報一覧」(/CNB/draft/stylistList/) を取得する。
+ * エステの scrapeStaff の hair 版。出力 row 形は sendStaff 互換 (external_id/name/...)。
+ *
+ * 確認済み DOM (salonboard_code/美容室/stylistlist.html):
+ *   - 一意 ID: input[name="frmStylistListStylistDtoList[N].stylistId"] value="T000917663"
+ *   - 各スタイリストは table.table_list_store の連続行。名前/職種は td.td_value_store_c。
+ */
+async function scrapeStylists(page, _opts = {}) {
+  await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+
+  const raw = await page.evaluate(() => {
+    function txt(el) {
+      return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
+    }
+    // stylistId の hidden input を起点に巡回 (SalonBoard 正規データ)。
+    const idInputs = Array.from(
+      document.querySelectorAll(
+        'input[name^="frmStylistListStylistDtoList["][name$=".stylistId"]'
+      )
+    ).filter((el) => (el.value || '').trim());
+
+    const items = [];
+    const seen = new Set();
+    for (const input of idInputs) {
+      const ext = (input.value || '').trim();
+      if (!ext || seen.has(ext)) continue;
+      seen.add(ext);
+      // この input が属する行ブロック (近傍の td 群) から名前・職種を拾う。
+      // 1スタイリスト = 主行 + 付随行。最寄りの tr から td.td_value_store_c を集める。
+      const tr = input.closest('tr');
+      let name = '';
+      let position = '';
+      let photoUrl = null;
+      if (tr) {
+        const cells = Array.from(tr.querySelectorAll('td.td_value_store_c'))
+          .map((c) => txt(c))
+          .filter((t) => t && t !== '-');
+        // 氏名 → 職種/指名料 → 施術歴 の順で並ぶ。最初の非空を氏名とみなす。
+        if (cells.length) name = cells[0];
+        if (cells.length > 1) position = cells[1];
+        const img = tr.querySelector('img[name="stylistPhoto"], img');
+        photoUrl = img ? img.getAttribute('src') : null;
+      }
+      items.push({ external_id: ext, name, position, photo_url: photoUrl });
+    }
+    return { items, total: idInputs.length };
+  });
+
+  const rows = (raw.items ?? [])
+    .filter((it) => it.external_id)
+    .map((it) => ({
+      external_id: String(it.external_id),
+      name: cleanText(it.name) ?? it.name ?? '',
+      position: cleanText(it.position),
+      catch_phrase: null,
+      bio: null,
+      photo_url: it.photo_url ? absoluteUrl(it.photo_url) : null,
+      is_published: true,
+    }))
+    .filter((r) => r.name); // 名前が取れた行のみ (sendStaff の必須条件)
+
+  return {
+    rows,
+    debug: { parsed: rows.length, staffIdInputs: raw.total, genre: 'hair', source: 'stylistList' },
+  };
+}
+
+/**
+ * 美容室「スタイル一覧」(/CNB/draft/styleList/) を取得する。
+ * エステの scrapeMenus の hair 版。出力 row 形は sendMenus 互換 (external_id/name/...)。
+ *
+ * 確認済み DOM (salonboard_code/美容室/stylelist.html):
+ *   - 一意 ID: input[name="frmStyleListStyleInfoDtoList[N].styleId"] value="L203183513"
+ *   - スタイル名: td.td_value_store_c[colspan="3"] (主行)
+ *   - 紐付けクーポン: input[name="...couponId"] value="CP..."
+ *   - ページング: a.pgLink / a.pgNext / a.pgLast (?pn=N)
+ */
+async function scrapeStyles(page, _opts = {}) {
+  const MAX_PAGES = 30;
+  const allItems = [];
+  const seen = new Set();
+  let pageUrl = STYLE_LIST_URL;
+
+  for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+    await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+    const pageData = await page.evaluate(() => {
+      function txt(el) {
+        return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
+      }
+      const re = /^frmStyleListStyleInfoDtoList\[(\d+)\]\.(.+)$/;
+      const byIndex = {};
+      const els = document.querySelectorAll(
+        'input[name^="frmStyleListStyleInfoDtoList"], select[name^="frmStyleListStyleInfoDtoList"]'
+      );
+      for (const el of els) {
+        const m = (el.getAttribute('name') || '').match(re);
+        if (!m) continue;
+        const idx = m[1];
+        const field = m[2];
+        (byIndex[idx] = byIndex[idx] || {})[field] = el.value;
+      }
+      // スタイル名は styleId hidden input の属する行ブロックから拾う。
+      const items = [];
+      for (const idx of Object.keys(byIndex)) {
+        const f = byIndex[idx];
+        const styleId = (f.styleId || '').trim();
+        if (!styleId) continue;
+        const input = document.querySelector(
+          `input[name="frmStyleListStyleInfoDtoList[${idx}].styleId"]`
+        );
+        let name = '';
+        let length = '';
+        let stylist = '';
+        const tr = input ? input.closest('tr') : null;
+        if (tr) {
+          // 主行: スタイル名は colspan=3 の td。
+          const titleTd = tr.querySelector('td.td_value_store_c[colspan="3"]');
+          name = txt(titleTd);
+          // 付随行(長さ/担当)を兄弟 tr から拾う (最大4行ブロック)。
+          let sib = tr.nextElementSibling;
+          const extra = [];
+          for (let i = 0; i < 3 && sib; i++) {
+            const cells = Array.from(sib.querySelectorAll('td.td_value_store_c'))
+              .map((c) => txt(c))
+              .filter((t) => t && t !== '-');
+            extra.push(...cells);
+            sib = sib.nextElementSibling;
+          }
+          if (extra.length) length = extra[0] || '';
+          if (extra.length > 1) stylist = extra[1] || '';
+        }
+        items.push({
+          external_id: styleId,
+          name,
+          length,
+          stylist,
+          coupon_external_id: (f.couponId || '').trim() || null,
+        });
+      }
+      // ページング情報
+      const nextEl = document.querySelector('a.pgNext');
+      const nextHref = nextEl ? nextEl.getAttribute('href') : null;
+      return { items, nextHref, total: Object.keys(byIndex).length };
+    });
+
+    for (const it of pageData.items ?? []) {
+      if (it.external_id && !seen.has(it.external_id)) {
+        seen.add(it.external_id);
+        allItems.push(it);
+      }
+    }
+
+    // 次ページへ。pgNext が無ければ終了。
+    if (!pageData.nextHref) break;
+    try {
+      pageUrl = new URL(pageData.nextHref, 'https://salonboard.com').toString();
+    } catch (_e) {
+      break;
+    }
+  }
+
+  const rows = allItems
+    .filter((it) => it.external_id && it.name)
+    .map((it) => ({
+      external_id: String(it.external_id),
+      name: cleanText(it.name) ?? it.name,
+      price: null,
+      duration_min: null,
+      // スタイルは「長さ/担当/紐付けクーポン」を raw に残す (将来 menus 取込で活用)。
+      length: cleanText(it.length) || null,
+      stylist_name: cleanText(it.stylist) || null,
+      coupon_external_id: it.coupon_external_id || null,
+    }));
+
+  return { rows, debug: { itemsFound: rows.length, genre: 'hair', source: 'styleList' } };
+}
+
+async function scrapeStaff(page, opts = {}) {
+  // ジャンル別分岐: 美容室(hair)はスタッフではなく「スタイリスト一覧」を取得する。
+  // 他ジャンル(esthetic/nail/eyelash/other)は従来のスタッフ一覧 (/CNK/draft/staffList)。
+  if (opts.genre === 'hair') {
+    return scrapeStylists(page, opts);
+  }
   await page.goto(STAFF_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
