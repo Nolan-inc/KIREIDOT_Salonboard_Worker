@@ -904,14 +904,30 @@ async function processShop(target, channels, runId, opts = {}) {
       try {
         emit('shop:progress', { shopId, step: 'bookings', msg: '予約一覧を取得中…' });
         let { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl });
-        // グループ店舗で予約一覧 goto 後にサロン選択へ戻された場合、サロンを選び直して
-        // 1 回だけ再取得する (selectStore→goto の競合で稀にセッション文脈が外れるため)。
-        if (debug && debug.loggedOut && debug.landedOn === 'group_top') {
-          emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] 予約一覧でサロン選択へ戻されたため、サロンを選び直して再取得します`, at: new Date().toISOString() });
-          const re = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName }).catch(() => ({ ok: false }));
-          if (re.ok) {
-            await page.waitForTimeout(800);
-            ({ rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl }));
+        // グループ店舗で予約一覧到達時にログアウト/サロン選択戻り/セッション切れに
+        // なった場合、1 回だけリカバリして再取得する。
+        //   - group_top      : サロンを選び直すだけで復帰しうる
+        //   - session_expired/login: 再ログイン → サロン再選択が必要
+        if (debug && debug.loggedOut) {
+          emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] 予約一覧で${debug.landedOn}を検知、リカバリして再取得します`, at: new Date().toISOString() });
+          let recovered = false;
+          if (debug.landedOn === 'session_expired' || debug.landedOn === 'login') {
+            // 再ログイン (storageState は破棄してまっさらに)
+            clearStorageState(ssPath);
+            const lr = await tryLogin(page, { ...creds, slow: true }).catch(() => ({ status: 'failed' }));
+            if (lr.status === 'ok') {
+              await saveStorageState(ctx, ssPath).catch(() => {});
+            }
+            recovered = lr.status === 'ok';
+          } else {
+            recovered = true;
+          }
+          if (recovered) {
+            const re = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName }).catch(() => ({ ok: false }));
+            if (re.ok) {
+              await page.waitForTimeout(1000);
+              ({ rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl }));
+            }
           }
         }
         // 予約一覧に到達できずログアウト/サロン選択へ飛ばされた場合は、

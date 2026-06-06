@@ -586,29 +586,73 @@ async function scrapeBookings(page, opts = {}) {
   const range = defaultBookingDateRange(months);
   const diag = [];
 
-  await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  // 予約一覧への遷移:
+  // グループ店舗(1ログイン複数サロン)では、サロン選択で確定した店舗セッションは
+  // 「画面内のリンクを辿る」遷移でしか維持されないことがある。絶対URLへ直接 goto すると
+  // 店舗セッションが外れて『一定時間操作されなかった…』のセッション切れになる。
+  // そこで、まず現在の画面 (サロン選択後の店舗トップ) にある「予約一覧」リンクを
+  // クリックして遷移し、見つからなければ従来どおり絶対URLへ goto する。
+  let navigatedViaLink = false;
+  try {
+    const reserveLink = page
+      .locator(
+        'a[href*="/KLP/reserve/reserveList/init"], a[href*="reserveList/init"], a:has-text("予約一覧"), a:has-text("本日の予約一覧")'
+      )
+      .first();
+    if ((await reserveLink.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+        reserveLink.click({ timeout: 6_000 }),
+      ]);
+      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      // 予約一覧へ着けたか (URL で判定)。着けなければ goto にフォールバック。
+      navigatedViaLink = /reserveList\/init/i.test(page.url());
+      if (navigatedViaLink) diag.push('予約一覧へ画面内リンクで遷移');
+    }
+  } catch (_e) {
+    /* リンク遷移失敗時は goto フォールバック */
+  }
+  if (!navigatedViaLink) {
+    await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  }
 
-  // グループ店舗対応: 予約一覧へ goto した結果、ログアウト/ログイン画面 or
-  // サロン選択画面 (/CNC/groupTop/) に飛ばされていないか先に判定する。
-  // ここを「0件 ok」で握りつぶすと『取得できていないのに成功』に見えてしまうため、
-  // 明示的に失敗 (loggedOut) として扱い、呼び出し側で店舗選択やり直しに倒せるようにする。
+  // グループ店舗対応: 予約一覧へ goto した結果、ログアウト/ログイン画面・サロン選択画面
+  // (/CNC/groupTop/)・「セッション有効期限切れエラー」に飛ばされていないか先に判定する。
+  // ※ セッション切れは URL が /KLP/reserve/reserveList/init のままで、本文だけが
+  //   「一定時間操作されなかったため、ログインの有効期限が切れました」というエラーになる。
+  //   URL だけ見ると気づけないため、本文/タイトルでも判定する。
+  // ここを「0件 ok」で握りつぶすと『取得できていないのに成功』に見えるため、明示的に
+  // 失敗 (loggedOut) として扱い、呼び出し側でログイン/店舗選択やり直しに倒せるようにする。
   {
     const cur = page.url();
     const onGroupTop = /\/CNC\/groupTop/i.test(cur);
     const onLogin = /\/login/i.test(cur);
-    if (onGroupTop || onLogin) {
+    const expired = await page.evaluate(() => {
+      const title = document.title || '';
+      const body = (document.body?.innerText || '').replace(/\s+/g, '');
+      const hasPw = !!document.querySelector('input[type="password"]');
+      const errorTitle = /エラー|ERROR/i.test(title);
+      const expiredText =
+        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|操作されなかった|セッション|タイムアウト/.test(body);
+      const errorCode = /KPCL\d{3}V\d{2}/.test(body);
+      return { hasPw, errorTitle, expiredText, errorCode };
+    }).catch(() => ({ hasPw: false, errorTitle: false, expiredText: false, errorCode: false }));
+
+    const sessionExpired = expired.expiredText || expired.errorCode || (expired.errorTitle && expired.expiredText);
+    if (onGroupTop || onLogin || expired.hasPw || sessionExpired) {
+      const landedOn = onGroupTop ? 'group_top' : (sessionExpired ? 'session_expired' : 'login');
       const capDir = await captureScrapeDebug(page, 'bookings', 'logged_out_or_group_top', {
         secrets: [opts.loginId, opts.password].filter(Boolean),
-        diagnostics: { url: cur, onGroupTop, onLogin },
+        diagnostics: { url: cur, onGroupTop, onLogin, sessionExpired, hasPw: expired.hasPw },
       });
       return {
         rows: [],
         debug: {
           itemsFound: 0,
           loggedOut: true,
-          landedOn: onGroupTop ? 'group_top' : 'login',
-          diag: [`予約一覧に到達できずログアウト/サロン選択へ遷移 (url=${cur}, capture=${capDir || '?'})`],
+          landedOn,
+          diag: [`予約一覧に到達できずログアウト/期限切れ/サロン選択へ遷移 (landed=${landedOn}, url=${cur}, capture=${capDir || '?'})`],
         },
       };
     }
