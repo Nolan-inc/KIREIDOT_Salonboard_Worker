@@ -54,6 +54,13 @@ let pushJobsRunning = false;
 // ログインがハングするケースがあるため、手動「SB挿入」と同じく headful で動かす。
 const AUTO_PUSH_SHOW_BROWSER = true;
 
+// 取得(同期)もブラウザ表示(headful)で実行するか。
+// push と同様、headless だと SalonBoard 側で bot 検知され予約一覧が空応答に
+// なる(結果テーブルが描画されない=no_result_table)ケースがあるため、毎時の
+// 自動取得・手動「同期」ボタンを含めて常に headful で動かす。
+// (renderer 側で showBrowser を渡さない呼び出しもあるため、worker 側で一律強制する)
+const AUTO_SYNC_SHOW_BROWSER = true;
+
 /**
  * 全体同期 (runSync) の stale タイムアウト。
  * runSync は scraping + push_booking (SalonBoard フォーム書込) を含み、
@@ -2083,6 +2090,9 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
   if (enablePush !== undefined && deviceAuth) {
     deviceAuth.enablePush = !!enablePush;
   }
+  // 取得(同期)は常にブラウザ表示で実行する (AUTO_SYNC_SHOW_BROWSER)。
+  // 呼び出し側 (毎時の自動取得など) が showBrowser を渡さなくても headful にする。
+  const showBrowserEffective = AUTO_SYNC_SHOW_BROWSER || !!showBrowser;
   running = true;
   runStartedAt = Date.now();
   abortRequested = false;
@@ -2108,7 +2118,7 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
         emit('log', { level: 'warn', msg: 'ユーザー操作により中断' });
         break;
       }
-      const r = await processShop(t, channels, runId, { showBrowser: !!showBrowser });
+      const r = await processShop(t, channels, runId, { showBrowser: showBrowserEffective });
       if (r.ok) okCount++; else ngCount++;
     }
 
@@ -2116,7 +2126,7 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
     // 失敗してもスクレイピング結果には影響させない。
     if (!abortRequested) {
       try {
-        await runPushJobs({ showBrowser: !!showBrowser });
+        await runPushJobs({ showBrowser: showBrowserEffective });
       } catch (e) {
         emit('log', { level: 'warn', msg: `push jobs error: ${e?.message ?? e}`, at: new Date().toISOString() });
       }
