@@ -586,17 +586,28 @@ async function scrapeBookings(page, opts = {}) {
   const range = defaultBookingDateRange(months);
   const diag = [];
 
+  // ジャンル別の予約一覧 URL とマッチパターン:
+  //   - 美容室(hair): /CLS/hair/reservations/init/  (KLP系ではない)
+  //   - エステ等     : /KLP/reserve/reserveList/init (従来。銀座店などはこれで動作中)
+  const isHair = opts.genre === 'hair';
+  const reserveUrl = isHair
+    ? 'https://salonboard.com/CLS/hair/reservations/init/'
+    : RESERVE_LIST_URL;
+  const reserveUrlRe = isHair ? /reservations\/init/i : /reserveList\/init/i;
+
   // 予約一覧への遷移:
   // グループ店舗(1ログイン複数サロン)では、サロン選択で確定した店舗セッションは
   // 「画面内のリンクを辿る」遷移でしか維持されないことがある。絶対URLへ直接 goto すると
   // 店舗セッションが外れて『一定時間操作されなかった…』のセッション切れになる。
   // そこで、まず現在の画面 (サロン選択後の店舗トップ) にある「予約一覧」リンクを
-  // クリックして遷移し、見つからなければ従来どおり絶対URLへ goto する。
+  // クリックして遷移し、見つからなければ正しい絶対URLへ goto する。
   let navigatedViaLink = false;
   try {
     const reserveLink = page
       .locator(
-        'a[href*="/KLP/reserve/reserveList/init"], a[href*="reserveList/init"], a:has-text("予約一覧"), a:has-text("本日の予約一覧")'
+        isHair
+          ? 'a[href*="/CLS/hair/reservations/init"], a[href*="reservations/init"], a:has-text("予約一覧"), a:has-text("本日の予約一覧")'
+          : 'a[href*="/KLP/reserve/reserveList/init"], a[href*="reserveList/init"], a:has-text("予約一覧"), a:has-text("本日の予約一覧")'
       )
       .first();
     if ((await reserveLink.count().catch(() => 0)) > 0) {
@@ -606,14 +617,14 @@ async function scrapeBookings(page, opts = {}) {
       ]);
       await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
       // 予約一覧へ着けたか (URL で判定)。着けなければ goto にフォールバック。
-      navigatedViaLink = /reserveList\/init/i.test(page.url());
-      if (navigatedViaLink) diag.push('予約一覧へ画面内リンクで遷移');
+      navigatedViaLink = reserveUrlRe.test(page.url());
+      if (navigatedViaLink) diag.push(`予約一覧へ画面内リンクで遷移 (${isHair ? 'hair' : 'esthetic'})`);
     }
   } catch (_e) {
     /* リンク遷移失敗時は goto フォールバック */
   }
   if (!navigatedViaLink) {
-    await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(reserveUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
   }
 

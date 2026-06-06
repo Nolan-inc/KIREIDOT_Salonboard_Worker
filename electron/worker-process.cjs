@@ -771,7 +771,7 @@ async function processShop(target, channels, runId, opts = {}) {
     let sessionExpiredFlag = false;
     if (initialStorage) {
       try {
-        const sessionState = await isLoggedIn(page, creds.baseUrl);
+        const sessionState = await isLoggedIn(page, creds.baseUrl, genre);
         if (sessionState === 'logged_in') {
           needsLogin = false;
           sessionReused = true;
@@ -903,7 +903,7 @@ async function processShop(target, channels, runId, opts = {}) {
     if (channelSet.has('bookings')) {
       try {
         emit('shop:progress', { shopId, step: 'bookings', msg: '予約一覧を取得中…' });
-        let { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl });
+        let { rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl, genre });
         // グループ店舗で予約一覧到達時にログアウト/サロン選択戻り/セッション切れに
         // なった場合、1 回だけリカバリして再取得する。
         //   - group_top      : サロンを選び直すだけで復帰しうる
@@ -926,7 +926,7 @@ async function processShop(target, channels, runId, opts = {}) {
             const re = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName }).catch(() => ({ ok: false }));
             if (re.ok) {
               await page.waitForTimeout(1000);
-              ({ rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl }));
+              ({ rows, debug } = await scrapeBookings(page, { baseUrl: creds.baseUrl, genre }));
             }
           }
         }
@@ -1338,15 +1338,21 @@ function clearStorageState(p) {
  * SalonBoard は店舗種別で URL が変わるので、base URL の直接アクセスと
  * 代表的な管理画面パスの両方を試す。
  */
-async function isLoggedIn(page, baseUrl) {
-  // まず管理画面 TOP (/KLP/top/) を開いてセッション有効性を確認する。
+async function isLoggedIn(page, baseUrl, genre) {
+  // 管理画面 TOP を開いてセッション有効性を確認する。
   // ここで KPCL018V01 等のエラー / ログイン画面に飛ばされたら needs_login。
-  const candidates = [
-    safeUrl('/KLP/top/', baseUrl),
-    safeUrl('/KLP/', baseUrl),
-    safeUrl('/CNF/', baseUrl),
-    baseUrl,
-  ].filter(Boolean);
+  //
+  // ジャンルで TOP URL が異なる:
+  //   - 美容室(hair): /CLP/bt/top/  (KLP系を先に開くと毎回再ログインを誘発する)
+  //   - エステ等     : /KLP/top/    (従来どおり。銀座店などはこれで動いている)
+  const candidates = (
+    genre === 'hair'
+      ? ['/CLP/bt/top/', '/CLP/', '/KLP/top/']
+      : ['/KLP/top/', '/KLP/', '/CNF/']
+  )
+    .map((p) => safeUrl(p, baseUrl))
+    .concat([baseUrl])
+    .filter(Boolean);
   for (const url of candidates) {
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
