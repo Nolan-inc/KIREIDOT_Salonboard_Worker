@@ -581,6 +581,148 @@ async function applyBookingDateFilter(page, { fromStr, toStr }, { diag } = {}) {
  *  - 日付範囲: 昨日〜N ヶ月後の月末 (デフォルト 3 ヶ月)
  *  - ページネーション: 「次へ」リンクがある限り辿る (最大 30 ページ)
  */
+/**
+ * 美容室(hair)の予約一覧 (/CLS/hair/reservations/init/) を取得する。
+ *
+ * エステ(/KLP)とは検索フォーム・結果テーブルの DOM が異なる。例外を投げない
+ * (ブラウザを閉じない) ことを最優先にし、検索→結果ページ capture→明細抽出を行う。
+ *
+ * ※ 結果テーブルの厳密な DOM が未確定のため、現時点では「日付範囲を入れて検索 →
+ *    結果ページを capture (DOM 取得用) → 取れる範囲で明細抽出」とする。capture した
+ *    page.html から行構造を確定したら、下記 extract を確定セレクタに差し替える。
+ */
+async function scrapeHairBookings(page, opts = {}) {
+  const range = opts.range || defaultBookingDateRange(3);
+  const diag = opts.diag || [];
+  const slashFrom = range.fromStr.replace(/-/g, '/');
+  const slashTo = range.toStr.replace(/-/g, '/');
+  const ymdFrom = range.fromStr.replace(/-/g, '');
+  const ymdTo = range.toStr.replace(/-/g, '');
+
+  // 1) 来店日の範囲を入力する。hair フォームは日付欄の name/id が不明なため、
+  //    「日付らしい input を上から2つ (from/to)」に値を入れる防御的実装。
+  //    hidden の yyyymmdd 系と表示用 text の両方に対応する。
+  await page.evaluate(
+    ({ slashFrom, slashTo, ymdFrom, ymdTo }) => {
+      function setVal(el, v) {
+        if (!el) return false;
+        try {
+          el.removeAttribute('readonly');
+          el.removeAttribute('disabled');
+          const proto = Object.getPrototypeOf(el);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc && desc.set) desc.set.call(el, v);
+          else el.value = v;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+          return true;
+        } catch (_e) {
+          return false;
+        }
+      }
+      // 日付っぽい input を name/id/value から推定
+      const inputs = Array.from(document.querySelectorAll('input'));
+      const dateLike = inputs.filter((i) => {
+        const key = ((i.name || '') + (i.id || '')).toLowerCase();
+        return /date|ymd|rsv.*date|visit|raiten|来店/.test(key) || /^\d{4}[\/-]\d{2}[\/-]\d{2}$/.test(i.value || '') || /^\d{8}$/.test(i.value || '');
+      });
+      // hidden(yyyymmdd) と text(yyyy/mm/dd) を可能な範囲で両方埋める
+      const hiddens = dateLike.filter((i) => i.type === 'hidden' || /^\d{8}$/.test(i.value || ''));
+      const texts = dateLike.filter((i) => i.type !== 'hidden');
+      if (hiddens[0]) setVal(hiddens[0], ymdFrom);
+      if (hiddens[1]) setVal(hiddens[1], ymdTo);
+      if (texts[0]) setVal(texts[0], slashFrom);
+      if (texts[1]) setVal(texts[1], slashTo);
+    },
+    { slashFrom, slashTo, ymdFrom, ymdTo },
+  ).catch(() => {});
+
+  // 2) 「検索する」を押す。
+  const searchBtn = page
+    .locator('a:has-text("検索する"), button:has-text("検索する"), input[type="submit"][value*="検索"], a.mod_btn_76:has-text("検索")')
+    .first();
+  if ((await searchBtn.count().catch(() => 0)) > 0) {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+      searchBtn.click({ timeout: 8_000 }).catch(() => {}),
+    ]);
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    diag.push('hair: 検索する クリック');
+  } else {
+    diag.push('hair: 検索ボタン未検出');
+  }
+
+  // 3) 結果ページを capture (DOM 確定用)。これがあれば明細セレクタを実装できる。
+  const capDir = await captureScrapeDebug(page, 'bookings', 'hair_result', {
+    diagnostics: { url: page.url(), range: `${slashFrom} 〜 ${slashTo}` },
+  }).catch(() => null);
+  if (capDir) diag.push(`hair result capture: ${capDir}`);
+
+  // 4) 取れる範囲で明細抽出 (汎用: 行に来店日時/顧客名/予約番号 B... があるテーブルを探す)。
+  const items = await page.evaluate(() => {
+    const txt = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '');
+    const tables = Array.from(document.querySelectorAll('table'));
+    let best = null;
+    let bestScore = 0;
+    for (const t of tables) {
+      const body = txt(t);
+      // 予約番号 (B########) や 来店日らしさでスコアリング
+      const score =
+        (/(B\d{6,})/.test(body) ? 5 : 0) +
+        (t.querySelectorAll('tr').length > 2 ? 2 : 0) +
+        (/来店|予約|お客様|スタイリスト/.test(body) ? 1 : 0);
+      if (score > bestScore) { bestScore = score; best = t; }
+    }
+    if (!best || bestScore < 5) return { rows: [], reason: `no_result_table(best=${bestScore})` };
+    const out = [];
+    for (const tr of Array.from(best.querySelectorAll('tr'))) {
+      const rowText = txt(tr);
+      const idm = rowText.match(/B\d{6,}/);
+      if (!idm) continue; // 予約番号を持つ行だけ
+      const link = tr.querySelector('a[href*="reservation"], a[href*="detail" i]');
+      out.push({
+        external_id: idm[0],
+        row_text: rowText,
+        link_href: link ? link.getAttribute('href') : null,
+      });
+    }
+    return { rows: out, reason: out.length ? 'ok' : 'no_rows_with_id' };
+  }).catch((e) => ({ rows: [], reason: `eval_error:${e?.message ?? e}` }));
+
+  diag.push(`hair extract: ${items.reason} (${items.rows.length}行)`);
+
+  // 現状は external_id (予約番号) と行テキストのみ。日時/顧客などの正規化は
+  // hair_result capture の DOM 確定後に実装する。最低限 external_id があれば
+  // sendBookings は通る (詳細項目は後続で埋める)。
+  const rows = items.rows
+    .filter((r) => r.external_id)
+    .map((r) => ({
+      external_id: r.external_id,
+      scheduled_at: null,
+      duration_min: null,
+      customer_name: null,
+      customer_code: null,
+      customer_phone: null,
+      customer_email: null,
+      customer_birthday: null,
+      menu_name: null,
+      amount: null,
+      status: null,
+      staff_name: null,
+    }));
+
+  return {
+    rows,
+    debug: {
+      itemsFound: rows.length,
+      genre: 'hair',
+      range: `${range.fromStr} 〜 ${range.toStr}`,
+      diag,
+    },
+  };
+}
+
 async function scrapeBookings(page, opts = {}) {
   const months = Number.isFinite(opts.months) ? opts.months : 3;
   const range = defaultBookingDateRange(months);
@@ -695,6 +837,22 @@ async function scrapeBookings(page, opts = {}) {
     }
   } catch (_e) {
     /* 診断失敗は本処理を止めない */
+  }
+
+  // 美容室(hair)は予約一覧の DOM がエステ(/KLP)と異なる。エステ用の検索フォーム操作
+  // (applyBookingDateFilter / #resultList 抽出) をそのまま流すと未対応のフォームで
+  // 例外→ブラウザが閉じてしまう。hair は専用ハンドラに分岐し、例外を出さず
+  // (検索→結果ページを capture→明細抽出) を行う。
+  if (isHair) {
+    try {
+      return await scrapeHairBookings(page, { range, diag, baseUrl: opts.baseUrl });
+    } catch (e) {
+      const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e) },
+      }).catch(() => null);
+      diag.push(`hair scrape error: ${e?.message ?? e} (capture=${capDir || '?'})`);
+      return { rows: [], debug: { itemsFound: 0, genre: 'hair', diag } };
+    }
   }
 
   // 検索フォームに日付範囲を入れて検索を実行 (これが無いと結果が出ない)
