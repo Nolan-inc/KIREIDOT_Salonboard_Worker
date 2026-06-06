@@ -39,6 +39,8 @@ export type CredentialOverviewRow = {
   shop_name: string;
   /** 店舗ジャンル。null は未設定 (Worker 側で esthetic 扱い)。 */
   shop_genre: ShopGenre | null;
+  /** グループ店舗用 SalonBoard サロンID (H000...)。null は単一店舗ログイン。 */
+  salonboard_salon_id: string | null;
   credential_id: string | null;
   login_id: string | null;
   base_url: string | null;
@@ -97,6 +99,8 @@ export type DeviceOverviewShop = {
   organization_id: string;
   /** 店舗ジャンル。null は未設定 (Worker 側で esthetic 扱い)。 */
   genre: ShopGenre | null;
+  /** グループ店舗用 SalonBoard サロンID (H000...)。null は単一店舗ログイン。 */
+  salonboard_salon_id?: string | null;
   credential_status: 'active' | 'missing' | 'disabled' | 'blocked';
   consent_status: 'valid' | 'missing';
   sync_status:
@@ -286,6 +290,8 @@ export async function upsertSalonboardCredentials(args: {
   loginId: string;
   password: string;
   baseUrl: string | null;
+  /** グループ店舗用 SalonBoard サロンID (H000...)。任意。 */
+  salonId?: string | null;
 }): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   const { data, error } = await supabase.rpc('salonboard_upsert_credentials', {
     p_shop_id: args.shopId,
@@ -293,6 +299,7 @@ export async function upsertSalonboardCredentials(args: {
     p_login_id: args.loginId,
     p_password: args.password,
     p_base_url: args.baseUrl ?? null,
+    p_salon_id: args.salonId?.trim() || null,
   });
   if (error) return { ok: false, error: error.message };
   return { ok: true, id: String(data) };
@@ -310,20 +317,21 @@ export async function upsertSalonboardCredentials(args: {
 export async function revealSalonboardCredentials(
   shopId: string,
 ): Promise<
-  | { ok: true; loginId: string; password: string; baseUrl: string | null }
+  | { ok: true; loginId: string; password: string; baseUrl: string | null; salonId: string | null }
   | { ok: false; error: string }
 > {
   const { data, error } = await supabase.rpc('salonboard_reveal_credentials', {
     p_shop_id: shopId,
   });
   if (error) return { ok: false, error: error.message };
-  const row = (data as Array<{ login_id: string; password: string; base_url: string | null }>)?.[0];
+  const row = (data as Array<{ login_id: string; password: string; base_url: string | null; salon_id: string | null }>)?.[0];
   if (!row) return { ok: false, error: '認証情報が見つかりません' };
   return {
     ok: true,
     loginId: row.login_id,
     password: row.password,
     baseUrl: row.base_url,
+    salonId: row.salon_id ?? null,
   };
 }
 

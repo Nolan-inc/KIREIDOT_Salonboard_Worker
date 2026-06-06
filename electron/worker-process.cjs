@@ -643,6 +643,8 @@ async function revealCredentials(shopId) {
     loginId: row.login_id,
     password: row.password,
     baseUrl,
+    // グループ店舗用 SalonBoard サロンID (H000...)。null は単一店舗ログイン。
+    salonId: row.salon_id ?? null,
   };
 }
 
@@ -862,6 +864,37 @@ async function processShop(target, channels, runId, opts = {}) {
       session_reused: sessionReused,
       login_attempted: loginAttempted,
     };
+
+    // ---- グループ店舗(1ログイン複数サロン)のサロン選択 ----
+    // ログイン後 /CNC/groupTop/ に着地する場合は対象サロンを選択してから取得する。
+    // 単一店舗ログインなら no-op。失敗時は誤店舗取得を避けて安全に停止する。
+    try {
+      const sel = await ensureStoreSelected(page, {
+        salonId: creds.salonId ?? null,
+        shopName,
+      });
+      if (sel.selected) {
+        emit('shop:progress', { shopId, step: 'login', msg: `サロン選択: ${sel.salonId ?? ''}` });
+      }
+      if (!sel.ok) {
+        const hint =
+          sel.reason && sel.reason.startsWith('salon_id_not_in_group')
+            ? '設定したサロンIDがこのアカウントのグループに見つかりません。サロンIDを確認してください。'
+            : sel.reason === 'group_top_name_unmatched' || sel.reason === 'group_top_no_target'
+              ? 'グループ店舗のサロン選択で対象を特定できません。店舗のSalonBoard設定でサロンID(H...)を登録してください。'
+              : 'グループ店舗のサロン選択に失敗しました。';
+        await markCredentialError(shopId, `group_store_select: ${sel.reason ?? 'unknown'}`, null, 'store_select_required');
+        emit('shop:end', { shopId, ok: false, error: hint, errorCode: 'store_select_required' });
+        await recordShopRun(runId, shopId, false, null, `store_select: ${sel.reason ?? 'unknown'}`, counts);
+        return { ok: false, errorCode: 'store_select_required' };
+      }
+    } catch (e) {
+      emit('log', {
+        level: 'warn',
+        msg: `[${shopId.slice(0, 8)}] store-select error: ${e instanceof Error ? e.message : e}`,
+        at: new Date().toISOString(),
+      });
+    }
 
     // ---- スクレイピング本体 (channels で選択された分だけ) ----
     const channelSet = new Set(channels);
@@ -1335,6 +1368,100 @@ function safeUrl(rel, base) {
   } catch (_e) {
     return null;
   }
+}
+
+/**
+ * グループ店舗(1ログインで複数サロン)対応。
+ *
+ * SalonBoard は 1 アカウントで複数サロンを持つ場合、ログイン後に
+ * /CNC/groupTop/ の「サロン選択」画面に着地する。各サロンは
+ *   <table id="biyouStoreInfoArea|kireiStoreInfoArea"> 内の
+ *   <td>H000650996</td> <td class="storeName"><a id="H000650996">サロン名</a></td>
+ * で並ぶ。対象サロンの <a id="H000..."> をクリックしてその店舗文脈に入る。
+ *
+ * - 単一店舗ログイン (groupTop に着地しない) は何もしない (ok:true, selected:false)。
+ * - groupTop 検知時:
+ *     salonId 指定あり → その id のリンクをクリック。
+ *     salonId 未指定   → shopName と最も近いサロン名を選ぶ (フォールバック)。
+ *     どちらも特定不能 → ok:false (呼び出し側で manual_required に倒す)。
+ *
+ * @param {{salonId?: string|null, shopName?: string|null}} opts
+ * @returns {Promise<{ok: boolean, selected: boolean, reason?: string, salonId?: string}>}
+ */
+async function ensureStoreSelected(page, opts = {}) {
+  const salonId = (opts.salonId || '').trim().toUpperCase();
+  const shopName = (opts.shopName || '').trim();
+
+  // 現在 groupTop (サロン選択) に居るか判定。URL か、店舗一覧テーブルの存在で見る。
+  let onGroupTop = /\/CNC\/groupTop/i.test(page.url());
+  if (!onGroupTop) {
+    onGroupTop = await page
+      .locator('#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^="H"]')
+      .first()
+      .count()
+      .then((n) => n > 0)
+      .catch(() => false);
+  }
+  if (!onGroupTop) {
+    // 単一店舗ログイン: サロン選択は不要。
+    return { ok: true, selected: false };
+  }
+
+  // サロン一覧を抽出 (id=H... と表示名)。
+  const stores = await page.evaluate(() => {
+    const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+    const out = [];
+    const links = Array.from(document.querySelectorAll('a[id^="H"]'));
+    for (const a of links) {
+      const id = (a.getAttribute('id') || '').trim();
+      if (!/^H\d{6,}$/i.test(id)) continue;
+      out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
+    }
+    return out;
+  });
+
+  if (!stores.length) {
+    return { ok: false, selected: false, reason: 'group_top_no_stores' };
+  }
+
+  // 対象サロンを決定。
+  let target = null;
+  if (salonId) {
+    target = stores.find((s) => s.id === salonId) || null;
+    if (!target) {
+      return { ok: false, selected: false, reason: `salon_id_not_in_group(${salonId})` };
+    }
+  } else if (shopName) {
+    // salon_id 未設定 → 店舗名の部分一致でフォールバック。
+    const want = shopName.replace(/\s+/g, '');
+    target =
+      stores.find((s) => s.name && (s.name === want || s.name.includes(want) || want.includes(s.name))) ||
+      null;
+    if (!target) {
+      return { ok: false, selected: false, reason: 'group_top_name_unmatched' };
+    }
+  } else {
+    return { ok: false, selected: false, reason: 'group_top_no_target' };
+  }
+
+  // 対象サロンのリンクをクリックして店舗文脈に入る。
+  // salon ID は "H" + 数字なので属性セレクタで安全に指定できる。
+  try {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+      page.locator(`a[id="${target.id}"]`).first().click({ timeout: 8_000 }),
+    ]);
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  } catch (e2) {
+    return { ok: false, selected: false, reason: `store_click_failed: ${e2?.message ?? e2}`, salonId: target.id };
+  }
+
+  // クリック後もまだ groupTop に居る場合は失敗扱い。
+  const stillGroup = /\/CNC\/groupTop/i.test(page.url());
+  if (stillGroup) {
+    return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
+  }
+  return { ok: true, selected: true, salonId: target.id };
 }
 
 async function tryLogin(page, c) {
@@ -1821,6 +1948,32 @@ async function runPushJobs({ showBrowser } = {}) {
           return;
         }
         await saveStorageState(ctx, ssPath);
+      }
+
+      // グループ店舗(1ログイン複数サロン): /CNC/groupTop/ に着地したら対象サロンを選択。
+      // 単一店舗ログインなら no-op。失敗時は誤店舗への書き込みを避けて manual_required。
+      try {
+        const sel = await ensureStoreSelected(page, {
+          salonId: creds.salon_id ?? null,
+          shopName: job.shop_name ?? null,
+        });
+        if (!sel.ok) {
+          await postCallback({
+            job_id: job.id, job_type: job.job_type, status: 'manual_required',
+            booking_id: payload.booking_id, content_post_id: payload.content_post_id ?? null,
+            error_code: 'STORE_SELECT_REQUIRED',
+            error: `グループ店舗のサロン選択に失敗 (${sel.reason ?? 'unknown'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`,
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 サロン選択失敗: ${sel.reason}`, at: new Date().toISOString() });
+          await browser.close().catch(() => {});
+          return;
+        }
+        if (sel.selected) {
+          emit('log', { level: 'info', msg: `[${tag}] サロン選択: ${sel.salonId ?? ''}`, at: new Date().toISOString() });
+        }
+      } catch (e) {
+        emit('log', { level: 'warn', msg: `[${tag}] store-select error: ${e?.message ?? e}`, at: new Date().toISOString() });
       }
 
       // ジョブ種別で分岐: push_blog=ブログ投稿 / delete_blog=ブログ削除 /

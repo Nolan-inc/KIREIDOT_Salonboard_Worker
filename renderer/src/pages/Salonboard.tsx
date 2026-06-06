@@ -870,6 +870,8 @@ export function EditModal({
   // パスワードは「入力ミスを目で確認したい」運用なのでデフォルトで平文表示
   const [showPassword, setShowPassword] = useState(true);
   const [baseUrl, setBaseUrl] = useState(row.base_url ?? 'https://salonboard.com/login/');
+  // グループ店舗(1ログイン複数サロン)用の SalonBoard サロンID (H000...)。任意。
+  const [salonId, setSalonId] = useState(row.salonboard_salon_id ?? '');
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(row.has_credential);
@@ -891,6 +893,7 @@ export function EditModal({
         setLoginId(r.loginId);
         setPassword(r.password);
         if (r.baseUrl) setBaseUrl(r.baseUrl);
+        if (r.salonId) setSalonId(r.salonId);
       } else {
         setRevealError(r.error);
       }
@@ -918,6 +921,7 @@ export function EditModal({
       loginId: loginId.trim(),
       password,
       baseUrl: baseUrl.trim() || null,
+      salonId: salonId.trim() || null,
     });
     setPending(false);
     if (!r.ok) {
@@ -998,6 +1002,23 @@ export function EditModal({
             />
             <p className="mt-1 text-[10px] text-ink-soft">
               通常はデフォルトのままで OK。ステージング環境がある場合のみ変更してください。
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] font-semibold text-ink-soft">
+              サロンID (グループ店舗のみ・任意)
+            </label>
+            <input
+              type="text"
+              autoComplete="off"
+              value={salonId}
+              onChange={(e) => setSalonId(e.target.value)}
+              placeholder="例: H000650996"
+              className="w-full rounded-[10px] border border-hairline bg-white px-3 py-2 font-mono text-[13px] outline-none focus:border-brand"
+            />
+            <p className="mt-1 text-[10px] text-ink-soft">
+              1つのログインで複数サロンを管理している場合のみ入力してください。ログイン後の
+              「サロン選択」画面で、このIDのサロンを自動で選びます。単一店舗なら空欄でOK。
             </p>
           </div>
           {err && (
