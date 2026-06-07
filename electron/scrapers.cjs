@@ -4291,19 +4291,28 @@ async function ensureSalonSelected(page, opts = {}) {
     else return { ok: false, selected: false, reason: 'group_top_no_target' };
   }
 
+  // サロンのリンクは <a href="javascript:void(0);" id="H..."> で、クリックで
+  // JS(フォームPOST/AJAX)経由で店舗文脈に入る。クリック → 遷移待ち。
+  // 遷移が起きないケースに備え、URL 変化 or groupTop 離脱のいずれかを待つ。
+  const beforeUrl = page.url();
   try {
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
-      page.locator(`a[id="${target.id}"]`).first().click({ timeout: 8_000 }),
-    ]);
-    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    await page.locator(`a[id="${target.id}"]`).first().click({ timeout: 8_000 });
   } catch (e2) {
     return { ok: false, selected: false, reason: `store_click_failed: ${e2?.message ?? e2}`, salonId: target.id };
   }
+  // 遷移 or URL変化を最大15秒待つ (javascript:void リンクなので load イベントに頼らない)。
+  await page.waitForFunction(
+    (prev) => location.href !== prev || !/\/CNC\/groupTop/i.test(location.href),
+    beforeUrl,
+    { timeout: 15_000 },
+  ).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
 
   if (/\/CNC\/groupTop/i.test(page.url())) {
     return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
   }
+  // サロン選択は POST→セッション確定→リダイレクトのため、直後の goto で戻されないよう少し待つ。
+  await page.waitForTimeout(1200);
   return { ok: true, selected: true, salonId: target.id };
 }
 
