@@ -642,7 +642,15 @@ async function scrapeHairBookings(page, opts = {}) {
     }
     try {
       await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      // networkidle は SalonBoard の常時稼働するトラッキング script のため
+      // ほぼ毎回 12s 全部待ってしまい、1日めくるのに 5〜10s かかる原因だった。
+      // スケジュールはサーバーレンダリング(初期HTMLに #scheduleItemArea / 予約ブロックが
+      // 入っている)なので、networkidle は待たず「スケジュール領域 or 予約ブロックの出現」
+      // だけを最大 3.5s 待つ。出現したら即抽出に進む。
+      await page.waitForSelector(
+        '#scheduleItemArea, #stylistScheduleArea, div.panel_reserve[id^="reserve_item_"], div.mod_btn_22[id^="stylist_"]',
+        { timeout: 3_500 },
+      ).catch(() => {});
     } catch (_e) {
       diag.push(`hair: ${ymd} goto失敗`);
       continue;
@@ -737,12 +745,12 @@ async function scrapeHairBookings(page, opts = {}) {
     }
     if (added > 0) diag.push(`hair ${ymd}: ${added}件`);
 
-    // 日付めくりの間隔を一定にしない (人手の操作に近づける)。
-    // 0.5〜2.0秒の範囲でばらつかせ、中央(約1秒)が出やすいよう三角分布気味にする。
-    // 最終日(これ以上めくらない)は待たない。
+    // 日付めくりの間隔を一定にしない (人手の操作に近づける/BAN回避)。
+    // ユーザー要望でテンポを上げる: 0.3〜1.2秒(中央 約0.7秒)。三角分布気味で
+    // 値が揃いすぎないようにする。最終日(これ以上めくらない)は待たない。
     if (i < MAX_DAYS - 1) {
       const r = (Math.random() + Math.random()) / 2; // 0..1, 0.5中心
-      const waitMs = Math.round(500 + r * 1500); // 500〜2000ms
+      const waitMs = Math.round(300 + r * 900); // 300〜1200ms
       await page.waitForTimeout(waitMs).catch(() => {});
     }
   }
