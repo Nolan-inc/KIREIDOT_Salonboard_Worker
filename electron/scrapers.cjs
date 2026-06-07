@@ -638,28 +638,40 @@ async function scrapeHairBookings(page, opts = {}) {
     { slashFrom, slashTo, ymdFrom, ymdTo },
   ).catch(() => {});
 
-  // 2) 「検索する」を押す。
-  const searchBtn = page
-    .locator('a:has-text("検索する"), button:has-text("検索する"), input[type="submit"][value*="検索"], a.mod_btn_76:has-text("検索")')
-    .first();
-  if ((await searchBtn.count().catch(() => 0)) > 0) {
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
-      searchBtn.click({ timeout: 8_000 }).catch(() => {}),
-    ]);
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
-    diag.push('hair: 検索する クリック');
-  } else {
-    diag.push('hair: 検索ボタン未検出');
+  // 2) 検索前の画面 (検索フォーム) を capture しておく。検索クリックで万一クラッシュ
+  //    しても、フォームの DOM だけは確実に残す。
+  const capForm = await captureScrapeDebug(page, 'bookings', 'hair_form', {
+    diagnostics: { url: page.url(), range: `${slashFrom} 〜 ${slashTo}` },
+  }).catch(() => null);
+  if (capForm) diag.push(`hair form capture: ${capForm}`);
+
+  // 3) 「検索する」を押す。クリックでフルナビゲーションが起きるため、評価中の
+  //    "Execution context destroyed" を避けるよう click 後に確実に待つ。
+  try {
+    const searchBtn = page
+      .locator('a:has-text("検索する"), button:has-text("検索する"), input[type="submit"][value*="検索"], a.mod_btn_76:has-text("検索")')
+      .first();
+    if ((await searchBtn.count().catch(() => 0)) > 0) {
+      await searchBtn.click({ timeout: 8_000 }).catch(() => {});
+      // ナビゲーション完了をゆるく待つ (load → networkidle、いずれもタイムアウト無視)。
+      await page.waitForLoadState('load', { timeout: 20_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      diag.push('hair: 検索する クリック');
+    } else {
+      diag.push('hair: 検索ボタン未検出');
+    }
+  } catch (e) {
+    diag.push(`hair: 検索クリックでエラー: ${e?.message ?? e}`);
   }
 
-  // 3) 結果ページを capture (DOM 確定用)。これがあれば明細セレクタを実装できる。
+  // 4) 結果ページを capture (明細 DOM 確定用)。これがあれば明細セレクタを実装できる。
   const capDir = await captureScrapeDebug(page, 'bookings', 'hair_result', {
     diagnostics: { url: page.url(), range: `${slashFrom} 〜 ${slashTo}` },
   }).catch(() => null);
   if (capDir) diag.push(`hair result capture: ${capDir}`);
 
-  // 4) 取れる範囲で明細抽出 (汎用: 行に来店日時/顧客名/予約番号 B... があるテーブルを探す)。
+  // 5) 取れる範囲で明細抽出 (汎用: 行に来店日時/顧客名/予約番号 B... があるテーブルを探す)。
   const items = await page.evaluate(() => {
     const txt = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '');
     const tables = Array.from(document.querySelectorAll('table'));

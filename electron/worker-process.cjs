@@ -40,6 +40,26 @@ const {
   deleteBlogViaForm,
 } = require('./scrapers.cjs');
 
+// プロセス全体のクラッシュ防止:
+// スクレイピング中の未捕捉の例外/Promise reject (Playwright の
+// "Execution context was destroyed" 等) が utilityProcess を即死させ、
+// 表示中のブラウザごと強制終了する事故を防ぐ。ログに残して継続する。
+process.on('unhandledRejection', (reason) => {
+  try {
+    const msg = reason && reason.message ? reason.message : String(reason);
+    emit('log', { level: 'error', msg: `unhandledRejection: ${msg}`, at: new Date().toISOString() });
+  } catch (_e) {
+    /* emit 自体が失敗してもプロセスは落とさない */
+  }
+});
+process.on('uncaughtException', (err) => {
+  try {
+    emit('log', { level: 'error', msg: `uncaughtException: ${err?.message ?? err}`, at: new Date().toISOString() });
+  } catch (_e) {
+    /* noop */
+  }
+});
+
 let supabase = null;
 let initReady = false;
 let initPromise = null;
