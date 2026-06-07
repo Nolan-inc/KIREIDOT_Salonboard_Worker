@@ -323,6 +323,59 @@ export async function fetchStyleList(scope: StaffScope): Promise<StyleRow[]> {
   })) as StyleRow[];
 }
 
+// 選択中店舗のジャンル (hair / esthetic / ...) を取得する。
+export async function fetchShopGenre(scope: StaffScope): Promise<string | null> {
+  if (!scope.shopId) return null;
+  const { data, error } = await supabase
+    .from('shops')
+    .select('genre')
+    .eq('id', scope.shopId)
+    .maybeSingle();
+  if (error) {
+    console.warn('[data] fetchShopGenre error:', error.message);
+    return null;
+  }
+  return (data as any)?.genre ?? null;
+}
+
+// =========================
+// salonboard_photo_gallery_imports を読む (エステ等のフォトギャラリー同期で投入)。
+// =========================
+export type PhotoGalleryRow = {
+  id: string;
+  external_id: string;
+  title: string | null;
+  caption: string | null;
+  image_url: string | null;
+  genre_code: string | null;
+  is_published: boolean;
+  last_synced_at: string | null;
+};
+
+export async function fetchPhotoGalleryList(scope: StaffScope): Promise<PhotoGalleryRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_photo_gallery_imports')
+    .select('id, external_id, title, caption, image_url, genre_code, is_published, last_synced_at')
+    .eq('shop_id', scope.shopId)
+    .order('last_synced_at', { ascending: false, nullsFirst: false })
+    .limit(100);
+  if (error) {
+    console.warn('[data] fetchPhotoGalleryList error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    external_id: r.external_id,
+    title: r.title ?? null,
+    caption: r.caption ?? null,
+    image_url: r.image_url ?? null,
+    genre_code: r.genre_code ?? null,
+    is_published: r.is_published !== false,
+    last_synced_at: r.last_synced_at ?? null,
+  })) as PhotoGalleryRow[];
+}
+
 // =========================
 // メニュー統合一覧 (SalonBoard取得 + KIREIDOT) — 出所付きで両方表示
 // =========================

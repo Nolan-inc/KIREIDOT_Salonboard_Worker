@@ -2719,6 +2719,84 @@ async function scrapeStyles(page, _opts = {}) {
   return { rows, debug: { itemsFound: rows.length, genre: 'hair', source: 'styleList', max: MAX_STYLES } };
 }
 
+// =====================================================================
+// エステ等「フォトギャラリー」(/CNK/draft/photoGalleryEdit) を取得する。
+// 編集フォーム(form#photoGalleryEditForm)の「画像が入っている枠」を読み取り、
+// 画像URL/タイトル/キャプション/ジャンル/掲載状態を抽出する。最大100件。
+// 実DOM: salonboard_code/エステサロン/フォトギャラリー_photoGalleryEdit.html
+// =====================================================================
+async function scrapePhotoGallery(page, _opts = {}) {
+  const MAX_ITEMS = 100;
+  let url;
+  try { url = new URL('/CNK/draft/photoGalleryEdit', 'https://salonboard.com').toString(); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+  const pageData = await page.evaluate(() => {
+    function txt(el) { return el ? (el.textContent || '').trim() : ''; }
+    const re = /^frmPhotoGalleryInfoDtoList\[(\d+)\]\.photogalleryPhoto$/;
+    const hidden = Array.from(document.querySelectorAll('input.jscPhotogalleryPhotoId, input[name$=".photogalleryPhoto"]'));
+    const items = [];
+    for (const el of hidden) {
+      const m = (el.getAttribute('name') || '').match(re);
+      if (!m) continue;
+      const idx = m[1];
+      const photoId = String(el.value || '').trim();
+      if (!photoId) continue; // 空き枠はスキップ
+      const q = (suffix) => document.querySelector(`[name="frmPhotoGalleryInfoDtoList[${idx}].${suffix}"]`);
+      const titleEl = q('photogalleryTitle');
+      const capEl = q('photogalleryCaption');
+      const genreEl = q('photogalleryGenreCd');
+      const storeIdEl = q('storePhotogalleryId');
+      const presentEl = document.querySelector(`input[name="frmPhotoGalleryInfoDtoList[${idx}].photogalleryPresentFlg"]:checked`);
+      // 画像 img: 同じ枠の jscPhotogalleryPhotoImg。
+      let imgUrl = '';
+      const imgEl = document.querySelector(`img[name="frmPhotoGalleryInfoDtoList[${idx}].photogalleryPhoto_IMG"]`)
+        || (el.closest('table') ? el.closest('table').querySelector('img.jscPhotogalleryPhotoImg') : null);
+      if (imgEl) imgUrl = imgEl.getAttribute('src') || '';
+      items.push({
+        external_id: photoId,
+        image_external_id: photoId,
+        store_photogallery_id: storeIdEl ? String(storeIdEl.value || '').trim() : '',
+        title: titleEl ? (titleEl.value || '') : '',
+        caption: capEl ? (capEl.value || '') : '',
+        genre_code: genreEl ? (genreEl.value || '') : '',
+        is_published: presentEl ? presentEl.value === '1' : true,
+        image_url: imgUrl,
+      });
+    }
+    return { items };
+  });
+
+  const normalizeImage = (raw) => {
+    if (!raw) return { url: null, id: null };
+    let u = String(raw).replace(/&amp;/g, '&').trim();
+    if (u.includes('noneimage')) return { url: null, id: null }; // プレースホルダ
+    try { u = new URL(u, 'https://imgbp.salonboard.com').toString(); } catch (_e) { /* keep */ }
+    u = u.replace(/([?&])w=\d+/i, '$1w=360').replace(/([?&])h=\d+/i, '$1h=480');
+    const m = u.match(/\/(C\d{6,})\//) || u.match(/\/(C\d{6,})\.[a-z]+/i);
+    return { url: u, id: m ? m[1] : null };
+  };
+
+  const rows = (pageData.items ?? [])
+    .filter((it) => it.external_id)
+    .slice(0, MAX_ITEMS)
+    .map((it) => {
+      const img = normalizeImage(it.image_url);
+      return {
+        external_id: String(it.external_id),
+        title: cleanText(it.title) || null,
+        caption: cleanText(it.caption) || null,
+        image_url: img.url,
+        image_external_id: img.id || it.image_external_id || null,
+        genre_code: it.genre_code || null,
+        is_published: it.is_published !== false,
+      };
+    });
+
+  return { rows, debug: { itemsFound: rows.length, genre: 'esthetic', source: 'photoGalleryEdit', max: MAX_ITEMS } };
+}
+
 async function scrapeStaff(page, opts = {}) {
   // ジャンル別分岐: 美容室(hair)はスタッフではなく「スタイリスト一覧」を取得する。
   // 他ジャンル(esthetic/nail/eyelash/other)は従来のスタッフ一覧 (/CNK/draft/staffList)。
@@ -4672,6 +4750,7 @@ module.exports = {
   postBlogViaForm,
   deleteBlogViaForm,
   postPhotoGalleryViaForm,
+  scrapePhotoGallery,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

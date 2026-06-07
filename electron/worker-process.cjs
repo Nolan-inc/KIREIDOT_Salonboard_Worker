@@ -39,6 +39,7 @@ const {
   postBlogViaForm,
   deleteBlogViaForm,
   postPhotoGalleryViaForm,
+  scrapePhotoGallery,
 } = require('./scrapers.cjs');
 
 // プロセス全体のクラッシュ防止:
@@ -1040,6 +1041,17 @@ async function processShop(target, channels, runId, opts = {}) {
           } catch (e) {
             emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] style import error: ${e instanceof Error ? e.message : e}`, at: new Date().toISOString() });
           }
+        } else {
+          // エステ等(非hair)はフォトギャラリーを画像付きで salonboard_photo_gallery_imports に保存。
+          // (フォトギャラリー画面で「SalonBoard フォトギャラリー一覧」を表示するため)。最大100件。
+          try {
+            emit('shop:progress', { shopId, step: 'menus', msg: 'フォトギャラリーを取得中…' });
+            const { rows: galleryRows } = await scrapePhotoGallery(page, { genre });
+            const sentGallery = await sendPhotoGalleries(shopId, galleryRows);
+            emit('shop:progress', { shopId, step: 'menus', msg: `フォトギャラリー ${sentGallery} 件保存` });
+          } catch (e) {
+            emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] photo gallery import error: ${e instanceof Error ? e.message : e}`, at: new Date().toISOString() });
+          }
         }
         summary.push(`${menuLabel} ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
         emit('shop:progress', { shopId, step: 'menus', msg: `${menuLabel} ${sent} 件保存` });
@@ -1797,6 +1809,41 @@ async function sendStyles(shopId, rows) {
     emit('log', {
       level: 'error',
       msg: `bulk_upsert_styles: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
+/**
+ * エステ等のフォトギャラリー(scrapePhotoGallery の rows)を
+ * salonboard_photo_gallery_imports に upsert する。最大100件。
+ * 予約同期くん/Admin のフォトギャラリー画面で画像付き一覧表示する。
+ */
+async function sendPhotoGalleries(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const valid = rows
+    .filter((r) => r.external_id)
+    .slice(0, 100)
+    .map((r) => ({
+      external_id: r.external_id,
+      title: r.title ?? null,
+      caption: r.caption ?? null,
+      image_url: r.image_url ?? null,
+      image_external_id: r.image_external_id ?? null,
+      genre_code: r.genre_code ?? null,
+      is_published: r.is_published !== false,
+    }));
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_photo_galleries', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_photo_galleries: ${error.message}`,
       at: new Date().toISOString(),
     });
     return 0;

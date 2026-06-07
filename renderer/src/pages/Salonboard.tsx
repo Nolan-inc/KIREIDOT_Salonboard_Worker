@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  Image as ImageIcon,
   Loader2,
   Lock,
   Moon,
@@ -823,11 +824,11 @@ function ShopCredentialCard({
               { ch: 'bookings' as const, label: '予約', icon: <CalendarRange className="h-2.5 w-2.5" /> },
               { ch: 'staff' as const, label: 'スタッフ', icon: <Users className="h-2.5 w-2.5" /> },
               { ch: 'menus' as const, label: 'メニュー', icon: <BookOpen className="h-2.5 w-2.5" /> },
-              // 美容室(hair)はスタイル一覧 (styleList) を取得できる。スタイルは menus
-              // チャネルで取得され、salonboard_style_imports に画像付きで保存される。
+              // 美容室(hair)=スタイル / それ以外(エステ等)=フォトギャラリー を取得できる。
+              // どちらも menus チャネルで取得され、画像付きで *_imports に保存される。
               ...(row.shop_genre === 'hair'
                 ? [{ ch: 'menus' as const, label: 'スタイル', icon: <Scissors className="h-2.5 w-2.5" /> }]
-                : []),
+                : [{ ch: 'menus' as const, label: 'フォトギャラリー', icon: <ImageIcon className="h-2.5 w-2.5" /> }]),
               { ch: 'coupons' as const, label: 'クーポン', icon: <Ticket className="h-2.5 w-2.5" /> },
               { ch: 'shifts' as const, label: 'シフト', icon: <CalendarClock className="h-2.5 w-2.5" /> },
               { ch: 'blog' as const, label: 'ブログ', icon: <Newspaper className="h-2.5 w-2.5" /> },

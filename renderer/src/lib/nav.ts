@@ -84,8 +84,8 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     key: 'styles',
-    label: 'スタイル',
-    description: 'SalonBoard から取得した美容室スタイル一覧',
+    label: 'スタイル/ギャラリー',
+    description: 'SalonBoard 取得の美容室スタイル / エステ等フォトギャラリー一覧',
     icon: Scissors,
   },
   {
