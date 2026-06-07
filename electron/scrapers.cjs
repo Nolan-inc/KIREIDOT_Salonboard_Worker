@@ -4106,6 +4106,310 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
   return fail(`ブログ削除の完了を確認できませんでした (blogId=${blogId}, capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
 }
 
+// =====================================================================
+// フォトギャラリー投稿 (push_photo_gallery)
+//
+// 投稿先は payload.kind で分岐:
+//   - "photo_gallery" (エステ等) … /CNK/draft/photoGalleryEdit の空き枠に
+//        画像 + タイトル + キャプション + ジャンル + 掲載 を入れて一括登録(doRegister)。
+//   - "style" (美容室)          … /CNB の「スタイル新規追加」。
+//        ※登録フォームの実DOM未取得のため現状は manual_required で保留 (capture を残す)。
+//
+// payload: {
+//   gallery_id, kind, genre,
+//   image_url,            // 先頭画像(カバー)の公開URL ← これを1枚アップロードする
+//   images: string[],     // 全画像URL (将来複数枠対応用)
+//   title?, caption?, author_external_id?
+// }
+// opts: { baseUrl, enablePost }  enablePost=false なら確認まで(登録確定しない)。
+// 戻り値: { status:'ok', externalId? } | { status:'confirm_only' } | { status:'failed', reason, errorCode, manualRequired }
+// =====================================================================
+
+const PHOTO_GALLERY_EDIT_URL = 'https://salonboard.com/CNK/draft/photoGalleryEdit';
+
+/**
+ * 公開URLの画像を一時ファイルにダウンロードする。
+ * 戻り値: { file, cleanup } | null
+ */
+async function downloadImageToTmp(page, url, tag) {
+  try {
+    const resp = await page.context().request.get(url, { timeout: 20_000 });
+    if (!resp.ok()) {
+      await captureScrapeDebug(page, tag, 'image_download_failed', {
+        diagnostics: { url, status: resp.status() },
+      }).catch(() => {});
+      return null;
+    }
+    const buf = await resp.body();
+    const ct = (resp.headers()['content-type'] || '').toLowerCase();
+    let ext = 'jpg';
+    if (ct.includes('png')) ext = 'png';
+    else if (ct.includes('gif')) ext = 'gif';
+    else if (ct.includes('webp')) ext = 'webp';
+    else {
+      const um = String(url).split('?')[0].match(/\.(jpe?g|png|gif|webp)$/i);
+      if (um) ext = um[1].toLowerCase().replace('jpeg', 'jpg');
+    }
+    const file = path.join(os.tmpdir(), `sb_${tag}_${Date.now()}.${ext}`);
+    fs.writeFileSync(file, buf);
+    return { file, cleanup: () => { try { fs.unlinkSync(file); } catch (_e) { /* noop */ } } };
+  } catch (e) {
+    await captureScrapeDebug(page, tag, 'image_download_error', {
+      diagnostics: { url, error: e?.message ?? String(e) },
+    }).catch(() => {});
+    return null;
+  }
+}
+
+async function postPhotoGalleryViaForm(page, payload, opts = {}) {
+  const p = payload || {};
+  const kind = p.kind === 'style' ? 'style' : 'photo_gallery';
+  if (kind === 'style') {
+    return postHairStyleViaForm(page, payload, opts);
+  }
+  return postEstheticPhotoGalleryViaForm(page, payload, opts);
+}
+
+// ---- エステ等: /CNK/draft/photoGalleryEdit ----
+async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePost = opts.enablePost !== false;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const imageUrl = (p.image_url && String(p.image_url)) ||
+    (Array.isArray(p.images) && p.images.length ? String(p.images[0]) : '');
+  if (!imageUrl) return fail('フォトギャラリーの画像URLが空です', 'UNKNOWN_ERROR', true);
+
+  const title = (p.title && String(p.title).trim()) || '';
+  const caption = (p.caption && String(p.caption).trim()) || '';
+
+  let formUrl;
+  try { formUrl = new URL('/CNK/draft/photoGalleryEdit', baseUrl).toString(); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
+  await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if ((await page.locator('form#photoGalleryEditForm').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'no_form', { diagnostics: { url: page.url(), title: await page.title().catch(() => '') } });
+    return fail(`フォトギャラリー編集フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 1) 空き枠の index を特定 (jscPhotogalleryPhotoId の value が空の最小 index)。
+  //    無ければ「入力欄を追加する」(jscAddRow) を押して dn 枠を増やしてから再探索。
+  const findEmpty = async () => page.evaluate(() => {
+    const els = Array.from(document.querySelectorAll('input.jscPhotogalleryPhotoId'));
+    for (const el of els) {
+      const m = (el.getAttribute('name') || '').match(/^frmPhotoGalleryInfoDtoList\[(\d+)\]\.photogalleryPhoto$/);
+      if (!m) continue;
+      if (!String(el.value || '').trim()) return Number(m[1]);
+    }
+    return -1;
+  });
+  let idx = await findEmpty();
+  if (idx < 0) {
+    // 入力欄を追加して空き枠を作る
+    const addBtn = page.locator('a.jscAddRow').first();
+    if ((await addBtn.count().catch(() => 0)) > 0) {
+      await addBtn.click({ timeout: 6_000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      idx = await findEmpty();
+    }
+  }
+  if (idx < 0) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'no_empty_slot', { diagnostics: { url: page.url() } });
+    return fail(`フォトギャラリーの空き枠が見つかりませんでした (上限に達している可能性。capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  const nameOf = (field) => `frmPhotoGalleryInfoDtoList[${idx}].${field}`;
+  // 該当枠の table を特定 (画像ID hidden の closest table)。
+  const rowTable = page.locator(`input[name="${nameOf('photogalleryPhoto')}"]`).first()
+    .locator('xpath=ancestor::table[contains(@class,"jscTableBody")][1]');
+
+  // dn(display:none) の枠だと操作できないので外す + 画面内へスクロール。
+  await rowTable.evaluate((el) => { el.classList.remove('dn'); el.scrollIntoView({ block: 'center' }); }).catch(() => {});
+
+  // 2) 画像をダウンロード → 枠のアップロードUIで添付。
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
+  if (!dl) {
+    return fail('フォトギャラリー画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
+  }
+  const uploaded = await uploadPhotoGallerySlotImage(page, idx, rowTable, dl.file);
+  dl.cleanup();
+  if (!uploaded.ok) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'image_upload_unconfirmed', { diagnostics: { url: page.url(), idx, reason: uploaded.reason } });
+    return fail(`フォトギャラリー画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 3) タイトル(任意 30字) / キャプション(任意 60字) を入力。
+  if (title) {
+    await page.locator(`input[name="${nameOf('photogalleryTitle')}"]`).first()
+      .fill(title.slice(0, 30), { timeout: 6_000 }).catch(() => {});
+  }
+  if (caption) {
+    await page.locator(`textarea[name="${nameOf('photogalleryCaption')}"]`).first()
+      .fill(caption.slice(0, 60), { timeout: 6_000 }).catch(() => {});
+  }
+
+  // 4) ジャンル: defaultGenreCd があればそれ、無ければ最初の非空 option を選ぶ。
+  {
+    const genreSel = page.locator(`select[name="${nameOf('photogalleryGenreCd')}"]`).first();
+    if ((await genreSel.count().catch(() => 0)) > 0) {
+      const def = await page.locator(`input[name="${nameOf('defaultGenreCd')}"]`).first()
+        .inputValue().catch(() => '');
+      let picked = false;
+      if (def && def.trim()) {
+        picked = await genreSel.selectOption({ value: def.trim() }).then(() => true).catch(() => false);
+      }
+      if (!picked) {
+        await genreSel.evaluate((el) => {
+          const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
+          if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // 5) 掲載 radio = 1 (常に掲載)。
+  await page.locator(`input[name="${nameOf('photogalleryPresentFlg')}"][value="1"]`).first()
+    .check({ timeout: 4_000 }).catch(() => {});
+
+  if (!enablePost) {
+    return { status: 'confirm_only' };
+  }
+
+  // 6) 「登録」(img.jscButtonRegister) を押して doRegister。
+  //    ネイティブ confirm が出る実装にも備える。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let clickedRegister = false;
+  try {
+    const regBtn = page.locator('img.jscButtonRegister, .jscButtonRegister').first();
+    if ((await regBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'no_register', { diagnostics: { url: page.url() } });
+      return fail(`フォトギャラリーの「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      regBtn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    clickedRegister = true;
+    await page.waitForTimeout(1500);
+    // 確認画面に「登録する」等が出る場合は最終確定を押す (出なければ no-op)。
+    const finalBtn = page.locator('a:has-text("登録する"):visible, a.accept:visible, input[type="submit"][value*="登録"]:visible, img.jscButtonRegister:visible').first();
+    if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1200);
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'photo_gallery', 'after', { diagnostics: { clickedRegister, nativeDialogAccepted, idx, url: page.url() } });
+
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /登録しました|保存しました|完了|反映しました|受け付け/.test(bodyText)
+    || /photoGalleryEdit\/(complete|done)/.test(page.url());
+  const looksError = /エラー|失敗|入力してください|必須|上限/.test(bodyText) && !looksDone;
+  if (looksError) {
+    return fail(`フォトギャラリー登録でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須|上限).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !clickedRegister && !nativeDialogAccepted) {
+    return fail(`フォトギャラリー登録の完了を確認できませんでした (capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+
+  // external_id: 割り当てられた画像ID(C...) を回収できれば返す。
+  let externalId = uploaded.imageId || null;
+  return { status: 'ok', externalId };
+}
+
+/**
+ * photoGalleryEdit の指定枠(idx)に画像を1枚アップロードする。
+ * 枠の「アップロード」UI (mod_btn_upload / jscUploadImg) をクリックし、
+ * file chooser かモーダル内 input[type=file] に setInputFiles。
+ * 完了は jscPhotogalleryPhotoId(value=画像ID C...) が入るかで判定する。
+ * 戻り値: { ok, imageId?, reason? }
+ */
+async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
+  const idHidden = page.locator(`input[name="frmPhotoGalleryInfoDtoList[${idx}].photogalleryPhoto"]`).first();
+  const before = await idHidden.inputValue().catch(() => '');
+
+  // クリックで file chooser が直接開くケースに備える
+  let chooserDone = false;
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
+    await chooser.setFiles(file).catch(() => {});
+    chooserDone = true;
+  }).catch(() => { /* モーダル方式 */ });
+
+  // アップロードトリガー (枠内のアップロードボタン → 無ければ画像エリア)。
+  const trigger = rowTable.locator('img.mod_btn_upload, a.jscUploadImg, .jscUploadImg').first();
+  if ((await trigger.count().catch(() => 0)) === 0) {
+    return { ok: false, reason: 'no_upload_trigger' };
+  }
+  await trigger.click({ timeout: 8_000 }).catch(() => {});
+  await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
+
+  // file chooser で入らなかったらモーダル/直 input にセット。
+  if (!chooserDone) {
+    await page.waitForTimeout(700);
+    const fileInput = page.locator('input[type="file"]:visible, .modal input[type="file"], input[type="file"]').first();
+    if ((await fileInput.count().catch(() => 0)) > 0) {
+      await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      // モーダルに「登録する」「アップロード」等があれば押す (最前面 visible に限定)。
+      const okBtn = page.locator('a:visible:has-text("登録する"), button:visible:has-text("登録する"), a:visible:has-text("アップロード"), button:visible:has-text("アップロード"), input[type="submit"][value*="登録"]:visible').first();
+      if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
+        await okBtn.click({ timeout: 8_000 }).catch(() => {});
+      }
+    } else {
+      return { ok: false, reason: 'no_file_input' };
+    }
+  }
+
+  // 完了判定: 当該枠の photogalleryPhoto hidden に新しい画像ID(C...) が入る。
+  const done = await page.waitForFunction(({ i, prev }) => {
+    const el = document.querySelector(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryPhoto"]`);
+    const v = el ? (el.value || '') : '';
+    return !!v && v !== prev;
+  }, { i: idx, prev: before }, { timeout: 15_000 }).then(() => true).catch(() => false);
+
+  if (!done) return { ok: false, reason: 'imageId_not_set' };
+  const imageId = await idHidden.inputValue().catch(() => '');
+  return { ok: true, imageId: (imageId || '').trim() || null };
+}
+
+// ---- 美容室: /CNB スタイル新規追加 (フォームDOM未取得につき保留) ----
+async function postHairStyleViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  // スタイル一覧まで遷移して「スタイル新規追加」画面を開き、debug capture を残す。
+  // 実装は登録フォームの実DOM取得後 (salonboard_code/美容室/スタイル登録_styleEdit.html)。
+  try {
+    const listUrl = new URL('/CNB/draft/styleList/', baseUrl).toString();
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    const addBtn = page.locator('a:has(img[alt="スタイル新規追加"]), a[onclick*="addStyle"]').first();
+    if ((await addBtn.count().catch(() => 0)) > 0) {
+      await addBtn.click({ timeout: 8_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    }
+  } catch (_e) { /* noop */ }
+  const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_style_pending', {
+    diagnostics: { url: page.url(), note: '美容室スタイル登録フォームのDOM未対応。capture を salonboard_code/美容室/スタイル登録_styleEdit.html として共有してください。' },
+  }).catch(() => null);
+  return {
+    status: 'failed',
+    reason: `美容室のスタイル自動投稿は準備中です (登録フォームDOM未対応, capture=${cap || '?'})。SalonBoard で手動投稿してください。`,
+    errorCode: 'NOT_IMPLEMENTED',
+    manualRequired: true,
+  };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
@@ -4119,6 +4423,7 @@ module.exports = {
   changeBookingViaForm,
   postBlogViaForm,
   deleteBlogViaForm,
+  postPhotoGalleryViaForm,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

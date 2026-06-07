@@ -1,0 +1,123 @@
+<!--
+  エステ等 フォトギャラリー編集  https://salonboard.com/CNK/draft/photoGalleryEdit
+  POST 先: /CNK/draft/photoGalleryEdit/doRegister  (form#photoGalleryEditForm)
+
+  ■ 構造の要点 (実DOM 2026-06-07 取得・抜粋。全100行は容量のため割愛、構造は下記で確定)
+  - 既存の枠が最大100行 (frmPhotoGalleryInfoDtoList[0..99]) 並ぶ「一括編集」フォーム。
+    既存写真は [0..N] に埋まっており、空き行 (photogalleryPhoto が空 & jscPhglPhotoNotEmptyFlg=0) に
+    新規写真を入れて「登録」する方式。先頭の空き行 = jscPhotogalleryPhotoId(value 空) の最小 index。
+  - フォーム hidden:
+      input[name="_csrf"]
+      input[name="photoGalleryLastUpDate"] value="20260428103119"  ← 楽観ロック。送信時そのまま返す。
+      input[name="STORE_ID"] value="H000811410"
+      input[name="storeGenreList[0..]"] value="GR01"/"GR06"  ← 店舗が持つジャンル(リラク/エステ)。
+  - 1枠 = <table class="contentsCell jscTableBody w980"> (空き枠は class に " dn"(=display:none) が付く。
+    「入力欄を追加する」a.jscAddRow で dn を外して使える)。各枠の入力:
+      ・No.        input[name="frmPhotoGalleryInfoDtoList[i].photogallerySortNo"]  (表示順, 既定で連番)
+      ・画像       <a class="db jscUploadImg"><img class="jscPhotogalleryPhotoImg" ...></a>
+                   アップロードボタン <img class="mod_btn_upload">  (クリックでアップロードUI)
+                   画像ID表示 span.jscPhotogalleryPhotoStr / 確定値 input.jscPhotogalleryPhotoId
+                                 = name="frmPhotoGalleryInfoDtoList[i].photogalleryPhoto" (例 C058604740)
+                   空き枠は img src=".../noneimage_square.jpg"、jscPhotogalleryPhotoId.value="" 。
+      ・タイトル   input.jscPhotogalleryTitle = name="...photogalleryTitle" maxlength=30
+      ・キャプション textarea.jscPhotogalleryCaption = name="...photogalleryCaption" maxlength=60
+      ・ジャンル   select.jscGenreSelect = name="...photogalleryGenreCd"
+                     <option value="GR01">リラクゼーション</option>
+                     <option value="GR06">エステ</option>   ← 店舗ジャンルに依存。既定は defaultGenreCd。
+      ・掲載/非掲載 radio name="...photogalleryPresentFlg" value="1"(掲載 既定 checked) / "0"(非掲載)
+      ・検索用カテゴリ select.w250 = name="...photogallerySchCategoryCd"  (任意。SE22 フェイシャル等)
+      ・(ネイル系の項目 jscNailDesign / jscNailCatalog は class "dn" で非表示。エステ店では未使用)
+      ・クーポン   モーダル選択 (任意)。input.jsc_SB_modal_coupon_id = name="...couponId"
+  - 送信:
+      キャンセル <img class="jscButtonCancel">
+      登録       <img class="jscButtonRegister">    ← これを押すと doRegister へ POST。
+                 (上部・下部の2箇所にあるが同一 class)
+
+  ■ 自動投稿(push_photo_gallery)の実装方針 (postPhotoGalleryViaForm):
+    1. /CNK/draft/photoGalleryEdit を開く。
+    2. 空き枠(jscPhotogalleryPhotoId.value=="" の最小 index、無ければ a.jscAddRow を押して増やす)を特定。
+    3. その枠の画像アップロードUI(mod_btn_upload / jscUploadImg)で画像を添付し、
+       jscPhotogalleryPhotoId に画像ID(C...)が入るまで待つ(ブログの imagePath* 完了判定と同型)。
+    4. タイトル(任意 30字)・キャプション(任意 60字)・ジャンル(店舗の storeGenreList から既定/該当を選択)・
+       掲載 radio=1 を埋める。
+    5. jscButtonRegister を押して doRegister。完了文言で検証。external_id は割当てられた photogalleryPhoto(C...)
+       または storePhotogalleryId(PG...)を回収。
+-->
+<form action="/CNK/draft/photoGalleryEdit/doRegister" method="POST" id="photoGalleryEditForm">
+  <input type="hidden" name="_csrf" value="975974e9-...">
+  <input type="hidden" name="photoGalleryLastUpDate" value="20260428103119">
+  <input type="hidden" name="storeGenreList[0]" value="GR01">
+  <input type="hidden" name="storeGenreList[1]" value="GR06">
+  <input type="hidden" name="STORE_ID" value="H000811410">
+
+  <!-- 既存枠の例 (index 0, 画像あり) -->
+  <table class="contentsCell jscTableBody w980">
+    <tbody>
+      <tr>
+        <th class="th_item_store pl5 w69 jscTableNo">No.
+          <input type="text" name="frmPhotoGalleryInfoDtoList[0].photogallerySortNo" value="1">
+          <input type="hidden" name="frmPhotoGalleryInfoDtoList[0].storePhotogalleryId" class="jscStorePhotogalleryId" value="PG014465711">
+          <input type="hidden" name="frmPhotoGalleryInfoDtoList[0].defaultGenreCd" class="jscDefaultGenreCd" value="GR06">
+        </th>
+        <td class="jscImgArea">
+          <a class="db jscUploadImg"><img name="frmPhotoGalleryInfoDtoList[0].photogalleryPhoto_IMG" class="jscPhotogalleryPhotoImg" src=".../C058604740.jpg"></a>
+          <img src=".../kns_btn3_upload.gif" class="mod_btn_upload" alt="アップロード">
+          <img src=".../kns_btn3_del_C.gif" class="jscClearImg" alt="削除">
+          <span class="jscPhotogalleryPhotoStr" id="photogalleryPhoto0">C058604740</span>
+          <input type="hidden" name="frmPhotoGalleryInfoDtoList[0].photogalleryPhoto" class="jscPhotogalleryPhotoId" value="C058604740">
+        </td>
+        <th>タイトル</th>
+        <td><input name="frmPhotoGalleryInfoDtoList[0].photogalleryTitle" class="jscPhotogalleryTitle jscInputCount w301" maxlength="30" value="【パーソナルカウンセリング】"></td>
+      </tr>
+      <tr><th>キャプション</th><td><textarea class="jscPhotogalleryCaption jscInputCount w301" maxlength="60" name="frmPhotoGalleryInfoDtoList[0].photogalleryCaption">…</textarea></td></tr>
+      <tr><th>ジャンル</th><td>
+        <select name="frmPhotoGalleryInfoDtoList[0].photogalleryGenreCd" class="jscGenreSelect">
+          <option value="GR01">リラクゼーション</option>
+          <option value="GR06" selected>エステ</option>
+        </select></td>
+        <td class="jscPublication">
+          <label><input name="frmPhotoGalleryInfoDtoList[0].photogalleryPresentFlg" class="jscPublishRadio" value="1" type="radio" checked>掲載</label>
+          <label><input name="frmPhotoGalleryInfoDtoList[0].photogalleryPresentFlg" class="jscNoPublishRadio" value="0" type="radio">非掲載</label>
+        </td>
+      </tr>
+      <tr><th>検索用カテゴリ</th><td><select name="frmPhotoGalleryInfoDtoList[0].photogallerySchCategoryCd" class="w250">…SE22 フェイシャル等…</select></td></tr>
+    </tbody>
+  </table>
+
+  <!-- 空き枠の例 (index 9, 画像なし=ここに新規を入れる) -->
+  <table class="contentsCell jscTableBody w980">
+    <tbody>
+      <tr>
+        <th>No.
+          <input type="text" name="frmPhotoGalleryInfoDtoList[9].photogallerySortNo" value="10">
+          <input type="hidden" name="frmPhotoGalleryInfoDtoList[9].storePhotogalleryId" class="jscStorePhotogalleryId" value="">
+        </th>
+        <td class="jscImgArea">
+          <a class="db jscUploadImg"><img class="jscPhotogalleryPhotoImg" src=".../noneimage_square.jpg"></a>
+          <img class="mod_btn_upload" alt="アップロード">
+          <span class="jscPhotogalleryPhotoStr" id="photogalleryPhoto9"></span>
+          <input type="hidden" name="frmPhotoGalleryInfoDtoList[9].photogalleryPhoto" class="jscPhotogalleryPhotoId" value="">
+        </td>
+        <th>タイトル</th>
+        <td><input name="frmPhotoGalleryInfoDtoList[9].photogalleryTitle" class="jscPhotogalleryTitle" maxlength="30" value=""></td>
+      </tr>
+      <tr><th>キャプション</th><td><textarea name="frmPhotoGalleryInfoDtoList[9].photogalleryCaption" maxlength="60"></textarea></td></tr>
+      <tr><th>ジャンル</th><td>
+        <select name="frmPhotoGalleryInfoDtoList[9].photogalleryGenreCd" class="jscGenreSelect">
+          <option value=""></option>
+          <option value="GR01">リラクゼーション</option>
+          <option value="GR06">エステ</option>
+        </select></td>
+        <td class="jscPublication">
+          <label><input name="frmPhotoGalleryInfoDtoList[9].photogalleryPresentFlg" class="jscPublishRadio" value="1" type="radio" checked>掲載</label>
+          <label><input name="frmPhotoGalleryInfoDtoList[9].photogalleryPresentFlg" class="jscNoPublishRadio" value="0" type="radio">非掲載</label>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- 末尾の操作 -->
+  <a href="javascript:void(0);" class="btnAddInput jscAddRow">入力欄を追加する</a>
+  <img class="jscButtonCancel" alt="キャンセル">
+  <img class="jscButtonRegister" alt="登録">
+</form>

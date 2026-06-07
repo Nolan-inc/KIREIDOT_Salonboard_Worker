@@ -38,6 +38,7 @@ const {
   changeBookingViaForm,
   postBlogViaForm,
   deleteBlogViaForm,
+  postPhotoGalleryViaForm,
 } = require('./scrapers.cjs');
 
 // プロセス全体のクラッシュ防止:
@@ -279,7 +280,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -322,7 +323,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -2049,9 +2050,11 @@ async function runPushJobs({ showBrowser } = {}) {
       }
 
       // ジョブ種別で分岐: push_blog=ブログ投稿 / delete_blog=ブログ削除 /
+      // push_photo_gallery=フォトギャラリー投稿 /
       // cancel_booking=キャンセル / push_booking(action=update)=変更 / それ以外=新規登録
       const isBlog = job.job_type === 'push_blog';
       const isBlogDelete = job.job_type === 'delete_blog';
+      const isPhotoGallery = job.job_type === 'push_photo_gallery';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -2113,6 +2116,34 @@ async function runPushJobs({ showBrowser } = {}) {
             error_code: result.errorCode, error: result.reason, manual_required: toManual,
           });
           emit('log', { level: 'warn', msg: `[${tag}] ブログ: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isPhotoGallery) {
+        // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル[保留]) ----
+        const result = await postPhotoGalleryViaForm(page, payload, { baseUrl, enablePost: enablePush });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',
+            content_post_id: null,
+            external_id: result.externalId ?? null,
+            summary: 'push_photo_gallery 投稿完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ フォトギャラリー投稿完了${result.externalId ? ` (id=${result.externalId})` : ''}`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery', status: 'manual_required',
+            error_code: 'PUSH_DISABLED',
+            error: '入力まで成功しましたが、実登録(実書込)が無効のため投稿していません。設定で有効化してください。',
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 フォトギャラリー入力のみ (実登録OFF)`, at: new Date().toISOString() });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] フォトギャラリー: ${result.reason}`, at: new Date().toISOString() });
         }
       } else if (isCancel) {
         // ---- キャンセル ----
@@ -2241,10 +2272,10 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog を処理する。
+    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery を処理する。
     const handled = [];
     for (const j of claimedJobs) {
-      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog') {
+      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery') {
         await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
         drainedOther++;
       } else {
