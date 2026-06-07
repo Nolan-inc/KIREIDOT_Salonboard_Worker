@@ -4869,32 +4869,82 @@ async function uploadHairStyleFrontImage(page, file) {
 
   if (!chooserDone) {
     await page.waitForTimeout(800);
-    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], input[type="file"]:visible, input[type="file"]').first();
+    // モーダル(CN_CMN_imageUploaderModal)内の file input を優先。
+    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], .imageUploaderModal input[type="file"], input[type="file"]:visible, input[type="file"]').first();
     if ((await fileInput.count().catch(() => 0)) > 0) {
       await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
-      await page.waitForTimeout(1200);
-      // モーダルの確定 (登録する/アップロード/設定する)。最前面 visible に限定。
-      const okBtn = page.locator(
-        '#imageUploaderModalBody a:visible:has-text("登録"), #imageUploaderModalBody input[type="submit"]:visible, #imageUploaderModalBody button:visible:has-text("登録"), a:visible:has-text("登録する"), a:visible:has-text("アップロード"), input[type="submit"][value*="登録"]:visible'
-      ).first();
-      if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
-        await okBtn.click({ timeout: 8_000 }).catch(() => {});
-      }
+      // プレビュー生成を待つ (画像が大きいと数秒かかる)。
+      await page.waitForTimeout(1800);
     } else {
       return { ok: false, reason: 'no_file_input' };
     }
   }
 
-  // 完了判定: FRONT_IMG_ID hidden に画像ID(B...) が入る。
-  const done = await page.waitForFunction((prev) => {
-    const el = document.getElementById('FRONT_IMG_ID');
-    const v = el ? (el.value || '') : '';
-    return !!v && v !== prev;
-  }, before, { timeout: 15_000 }).then(() => true).catch(() => false);
+  // モーダルの確定ボタンを段階的に押す。CN_CMN_imageUploaderModal は
+  // 「アップロード(送信)」→ プレビュー → 「登録/決定/設定/この写真を使う」等の
+  // 確定で初めて親フォームの FRONT_IMG_ID へ画像IDが反映される。
+  // ボタン文言が環境で異なりうるので候補を広く、最大2回まで押す
+  // (1回目=アップロード実行, 2回目=確定)。各クリック後に完了したか毎回見る。
+  const confirmTexts = ['この写真を使う', 'この画像を使う', '使用する', '決定', '設定する', '登録する', '登録', '挿入', 'アップロード', 'OK', '確定'];
+  const tryClickModalConfirm = async () => {
+    // モーダルコンテナを広めに想定 (imageUploaderModalBody 以外も)
+    const containers = ['#imageUploaderModalBody', '.imageUploaderModal', '.CN_CMN_modalCommon__contentsBox', '.modaal-content', '[role="dialog"]', '.modal'];
+    for (const c of containers) {
+      for (const t of confirmTexts) {
+        const btn = page.locator(`${c} a:visible:has-text("${t}"), ${c} button:visible:has-text("${t}"), ${c} input[type="submit"][value*="${t}"]:visible, ${c} input[type="button"][value*="${t}"]:visible`).first();
+        if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+          await btn.click({ timeout: 6_000 }).catch(() => {});
+          return true;
+        }
+      }
+    }
+    // コンテナ外の最前面 visible ボタンも保険で探す。
+    for (const t of confirmTexts) {
+      const btn = page.locator(`a:visible:has-text("${t}"), button:visible:has-text("${t}"), input[type="submit"][value*="${t}"]:visible`).first();
+      if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+        await btn.click({ timeout: 6_000 }).catch(() => {});
+        return true;
+      }
+    }
+    return false;
+  };
 
-  if (!done) return { ok: false, reason: 'imageId_not_set' };
-  const imageId = await idHidden.inputValue().catch(() => '');
-  return { ok: true, imageId: (imageId || '').trim() || null };
+  // 完了判定: FRONT_IMG_ID hidden か #FRONT_IMG_ID_ID span に画像ID(B...) が入る。
+  const isDone = () => page.evaluate((prev) => {
+    const h = document.getElementById('FRONT_IMG_ID');
+    const hv = h ? (h.value || '') : '';
+    const s = document.getElementById('FRONT_IMG_ID_ID');
+    const sv = s ? (s.textContent || '').trim() : '';
+    return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
+  }, before).catch(() => false);
+
+  // 最大3回、確定ボタンを押しつつ完了を待つ (各 8s)。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await isDone()) break;
+    await tryClickModalConfirm();
+    const ok = await page.waitForFunction((prev) => {
+      const h = document.getElementById('FRONT_IMG_ID');
+      const hv = h ? (h.value || '') : '';
+      const s = document.getElementById('FRONT_IMG_ID_ID');
+      const sv = s ? (s.textContent || '').trim() : '';
+      return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
+    }, before, { timeout: 8_000 }).then(() => true).catch(() => false);
+    if (ok) break;
+  }
+
+  if (!(await isDone())) {
+    // 失敗時はモーダルのHTMLも残して次回修正できるようにする。
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', {
+      diagnostics: { url: page.url() },
+    }).catch(() => {});
+    return { ok: false, reason: 'imageId_not_set' };
+  }
+  // 画像ID は hidden 優先、無ければ span から。
+  let imageId = (await idHidden.inputValue().catch(() => '')) || '';
+  if (!imageId) {
+    imageId = (await page.locator('#FRONT_IMG_ID_ID').first().textContent().catch(() => '') || '').trim();
+  }
+  return { ok: true, imageId: imageId.trim() || null };
 }
 
 module.exports = {
