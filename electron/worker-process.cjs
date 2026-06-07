@@ -2239,13 +2239,15 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isCancel) {
         // ---- キャンセル ----
-        const result = await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush });
+        const result = await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking', status: 'succeeded',
             booking_id: payload.booking_id, summary: 'cancel_booking 完了',
+            // 一覧検索で reserveId を特定できた場合は callback に渡して bookings に焼き直す。
+            external_id: result.recoveredReserveId || result.externalId || null,
           });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard キャンセル完了`, at: new Date().toISOString() });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard キャンセル完了${result.recoveredReserveId ? ` (reserveId回収=${result.recoveredReserveId})` : ''}`, at: new Date().toISOString() });
         } else if (result.status === 'confirm_only') {
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking', status: 'manual_required',

@@ -2271,11 +2271,37 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   const enableCancel = opts.enableCancel !== false; // 既定は実行
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
-  const reserveId = (p.external_booking_id || '').trim();
+  let reserveId = (p.external_booking_id || '').trim();
+
+  // reserveId が無い場合 (KIREIDOT で作成→push したが reserveId 未回収の予約等) は、
+  // 予約一覧を「予約日 + スタッフ + 顧客名」で検索して reserveId を特定する。
+  // これにより「KIREIDOT 軸でキャンセルしても SalonBoard に reserveId が無くて消せない」
+  // ケースを救済する。
+  if (!reserveId && p.scheduled_at) {
+    try {
+      // グループ店舗対策: 予約一覧に入る前にサロン選択を確認。
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      const when = parseJstPartsForPush(p.scheduled_at);
+      if (when) {
+        const found = await findReserveIdForBooking(page, {
+          yyyymmdd: when.yyyymmdd,
+          hhmm: `${String(when.hour).padStart(2, '0')}:${String(when.minute).padStart(2, '0')}`,
+          staffExt: p.salonboard_staff_external_id || null,
+          customerName: p.customer_name || null,
+        }, { baseUrl }).catch(() => null);
+        if (found) {
+          reserveId = found;
+          // 呼び出し側(worker)が bookings.external_booking_id に焼き直せるよう返す。
+          p._recoveredReserveId = found;
+        }
+      }
+    } catch (_e) { /* フォールバック失敗は下の最終チェックで扱う */ }
+  }
 
   if (!reserveId) {
     // reserveId が無いと SalonBoard 上の予約を一意に特定できない。
-    return fail('external_booking_id (SalonBoard 予約ID) が無いためキャンセル対象を特定できません', 'STAFF_MAPPING_NOT_FOUND', true);
+    // (一覧検索でも見つからない = SalonBoard 上に該当予約が無い可能性が高い)
+    return fail('external_booking_id (SalonBoard 予約ID) が無く、予約一覧でも該当予約を特定できませんでした。SalonBoard 上に既に無いか、予約日時/担当が一致しません。', 'RESERVE_NOT_FOUND', true);
   }
   // 1) reserveId で予約詳細ページを直接開く。
   //    実DOM (確認済み):
@@ -2307,7 +2333,7 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   // 既にキャンセル済みなら成功扱い (冪等)
   const detailText = (await page.locator('body').innerText().catch(() => '')) || '';
   if (/ステータス[\s\S]{0,30}(キャンセル|取消)/.test(detailText) && (await page.locator('#fnc_cancel').count().catch(() => 0)) === 0) {
-    return { status: 'ok' };
+    return { status: 'ok', externalId: reserveId, recoveredReserveId: p._recoveredReserveId || null };
   }
 
   const cancelBtn = page.locator('#fnc_cancel').first();
@@ -2359,7 +2385,8 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   if (!looksCancelled && !confirmClicked && !nativeDialogAccepted) {
     return fail(`キャンセルの完了を確認できませんでした (confirmClicked=${confirmClicked}${cap1 ? `, detail=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
   }
-  return { status: 'ok' };
+  // 一覧検索で reserveId を特定した場合は呼び出し側に返す (bookings に焼き直す用)。
+  return { status: 'ok', externalId: reserveId, recoveredReserveId: p._recoveredReserveId || null };
 }
 
 // =====================================================================
