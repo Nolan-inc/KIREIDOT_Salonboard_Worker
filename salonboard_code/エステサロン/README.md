@@ -2,6 +2,15 @@
 
 エステ系（nail/eyelash も現状はここに準ずる）の画面HTML。URLは主に `/KLP/...` と `/CNK/...`。
 
+## ★ ログイン後の入口 (このジャンルの場合)
+- **1店舗(単一)**: `https://salonboard.com/KLP/top/` (サロン選択不要)
+- **複数店舗(グループ)**: `https://salonboard.com/KLP/groupTop/` (サロンを選択してから各機能へ)
+  - ⚠️ 美容室のグループは `/CNC/groupTop/` だが、**エステは `/KLP/groupTop/`** で prefix が違う。
+  - groupTop の DOM は美容室と共通（`#biyouStoreInfoArea` / `#kireiStoreInfoArea` の `<a id="H...">`）。
+    DOM参照は `美容室/グループ店舗選択_groupTop.html`。
+  - 実装の groupTop 判定は `/(CNC|KLP)/groupTop/` の両方を見る必要がある（詳細は親 README）。
+- エステ複数店舗の `/KLP/groupTop/` の実HTMLは未取得（⬜）。取得できると確実。
+
 ## ファイル一覧
 
 | ファイル | 画面 | URL |

@@ -888,7 +888,7 @@ async function processShop(target, channels, runId, opts = {}) {
     };
 
     // ---- グループ店舗(1ログイン複数サロン)のサロン選択 ----
-    // ログイン後 /CNC/groupTop/ に着地する場合は対象サロンを選択してから取得する。
+    // ログイン後 /(CNC|KLP)/groupTop/ に着地する場合は対象サロンを選択してから取得する。
     // 単一店舗ログインなら no-op。失敗時は誤店舗取得を避けて安全に停止する。
     try {
       const sel = await ensureStoreSelected(page, {
@@ -1463,7 +1463,7 @@ function safeUrl(rel, base) {
  * グループ店舗(1ログインで複数サロン)対応。
  *
  * SalonBoard は 1 アカウントで複数サロンを持つ場合、ログイン後に
- * /CNC/groupTop/ の「サロン選択」画面に着地する。各サロンは
+ * /(CNC|KLP)/groupTop/ の「サロン選択」画面 (美容室=CNC, エステ=KLP)に着地する。各サロンは
  *   <table id="biyouStoreInfoArea|kireiStoreInfoArea"> 内の
  *   <td>H000650996</td> <td class="storeName"><a id="H000650996">サロン名</a></td>
  * で並ぶ。対象サロンの <a id="H000..."> をクリックしてその店舗文脈に入る。
@@ -1482,7 +1482,7 @@ async function ensureStoreSelected(page, opts = {}) {
   const shopName = (opts.shopName || '').trim();
 
   // 現在 groupTop (サロン選択) に居るか判定。URL か、店舗一覧テーブルの存在で見る。
-  let onGroupTop = /\/CNC\/groupTop/i.test(page.url());
+  let onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
   if (!onGroupTop) {
     onGroupTop = await page
       .locator('#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^="H"]')
@@ -1546,7 +1546,7 @@ async function ensureStoreSelected(page, opts = {}) {
   }
 
   // クリック後もまだ groupTop に居る場合は失敗扱い。
-  const stillGroup = /\/CNC\/groupTop/i.test(page.url());
+  const stillGroup = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
   if (stillGroup) {
     return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
   }
@@ -2115,7 +2115,7 @@ async function runPushJobs({ showBrowser } = {}) {
         await saveStorageState(ctx, ssPath);
       }
 
-      // グループ店舗(1ログイン複数サロン): /CNC/groupTop/ に着地したら対象サロンを選択。
+      // グループ店舗(1ログイン複数サロン): /(CNC|KLP)/groupTop/ に着地したら対象サロンを選択。
       // 単一店舗ログインなら no-op。失敗時は誤店舗への書き込みを避けて manual_required。
       try {
         const sel = await ensureStoreSelected(page, {

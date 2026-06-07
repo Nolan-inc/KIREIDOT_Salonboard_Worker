@@ -2,10 +2,16 @@
 
 美容室の画面HTML。URLはエステ(`/KLP`,`/CNK`)とは別系統で、主に `/CLP/...`・`/CLS/...`・`/CNB/...`。
 
+## ★ ログイン後の入口 (このジャンルの場合)
+- **1店舗(単一)**: `https://salonboard.com/CNC/top/` (サロン選択不要)
+- **複数店舗(グループ)**: `https://salonboard.com/CNC/groupTop/` (サロンを選択してから各機能へ)
+  - エステ等は `/KLP/groupTop/` で **prefix が違う**点に注意 (詳細は親 `salonboard_code/README.md`)。
+
 ## ファイル一覧 (取得済み ✅)
 
 | ファイル | 画面 | URL | scraper |
 |---|---|---|---|
+| `グループ店舗選択_groupTop.html` | 複数店舗のサロン選択 | `https://salonboard.com/CNC/groupTop/` | ✅ ensureStoreSelected / ensureSalonSelected |
 | `スタイリスト_stylistList.html` | スタイリスト一覧 | `https://salonboard.com/CNB/draft/stylistList/` | ✅ scrapeStylists |
 | `スタイル_styleList.html` | スタイル一覧 | `https://salonboard.com/CNB/draft/styleList/` | ✅ scrapeStyles |
 | `スタイル登録_styleEdit.html` | スタイル掲載情報編集/登録（新規追加=`addStyle`） | `https://salonboard.com/CNB/draft/styleEdit/`（POST: `/doRegister`） | ✅ **postHairStyleViaForm**（フォトギャラリー自動投稿 kind=style） |
@@ -41,12 +47,13 @@
 |---|---|---|---|---|
 | ★最優先 | **予約一覧 検索結果(明細が並んだ状態)** | `/CLS/hair/reservations/init/`（検索実行後） or ショートカット `/CLS/hair/reservations/search/nonRead/` 等 | `予約一覧結果_hairReservations.html` | 予約明細の抽出(日時/顧客/スタッフ/メニュー/金額/ステータス/予約番号B…)を実装するため。**予約が1件以上ある状態**で取得してほしい |
 | ✅済 | 予約一覧 検索フォーム | `/CLS/hair/reservations/init/`（検索前） | `予約一覧フォーム_hairReservations.html` | 取得済み・構造確定済 |
-| 中 | 管理TOP | `/CLP/bt/top/` | `管理TOP_btTop.html` | TOPの「予約一覧」等メニューリンクのhref確定（セッション維持の遷移用） |
+| 中 | 単一店舗TOP | `/CNC/top/` | `TOP_top.html` | 単一店舗ログイン時の着地TOP（任意・構造確認用） |
 | 中 | 新規予約登録フォーム | （TOP/予約一覧から「新規予約」で開く画面のURL） | `予約登録_hair.html` | KIREIDOT→SB の予約書き込み(push)を美容室対応するため |
-| 低 | グループ サロン選択 | `/CNC/groupTop/` | `サロン選択_groupTop.html` | 既に対応済みだが念のため(構造確認用) |
+| ✅済 | グループ サロン選択 | `/CNC/groupTop/` | `グループ店舗選択_groupTop.html` | 取得済み（複数店舗のサロン選択） |
 | 低 | ブログ / クーポン | （美容室でのURLを要確認。KLP共通か別系統か） | — | 美容室のブログ/クーポンが /KLP 共通かどうか確認 |
 
 ## 状況メモ
-- セッション切れ問題は解決済み（TOP=`/CLP/bt/top/`、予約一覧=`/CLS/hair/reservations/init/` に分岐済み, Worker v0.2.91〜）。
+- ログイン後の着地: 単一=`/CNC/top/` / 複数=`/CNC/groupTop/`。予約スケジュールは `/CLP/bt/schedule/salonSchedule/`。
+- セッション切れ問題は解決済み（予約一覧=`/CLS/hair/reservations/init/` に分岐済み, Worker v0.2.91〜）。
 - 予約一覧ページには「セッションを保ったまま到達」できる状態（v0.2.92〜93）。残るは**検索結果の明細抽出**で、上表★最優先のHTMLがあれば実装可能。
 - スタイリスト=`T…`、スタイル=`L…`、クーポン=`CP…`、サロンID=`H…`、予約番号=`B…` のID体系。

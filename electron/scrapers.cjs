@@ -659,7 +659,7 @@ async function scrapeHairBookings(page, opts = {}) {
           hasSchedule: !!document.getElementById('scheduleItemArea') || !!document.getElementById('stylistScheduleArea'),
         };
       }).catch(() => ({ hasPw: false, expired: false, hasSchedule: false }));
-      if (expired.hasPw || expired.expired || /\/CNC\/groupTop/i.test(page.url())) {
+      if (expired.hasPw || expired.expired || /\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
         const cap = await captureScrapeDebug(page, 'bookings', 'logged_out_or_group_top', {
           diagnostics: { url: page.url(), expired },
         }).catch(() => null);
@@ -667,7 +667,7 @@ async function scrapeHairBookings(page, opts = {}) {
           rows: [],
           debug: {
             itemsFound: 0, loggedOut: true,
-            landedOn: /\/CNC\/groupTop/i.test(page.url()) ? 'group_top' : (expired.hasPw ? 'login' : 'session_expired'),
+            landedOn: /\/(?:CNC|KLP)\/groupTop/i.test(page.url()) ? 'group_top' : (expired.hasPw ? 'login' : 'session_expired'),
             genre: 'hair',
             diag: [...diag, `スケジュール到達不可 (capture=${cap || '?'})`],
           },
@@ -4236,7 +4236,7 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
 
 // =====================================================================
 // グループ店舗(1ログイン複数サロン)対応:
-// 現在 /CNC/groupTop/ (サロン選択画面) に居る場合、対象サロンを選んで店舗文脈に入る。
+// 現在 /(CNC|KLP)/groupTop/ (サロン選択画面) に居る場合、対象サロンを選んで店舗文脈に入る。
 // worker-process.cjs の ensureStoreSelected と同等の処理を scrapers 内でも使えるようにする。
 // スタイル/フォトギャラリーは page.goto で /CNB ・/CNK の編集画面に直接遷移するため、
 // 遷移後に groupTop へ跳ね返されることがある。各 goto 後にこれを呼んで復帰させる。
@@ -4251,7 +4251,7 @@ async function ensureSalonSelected(page, opts = {}) {
   const salonId = (opts.salonId || '').trim().toUpperCase();
   const shopName = (opts.shopName || '').trim();
 
-  let onGroupTop = /\/CNC\/groupTop/i.test(page.url());
+  let onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
   if (!onGroupTop) {
     onGroupTop = await page
       .locator('#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^="H"]')
@@ -4302,13 +4302,13 @@ async function ensureSalonSelected(page, opts = {}) {
   }
   // 遷移 or URL変化を最大15秒待つ (javascript:void リンクなので load イベントに頼らない)。
   await page.waitForFunction(
-    (prev) => location.href !== prev || !/\/CNC\/groupTop/i.test(location.href),
+    (prev) => location.href !== prev || !/\/(?:CNC|KLP)\/groupTop/i.test(location.href),
     beforeUrl,
     { timeout: 15_000 },
   ).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
 
-  if (/\/CNC\/groupTop/i.test(page.url())) {
+  if (/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
     return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
   }
   // サロン選択は POST→セッション確定→リダイレクトのため、直後の goto で戻されないよう少し待つ。

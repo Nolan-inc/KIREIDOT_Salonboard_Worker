@@ -1,0 +1,90 @@
+<!--
+  美容室 複数店舗(グループ) ログイン後のサロン選択画面
+  URL: https://salonboard.com/CNC/groupTop/
+
+  ■ 重要(ジャンル別のログイン後URL):
+    美容室   1店舗   → /CNC/top/          (サロン選択不要、直接TOP)
+    美容室   複数店舗 → /CNC/groupTop/     (この画面。サロンを選んでから各機能へ)
+    エステ等 1店舗   → /KLP/top/
+    エステ等 複数店舗 → /KLP/groupTop/     (エステはCNCではなくKLP配下!)
+
+  ■ 構造 (実DOM 2026-06-07):
+    - ヘアサロン一覧:  <table class="mod_table19" id="biyouStoreInfoArea">
+    - キレイサロン一覧: <table class="mod_table19" id="kireiStoreInfoArea">
+      (1アカウントがヘア店舗とキレイ(エステ/まつげ)店舗の両方を持つことがある)
+    - 各行: <td class="mod_center">サロンID(H...)</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000684640">サロン名</a></td>
+    - サロン選択 = その <a id="H..."> をクリック。href は javascript:void(0) で、
+      クリックは JS(POST/AJAX)経由で店舗文脈に入る → 各機能URL(/CNB, /CNK 等)が
+      そのサロンに対して開けるようになる。
+    - クリック後は load イベントに頼らず URL変化 を待つ (ensureSalonSelected)。
+
+  ■ サロン選択の決定方法 (Worker ensureStoreSelected / ensureSalonSelected):
+    1. credentials.salonboard_salon_id (H...) があればそのIDの <a> をクリック (最優先・確実)
+    2. 無ければ店舗名の部分一致でフォールバック
+    3. グループに1サロンだけなら自動選択
+    → 複数サロンで salon_id 未設定だと特定不能 (group_top_no_target)。サロンID登録が必要。
+-->
+<div class="section cf">
+  <div class="mod_column01 cf">
+    <div class="columnBlock w636">
+
+      <!-- ▼ ヘアサロン -->
+      <img src="https://imgbp.salonboard.com/CNC/img/headline_hair_salon.png" alt="SALON BOARD ヘアサロン">
+      <table class="mod_table19 w606" id="biyouStoreInfoArea">
+        <thead>
+          <tr><th class="w80 mod_align_center">サロンＩＤ</th><th class="w482 mod_align_center">サロン名</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mod_center">H000650996</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000650996">ADER HAIR SALON　開発店【アーダーヘアサロン】</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000684640</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000684640">ADER HAIR SALON　鯖江店【アーダーヘアー…】</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000707297</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000707297">ADER HAIR SALON郡山駅前店</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000717546</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000717546">SOWER HAIR SALON 南松本店</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000728255</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000728255">ADER HAIR SALON 森田店【アーダーヘアサロン】</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000755374</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000755374">SOWER HAIR SALON 甲斐店</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000803905</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000803905">（サロン名）</a></td>
+          </tr>
+          <tr>
+            <td class="mod_center">H000804798</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000804798">SOWER HAIR SALON 松本駅前店【5月1日NEW OPEN】</a></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- ▼ キレイサロン (エステ/まつげ等。同一アカウントが持つ場合) -->
+      <img src="https://imgbp.salonboard.com/CNC/img/headline_rlx_salon_02.png" alt="SALON BOARD キレイサロン">
+      <table class="mod_table19 w606" id="kireiStoreInfoArea">
+        <thead>
+          <tr><th class="w80 mod_align_center">サロンＩＤ</th><th class="w482 mod_align_center">サロン名</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mod_center">H000650887</td>
+            <td class="storeName"><a href="javascript:void(0);" id="H000650887">GINA eyelash salon【ジーナアイラッシュ…】</a></td>
+          </tr>
+        </tbody>
+      </table>
+
+    </div>
+  </div>
+</div>
