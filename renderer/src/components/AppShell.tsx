@@ -3,7 +3,8 @@ import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { SetupStatusBanner } from './SetupStatusBanner';
 import type { NavKey } from '../lib/nav';
-import { NAV_ITEMS } from '../lib/nav';
+import { NAV_ITEMS, navLabelForGenre } from '../lib/nav';
+import { useSelectedShopGenre } from '../lib/selection-context';
 
 export function AppShell({
   active,
@@ -15,6 +16,8 @@ export function AppShell({
   children: ReactNode;
 }) {
   const current = NAV_ITEMS.find((n) => n.key === active);
+  const genre = useSelectedShopGenre();
+  const title = current ? navLabelForGenre(current.key, current.label, genre) : '';
   return (
     <div className="relative flex h-screen overflow-hidden">
       {/* オーロラ背景 */}
@@ -25,7 +28,7 @@ export function AppShell({
       <Sidebar active={active} onChange={onChange} />
       <main className="relative flex h-full flex-1 flex-col overflow-hidden">
         <Topbar
-          title={current?.label ?? ''}
+          title={title}
           description={current?.description ?? ''}
         />
         {/* device 設定不備など重要な状態は最上部のバナーで案内する (sync-controller の preflight 結果) */}

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Plus, Loader2 } from 'lucide-react';
+import { Loader2, RefreshCcw } from 'lucide-react';
 import { Card } from '../components/Card';
-import { useEffectiveScope } from '../lib/selection-context';
+import { useEffectiveScope, useSelectedShopGenre } from '../lib/selection-context';
+import { useSyncController } from '../lib/sync-controller';
 import { fetchStaffList, type StaffRow } from '../lib/data';
 
 const ROLE_LABELS: Record<string, string> = {
@@ -14,8 +15,13 @@ const ROLE_LABELS: Record<string, string> = {
 
 export function Staff() {
   const scope = useEffectiveScope();
+  const sync = useSyncController();
+  const genre = useSelectedShopGenre();
+  const isHair = genre === 'hair';
+  const label = isHair ? 'スタイリスト' : 'スタッフ';
   const [loading, setLoading] = useState(true);
   const [staff, setStaff] = useState<StaffRow[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     if (!scope) return;
@@ -27,20 +33,38 @@ export function Staff() {
     return () => {
       cancelled = true;
     };
-  }, [scope?.shopId, scope?.organizationId]);
+  }, [scope?.shopId, scope?.organizationId, reloadKey]);
+
+  const canSync = !!scope?.shopId && sync.ready && !sync.isRunning;
+  async function syncStaff() {
+    if (!scope?.shopId) return;
+    // 美容室=スタイリスト一覧, それ以外=スタッフ一覧。どちらも 'staff' チャネルで取得。
+    await sync.syncShops([scope.shopId], ['staff']);
+    setTimeout(() => setReloadKey((k) => k + 1), 1500);
+  }
 
   return (
     <div className="flex flex-col gap-5 pt-4">
       <div className="flex items-center justify-between">
         <p className="text-[13px] text-ink-soft">
-          {loading ? '読み込み中…' : `全 ${staff.length} 名`}
+          {loading
+            ? '読み込み中…'
+            : `SalonBoard から取得した${label} ${staff.length} 名`}
         </p>
         <div className="flex items-center gap-2">
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40">
+          <button
+            type="button"
+            onClick={syncStaff}
+            disabled={!canSync}
+            title={scope?.shopId ? `SalonBoard から${label}を取得` : '先に店舗を選択してください'}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:opacity-50"
+          >
+            {sync.isRunning ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCcw className="h-3.5 w-3.5" />
+            )}
             サロンボードから取得
-          </button>
-          <button type="button" className="inline-flex h-9 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-4 text-[13px] font-semibold text-white shadow-brand-sm transition hover:shadow-brand">
-            <Plus className="h-3.5 w-3.5" /> スタッフ追加
           </button>
         </div>
       </div>
@@ -54,7 +78,9 @@ export function Staff() {
       ) : staff.length === 0 ? (
         <Card>
           <div className="px-5 py-10 text-center text-[13px] text-ink-soft">
-            登録されているスタッフがありません。
+            {label}がありません。
+            <br />
+            「サロンボードから取得」を押すと SalonBoard の{label}を取り込めます。
           </div>
         </Card>
       ) : (
@@ -82,7 +108,7 @@ export function Staff() {
                         {s.full_name}
                       </h3>
                       <p className="text-[11px] text-ink-soft">
-                        {s.position ?? ROLE_LABELS[s.role ?? ''] ?? 'スタッフ'}
+                        {s.position ?? ROLE_LABELS[s.role ?? ''] ?? label}
                       </p>
                     </div>
                     {s.external_id && (

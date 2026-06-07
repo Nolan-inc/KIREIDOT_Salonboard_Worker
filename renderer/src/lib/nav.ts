@@ -132,3 +132,21 @@ export function getVisibleNavKeys(hasShop: boolean): NavKey[] {
 export function isShopScoped(key: NavKey): boolean {
   return SHOP_SCOPED_KEYS.has(key);
 }
+
+/**
+ * ジャンルに応じてナビ/タイトルのラベルを出し分ける。
+ * 美容室(hair) の場合:
+ *   - staff  → 「スタイリスト」 (それ以外=「スタッフ」)
+ *   - styles → 「スタイル」     (それ以外=「フォトギャラリー」)
+ * それ以外 (未選択含む) は元の label をそのまま返す。
+ */
+export function navLabelForGenre(
+  key: NavKey,
+  fallback: string,
+  genre: string | null | undefined,
+): string {
+  const isHair = genre === 'hair';
+  if (key === 'staff') return isHair ? 'スタイリスト' : 'スタッフ';
+  if (key === 'styles') return isHair ? 'スタイル' : 'フォトギャラリー';
+  return fallback;
+}

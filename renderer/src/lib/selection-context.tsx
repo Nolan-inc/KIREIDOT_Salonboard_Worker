@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useAuth } from './auth-context';
+import { supabase } from './supabase';
 import type { StaffScope, ScopeRole } from './supabase';
 
 /**
@@ -176,4 +177,38 @@ export function useEffectiveScope(): StaffScope | null {
     organizationId: selectedOrgId ?? base.organizationId,
     shopId: selectedShopId ?? null,
   };
+}
+
+/**
+ * 選択中の店舗のジャンル (hair / esthetic / nail / ...) を返す。
+ * 未選択時は null。ラベルの出し分け (美容室=スタイリスト/スタイル 等) に使う。
+ */
+export function useSelectedShopGenre(): string | null {
+  const { selectedShopId } = useSelection();
+  const [genre, setGenre] = useState<string | null>(null);
+  useEffect(() => {
+    if (!selectedShopId) {
+      setGenre(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const { data } = await supabase
+        .from('shops')
+        .select('genre')
+        .eq('id', selectedShopId)
+        .maybeSingle();
+      if (cancelled) return;
+      setGenre(((data as any)?.genre ?? null) as string | null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedShopId]);
+  return genre;
+}
+
+/** 美容室(hair)かどうかでラベルを出し分けるユーティリティ。 */
+export function isHairGenre(genre: string | null | undefined): boolean {
+  return genre === 'hair';
 }

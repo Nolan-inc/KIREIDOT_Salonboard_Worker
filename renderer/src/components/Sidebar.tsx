@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Store, X } from 'lucide-react';
-import { NAV_ITEMS, getVisibleNavKeys, type NavKey } from '../lib/nav';
+import { NAV_ITEMS, getVisibleNavKeys, navLabelForGenre, type NavKey } from '../lib/nav';
 import { cn } from '../lib/cn';
 import { useAuth } from '../lib/auth-context';
-import { useSelection } from '../lib/selection-context';
+import { useSelection, useSelectedShopGenre } from '../lib/selection-context';
 import { supabase } from '../lib/supabase';
 
 export function Sidebar({
@@ -14,6 +14,7 @@ export function Sidebar({
   onChange: (k: NavKey) => void;
 }) {
   const { selectedShopId } = useSelection();
+  const genre = useSelectedShopGenre();
   const visibleKeys = new Set(getVisibleNavKeys(!!selectedShopId));
   const items = NAV_ITEMS.filter((i) => visibleKeys.has(i.key));
 
@@ -73,7 +74,7 @@ export function Sidebar({
                       isActive ? 'text-white' : '',
                     )}
                   >
-                    {item.label}
+                    {navLabelForGenre(item.key, item.label, genre)}
                   </span>
                 </button>
               </li>
