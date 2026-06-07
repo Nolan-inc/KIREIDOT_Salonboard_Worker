@@ -1031,6 +1031,16 @@ async function processShop(target, channels, runId, opts = {}) {
         const { rows, debug } = await scrapeMenus(page, { genre });
         const sent = await sendMenus(shopId, rows);
         counts.menus = sent;
+        // 美容室(hair)はスタイル一覧を画像付きで salonboard_style_imports にも保存する
+        // (フォトギャラリー画面で「SalonBoard スタイル一覧」を表示するため)。最大100件。
+        if (genre === 'hair') {
+          try {
+            const sentStyles = await sendStyles(shopId, rows);
+            emit('shop:progress', { shopId, step: 'menus', msg: `スタイル画像 ${sentStyles} 件保存` });
+          } catch (e) {
+            emit('log', { level: 'warn', msg: `[${shopId.slice(0, 8)}] style import error: ${e instanceof Error ? e.message : e}`, at: new Date().toISOString() });
+          }
+        }
         summary.push(`${menuLabel} ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
         emit('shop:progress', { shopId, step: 'menus', msg: `${menuLabel} ${sent} 件保存` });
       } catch (e) {
@@ -1752,6 +1762,41 @@ async function sendMenus(shopId, rows) {
     emit('log', {
       level: 'error',
       msg: `bulk_upsert_menus: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
+/**
+ * 美容室スタイル(scrapeStyles の rows)を salonboard_style_imports に upsert する。
+ * フォトギャラリー画面で「SalonBoard スタイル一覧」を画像付きで表示するための取込。
+ * 既存の sendMenus(menus 取込) はそのまま残し、これは画像付きの別保存先。
+ */
+async function sendStyles(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const valid = rows
+    .filter((r) => r.external_id && r.name)
+    .slice(0, 100)
+    .map((r) => ({
+      external_id: r.external_id,
+      name: r.name,
+      image_url: r.image_url ?? null,
+      image_external_id: r.image_external_id ?? null,
+      length: r.length ?? null,
+      stylist_name: r.stylist_name ?? null,
+      coupon_external_id: r.coupon_external_id ?? null,
+    }));
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_styles', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_styles: ${error.message}`,
       at: new Date().toISOString(),
     });
     return 0;

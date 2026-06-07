@@ -2584,6 +2584,9 @@ async function scrapeStylists(page, _opts = {}) {
  */
 async function scrapeStyles(page, _opts = {}) {
   const MAX_PAGES = 30;
+  // フォトギャラリー画面で「SalonBoard スタイル一覧」を表示するための取得上限。
+  // 多すぎると画面/取込負荷が大きいので最大 100 件で打ち切る (ユーザー要望)。
+  const MAX_STYLES = 100;
   const allItems = [];
   const seen = new Set();
   let pageUrl = STYLE_LIST_URL;
@@ -2620,15 +2623,22 @@ async function scrapeStyles(page, _opts = {}) {
         let name = '';
         let length = '';
         let stylist = '';
+        let imageUrl = '';
         const tr = input ? input.closest('tr') : null;
         if (tr) {
           // 主行: スタイル名は colspan=3 の td。
           const titleTd = tr.querySelector('td.td_value_store_c[colspan="3"]');
           name = txt(titleTd);
+          // サムネイル画像: 行ブロック内の img[name="stylePhoto"]。
+          // (主行に無い場合があるので、後続の兄弟行も含めて探す)
+          let photoImg = tr.querySelector('img[name="stylePhoto"], img[src*="IMGDB_HD"]');
           // 付随行(長さ/担当)を兄弟 tr から拾う (最大4行ブロック)。
           let sib = tr.nextElementSibling;
           const extra = [];
           for (let i = 0; i < 3 && sib; i++) {
+            if (!photoImg) {
+              photoImg = sib.querySelector('img[name="stylePhoto"], img[src*="IMGDB_HD"]');
+            }
             const cells = Array.from(sib.querySelectorAll('td.td_value_store_c'))
               .map((c) => txt(c))
               .filter((t) => t && t !== '-');
@@ -2637,12 +2647,14 @@ async function scrapeStyles(page, _opts = {}) {
           }
           if (extra.length) length = extra[0] || '';
           if (extra.length > 1) stylist = extra[1] || '';
+          if (photoImg) imageUrl = photoImg.getAttribute('src') || '';
         }
         items.push({
           external_id: styleId,
           name,
           length,
           stylist,
+          image_url: imageUrl,
           coupon_external_id: (f.couponId || '').trim() || null,
         });
       }
@@ -2659,6 +2671,9 @@ async function scrapeStyles(page, _opts = {}) {
       }
     }
 
+    // 取得上限 (100件) に達したら以降のページは見ない。
+    if (allItems.length >= MAX_STYLES) break;
+
     // 次ページへ。pgNext が無ければ終了。
     if (!pageData.nextHref) break;
     try {
@@ -2668,20 +2683,40 @@ async function scrapeStyles(page, _opts = {}) {
     }
   }
 
+  // サムネイル画像URLを正規化する。styleList の img は w=60&h=80 の小さいサムネ。
+  // フォトギャラリー表示用に大きめ (w=360&h=480) に差し替え、絶対URL化する。
+  // 画像ID (B...) も IMGDB_HD/.../B........./ から抽出する。
+  const normalizeStyleImage = (raw) => {
+    if (!raw) return { url: null, imageExternalId: null };
+    let url = String(raw).replace(/&amp;/g, '&').trim();
+    try { url = new URL(url, 'https://imgbp.salonboard.com').toString(); } catch (_e) { /* keep raw */ }
+    // サイズ指定を大きくする (w/h を置換、無ければそのまま)。
+    url = url.replace(/([?&])w=\d+/i, '$1w=360').replace(/([?&])h=\d+/i, '$1h=480');
+    const m = url.match(/\/(B\d{6,})\//) || url.match(/\/(B\d{6,})\.[a-z]+/i);
+    return { url, imageExternalId: m ? m[1] : null };
+  };
+
   const rows = allItems
     .filter((it) => it.external_id && it.name)
-    .map((it) => ({
-      external_id: String(it.external_id),
-      name: cleanText(it.name) ?? it.name,
-      price: null,
-      duration_min: null,
-      // スタイルは「長さ/担当/紐付けクーポン」を raw に残す (将来 menus 取込で活用)。
-      length: cleanText(it.length) || null,
-      stylist_name: cleanText(it.stylist) || null,
-      coupon_external_id: it.coupon_external_id || null,
-    }));
+    .slice(0, MAX_STYLES)
+    .map((it) => {
+      const img = normalizeStyleImage(it.image_url);
+      return {
+        external_id: String(it.external_id),
+        name: cleanText(it.name) ?? it.name,
+        price: null,
+        duration_min: null,
+        // スタイルは「長さ/担当/紐付けクーポン」を raw に残す (将来 menus 取込で活用)。
+        length: cleanText(it.length) || null,
+        stylist_name: cleanText(it.stylist) || null,
+        coupon_external_id: it.coupon_external_id || null,
+        // フォトギャラリー表示用の画像。
+        image_url: img.url,
+        image_external_id: img.imageExternalId,
+      };
+    });
 
-  return { rows, debug: { itemsFound: rows.length, genre: 'hair', source: 'styleList' } };
+  return { rows, debug: { itemsFound: rows.length, genre: 'hair', source: 'styleList', max: MAX_STYLES } };
 }
 
 async function scrapeStaff(page, opts = {}) {
