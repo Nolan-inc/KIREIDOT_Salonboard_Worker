@@ -4757,6 +4757,9 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     if (uploaded.reason === 'sb_upload_comm_failed') {
       return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。画像が小さすぎる/形式が非対応の可能性があります。より大きい画像でお試しください (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
     }
+    if (uploaded.reason === 'modal_register_not_found') {
+      return fail(`画像アップロードモーダルの「登録する」を特定できませんでした (capture=${cap || '?'})。モーダルDOMの共有が必要です。`, 'UNKNOWN_ERROR', true);
+    }
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
@@ -4905,9 +4908,16 @@ async function uploadHairStyleFrontImage(page, file) {
   await trigger.click({ timeout: 8_000 }).catch(() => {});
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
+  // 実DOM (CN_CMN_imageUploaderModal, #imageUploaderModalBody 内):
+  //   ドロップ領域: .jscImageUploaderModalDropArea (ここに drop / クリックで file 選択)
+  //   サムネ:       img.jscImageUploaderModalThumbnail (src がセットされたらプレビュー完了)
+  //   登録ボタン:   input[type="button"].jscImageUploaderModalSubmitButton (value="登録する")
+  //                 ← <a> でも submit でもなく **input[type=button]**。これが押せておらず失敗していた。
+  //   閉じる:       a.jscImageUploaderModalCloseButton
+  //   エラー表示:   #uploadError (通信失敗時にメッセージ)
   if (!chooserDone) {
-    // モーダル(CN_CMN_imageUploaderModal)内の file input にセット。
-    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], .imageUploaderModal input[type="file"], input[type="file"]:visible, input[type="file"]').first();
+    // モーダル内の file input にセット (drop領域に紐づく hidden input を含めて探す)。
+    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"], input[type="file"]').first();
     if ((await fileInput.count().catch(() => 0)) > 0) {
       await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
     } else {
@@ -4915,7 +4925,6 @@ async function uploadHairStyleFrontImage(page, file) {
     }
   }
 
-  // 完了/エラー判定ヘルパ。
   const isDone = () => page.evaluate((prev) => {
     const h = document.getElementById('FRONT_IMG_ID');
     const hv = h ? (h.value || '') : '';
@@ -4924,23 +4933,25 @@ async function uploadHairStyleFrontImage(page, file) {
     return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
   }, before).catch(() => false);
   const hasCommError = () => page.evaluate(() => {
+    const ue = document.getElementById('uploadError');
+    const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
     const t = (document.body?.innerText || '');
-    return /通信に失敗しました|アップロードに失敗|形式が正しくありません|エラーが発生しました/.test(t);
+    return !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(t);
   }).catch(() => false);
 
-  // プレビュー(モーダル内の img)が出るのを最大8秒待つ。手動と同じく、プレビューが
-  // 出てから「登録する」を1回だけ押す。
-  await page.locator('#imageUploaderModalBody img, .imageUploaderModal img').first()
-    .waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+  // プレビュー(サムネ img の src がセットされる)が出るのを最大12秒待つ。
+  await page.waitForFunction(() => {
+    const t = document.querySelector('#imageUploaderModalBody img.jscImageUploaderModalThumbnail, img.jscImageUploaderModalThumbnail');
+    return !!(t && (t.getAttribute('src') || '').trim());
+  }, null, { timeout: 12_000 }).catch(() => {});
 
-  // 「登録する」(モーダルの確定) を **1回だけ** 押す。
-  // 重要: 連打すると CN_CMN_imageUploaderModal が再送して「通信に失敗しました」になる
-  // (手動は1回押すだけで一瞬で終わる)。コンテナ内の「登録する」を最優先。
-  const regBtn = page.locator(
-    '#imageUploaderModalBody a:visible:has-text("登録する"), #imageUploaderModalBody input[type="submit"]:visible, #imageUploaderModalBody button:visible:has-text("登録する"), .imageUploaderModal a:visible:has-text("登録する"), a:visible:has-text("登録する")'
-  ).first();
-  if ((await regBtn.count().catch(() => 0)) > 0 && (await regBtn.isVisible().catch(() => false))) {
-    await regBtn.click({ timeout: 8_000 }).catch(() => {});
+  // モーダルの「登録する」= input[type=button].jscImageUploaderModalSubmitButton を1回だけ押す。
+  const submitBtn = page.locator('input.jscImageUploaderModalSubmitButton, #imageUploaderModalBody input[type="button"][value="登録する"], .imageUploaderModalSubmitButton').first();
+  if ((await submitBtn.count().catch(() => 0)) > 0) {
+    await submitBtn.click({ timeout: 8_000 }).catch(() => {});
+  } else {
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_no_register', { diagnostics: { url: page.url() } }).catch(() => {});
+    return { ok: false, reason: 'modal_register_not_found' };
   }
 
   // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを最大40秒待つ。
@@ -4951,7 +4962,9 @@ async function uploadHairStyleFrontImage(page, file) {
     const s = document.getElementById('FRONT_IMG_ID_ID');
     const sv = s ? (s.textContent || '').trim() : '';
     const done = (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
-    const err = /通信に失敗しました|アップロードに失敗|形式が正しくありません|エラーが発生しました/.test(document.body?.innerText || '');
+    const ue = document.getElementById('uploadError');
+    const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
+    const err = !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(document.body?.innerText || '');
     return done || err;
   }, before, { timeout: 40_000 }).catch(() => {});
 
