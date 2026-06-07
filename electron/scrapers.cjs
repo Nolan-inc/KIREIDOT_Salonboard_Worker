@@ -4529,8 +4529,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   await rowTable.evaluate((el) => { el.classList.remove('dn'); el.scrollIntoView({ block: 'center' }); }).catch(() => {});
 
   // 2) 画像をダウンロード → 枠のアップロードUIで添付。
-  //    小さい画像は SalonBoard に拒否されるため短辺720px未満は拡大する。
-  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery', { minShortSide: 720 });
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
   if (!dl) {
     return fail('フォトギャラリー画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
   }
@@ -4745,9 +4744,11 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     return fail(`スタイル登録フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 2) FRONT 画像をアップロード。小さい画像は SalonBoard が
-  //    「通信に失敗しました」で拒否するため短辺720px未満は拡大する。
-  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery', { minShortSide: 720 });
+  // 2) FRONT 画像をアップロード。
+  //    ※手動では同じ画像が一瞬でアップロードできるため、画像サイズは原因ではない。
+  //    canvas 拡大は page.evaluate(base64) が重く遅延要因になりうるので行わない
+  //    (原画像をそのまま使う = 手動と同条件)。
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
   if (!dl) return fail('スタイル画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
   const uploaded = await uploadHairStyleFrontImage(page, dl.file);
   dl.cleanup();
@@ -4905,48 +4906,16 @@ async function uploadHairStyleFrontImage(page, file) {
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   if (!chooserDone) {
-    await page.waitForTimeout(800);
-    // モーダル(CN_CMN_imageUploaderModal)内の file input を優先。
+    // モーダル(CN_CMN_imageUploaderModal)内の file input にセット。
     const fileInput = page.locator('#imageUploaderModalBody input[type="file"], .imageUploaderModal input[type="file"], input[type="file"]:visible, input[type="file"]').first();
     if ((await fileInput.count().catch(() => 0)) > 0) {
       await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
-      // プレビュー生成を待つ (画像が大きいと数秒かかる)。
-      await page.waitForTimeout(1800);
     } else {
       return { ok: false, reason: 'no_file_input' };
     }
   }
 
-  // モーダルの確定ボタンを段階的に押す。CN_CMN_imageUploaderModal は
-  // 「アップロード(送信)」→ プレビュー → 「登録/決定/設定/この写真を使う」等の
-  // 確定で初めて親フォームの FRONT_IMG_ID へ画像IDが反映される。
-  // ボタン文言が環境で異なりうるので候補を広く、最大2回まで押す
-  // (1回目=アップロード実行, 2回目=確定)。各クリック後に完了したか毎回見る。
-  const confirmTexts = ['この写真を使う', 'この画像を使う', '使用する', '決定', '設定する', '登録する', '登録', '挿入', 'アップロード', 'OK', '確定'];
-  const tryClickModalConfirm = async () => {
-    // モーダルコンテナを広めに想定 (imageUploaderModalBody 以外も)
-    const containers = ['#imageUploaderModalBody', '.imageUploaderModal', '.CN_CMN_modalCommon__contentsBox', '.modaal-content', '[role="dialog"]', '.modal'];
-    for (const c of containers) {
-      for (const t of confirmTexts) {
-        const btn = page.locator(`${c} a:visible:has-text("${t}"), ${c} button:visible:has-text("${t}"), ${c} input[type="submit"][value*="${t}"]:visible, ${c} input[type="button"][value*="${t}"]:visible`).first();
-        if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
-          await btn.click({ timeout: 6_000 }).catch(() => {});
-          return true;
-        }
-      }
-    }
-    // コンテナ外の最前面 visible ボタンも保険で探す。
-    for (const t of confirmTexts) {
-      const btn = page.locator(`a:visible:has-text("${t}"), button:visible:has-text("${t}"), input[type="submit"][value*="${t}"]:visible`).first();
-      if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
-        await btn.click({ timeout: 6_000 }).catch(() => {});
-        return true;
-      }
-    }
-    return false;
-  };
-
-  // 完了判定: FRONT_IMG_ID hidden か #FRONT_IMG_ID_ID span に画像ID(B...) が入る。
+  // 完了/エラー判定ヘルパ。
   const isDone = () => page.evaluate((prev) => {
     const h = document.getElementById('FRONT_IMG_ID');
     const hv = h ? (h.value || '') : '';
@@ -4954,41 +4923,44 @@ async function uploadHairStyleFrontImage(page, file) {
     const sv = s ? (s.textContent || '').trim() : '';
     return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
   }, before).catch(() => false);
-
-  // SalonBoard が画像を拒否すると「通信に失敗しました」等のエラーダイアログが出る。
-  // これを検知したら即座に失敗扱いにする (長時間ローディングで待たない)。
   const hasCommError = () => page.evaluate(() => {
     const t = (document.body?.innerText || '');
-    return /通信に失敗しました|アップロードに失敗|画像のサイズ|ファイルサイズ|形式が正しくありません|エラーが発生しました/.test(t);
+    return /通信に失敗しました|アップロードに失敗|形式が正しくありません|エラーが発生しました/.test(t);
   }).catch(() => false);
 
-  // 最大3回、確定ボタンを押しつつ完了を待つ (各 8s)。途中でエラーダイアログが出たら中断。
-  let commError = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (await isDone()) break;
-    if (await hasCommError()) { commError = true; break; }
-    await tryClickModalConfirm();
-    const ok = await page.waitForFunction((prev) => {
-      const h = document.getElementById('FRONT_IMG_ID');
-      const hv = h ? (h.value || '') : '';
-      const s = document.getElementById('FRONT_IMG_ID_ID');
-      const sv = s ? (s.textContent || '').trim() : '';
-      const err = /通信に失敗しました|アップロードに失敗|エラーが発生しました/.test(document.body?.innerText || '');
-      return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv) || err;
-    }, before, { timeout: 8_000 }).then(() => true).catch(() => false);
-    if (ok && await hasCommError()) { commError = true; break; }
-    if (ok && await isDone()) break;
+  // プレビュー(モーダル内の img)が出るのを最大8秒待つ。手動と同じく、プレビューが
+  // 出てから「登録する」を1回だけ押す。
+  await page.locator('#imageUploaderModalBody img, .imageUploaderModal img').first()
+    .waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+
+  // 「登録する」(モーダルの確定) を **1回だけ** 押す。
+  // 重要: 連打すると CN_CMN_imageUploaderModal が再送して「通信に失敗しました」になる
+  // (手動は1回押すだけで一瞬で終わる)。コンテナ内の「登録する」を最優先。
+  const regBtn = page.locator(
+    '#imageUploaderModalBody a:visible:has-text("登録する"), #imageUploaderModalBody input[type="submit"]:visible, #imageUploaderModalBody button:visible:has-text("登録する"), .imageUploaderModal a:visible:has-text("登録する"), a:visible:has-text("登録する")'
+  ).first();
+  if ((await regBtn.count().catch(() => 0)) > 0 && (await regBtn.isVisible().catch(() => false))) {
+    await regBtn.click({ timeout: 8_000 }).catch(() => {});
   }
 
+  // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを最大40秒待つ。
+  // 連打せず、状態が確定するまで素直に待つ。
+  await page.waitForFunction((prev) => {
+    const h = document.getElementById('FRONT_IMG_ID');
+    const hv = h ? (h.value || '') : '';
+    const s = document.getElementById('FRONT_IMG_ID_ID');
+    const sv = s ? (s.textContent || '').trim() : '';
+    const done = (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
+    const err = /通信に失敗しました|アップロードに失敗|形式が正しくありません|エラーが発生しました/.test(document.body?.innerText || '');
+    return done || err;
+  }, before, { timeout: 40_000 }).catch(() => {});
+
+  if (await hasCommError()) {
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: true } }).catch(() => {});
+    return { ok: false, reason: 'sb_upload_comm_failed' };
+  }
   if (!(await isDone())) {
-    // 失敗時はモーダルのHTMLも残して次回修正できるようにする。
-    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', {
-      diagnostics: { url: page.url(), commError },
-    }).catch(() => {});
-    if (commError) {
-      // SalonBoard 側がアップロードを拒否 (通信に失敗しました)。多くは画像が小さい/不正。
-      return { ok: false, reason: 'sb_upload_comm_failed' };
-    }
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: false } }).catch(() => {});
     return { ok: false, reason: 'imageId_not_set' };
   }
   // 画像ID は hidden 優先、無ければ span から。
