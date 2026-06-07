@@ -4112,8 +4112,9 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
 // 投稿先は payload.kind で分岐:
 //   - "photo_gallery" (エステ等) … /CNK/draft/photoGalleryEdit の空き枠に
 //        画像 + タイトル + キャプション + ジャンル + 掲載 を入れて一括登録(doRegister)。
-//   - "style" (美容室)          … /CNB の「スタイル新規追加」。
-//        ※登録フォームの実DOM未取得のため現状は manual_required で保留 (capture を残す)。
+//   - "style" (美容室)          … /CNB/draft/styleEdit/ の「スタイル新規追加」に
+//        FRONT画像 + 必須項目(スタイリスト/コメント/スタイル名/カテゴリ/長さ/メニュー内容)
+//        を入れて登録(doRegister)。実DOM: salonboard_code/美容室/スタイル登録_styleEdit.html。
 //
 // payload: {
 //   gallery_id, kind, genre,
@@ -4384,30 +4385,242 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   return { ok: true, imageId: (imageId || '').trim() || null };
 }
 
-// ---- 美容室: /CNB スタイル新規追加 (フォームDOM未取得につき保留) ----
+// ---- 美容室: /CNB スタイル掲載情報編集/登録 (styleEdit) ----
+// 実DOM: salonboard_code/美容室/スタイル登録_styleEdit.html
+// スタイル一覧 → 「スタイル新規追加」(addStyle) で /CNB/draft/styleEdit/ を開き、
+// FRONT 画像 + 必須項目(スタイリスト/コメント/スタイル名/カテゴリ/長さ/メニュー内容) を入れて登録。
 async function postHairStyleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
-  // スタイル一覧まで遷移して「スタイル新規追加」画面を開き、debug capture を残す。
-  // 実装は登録フォームの実DOM取得後 (salonboard_code/美容室/スタイル登録_styleEdit.html)。
+  const enablePost = opts.enablePost !== false;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const imageUrl = (p.image_url && String(p.image_url)) ||
+    (Array.isArray(p.images) && p.images.length ? String(p.images[0]) : '');
+  if (!imageUrl) return fail('スタイルの画像URLが空です', 'UNKNOWN_ERROR', true);
+  const title = (p.title && String(p.title).trim()) || '';
+  const caption = (p.caption && String(p.caption).trim()) || '';
+  // スタイル名(必須, ≤30) / コメント(必須, ≤120)。空なら相互補完し、最後は既定文。
+  const styleName = (title || caption || 'スタイル').slice(0, 30);
+  const comment = (caption || title || 'よろしくお願いいたします。').slice(0, 120);
+
+  // 1) スタイル一覧 → 「スタイル新規追加」で styleEdit を開く。
   try {
     const listUrl = new URL('/CNB/draft/styleList/', baseUrl).toString();
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
-    const addBtn = page.locator('a:has(img[alt="スタイル新規追加"]), a[onclick*="addStyle"]').first();
-    if ((await addBtn.count().catch(() => 0)) > 0) {
-      await addBtn.click({ timeout: 8_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
-    }
   } catch (_e) { /* noop */ }
-  const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_style_pending', {
-    diagnostics: { url: page.url(), note: '美容室スタイル登録フォームのDOM未対応。capture を salonboard_code/美容室/スタイル登録_styleEdit.html として共有してください。' },
-  }).catch(() => null);
-  return {
-    status: 'failed',
-    reason: `美容室のスタイル自動投稿は準備中です (登録フォームDOM未対応, capture=${cap || '?'})。SalonBoard で手動投稿してください。`,
-    errorCode: 'NOT_IMPLEMENTED',
-    manualRequired: true,
-  };
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // 「スタイル新規追加」ボタン (addStyle)。
+  const addBtn = page.locator('a[onclick*="addStyle"], a:has(img[alt="スタイル新規追加"])').first();
+  if ((await addBtn.count().catch(() => 0)) > 0) {
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {}),
+      addBtn.click({ timeout: 10_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(800);
+  } else {
+    // ボタンが無ければ styleEdit に直接遷移を試みる。
+    try {
+      await page.goto(new URL('/CNB/draft/styleEdit/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    } catch (_e) { /* noop */ }
+  }
+
+  // styleEdit フォームに到達したか。
+  if ((await page.locator('form#styleEditForm, input#styleNameTxt, input[name="frmStyleEditStyleDto.styleName"]').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_no_form', { diagnostics: { url: page.url(), title: await page.title().catch(() => '') } });
+    return fail(`スタイル登録フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 2) FRONT 画像をアップロード。
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
+  if (!dl) return fail('スタイル画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
+  const uploaded = await uploadHairStyleFrontImage(page, dl.file);
+  dl.cleanup();
+  if (!uploaded.ok) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason } });
+    return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 3) スタイリスト名 (必須): author_external_id(T...) があれば選択、無ければ先頭の「非掲載でない」option。
+  {
+    const stylistSel = page.locator('select[name="frmStyleEditStylistCommentDto.stylistId"], select#stylistSelect').first();
+    let sel = stylistSel;
+    if ((await sel.count().catch(() => 0)) === 0) {
+      // name が違う場合: T... option を持つ select を総当たりで探す。
+      sel = page.locator('select:has(option[value^="T0"])').first();
+    }
+    if ((await sel.count().catch(() => 0)) > 0) {
+      let picked = false;
+      if (p.author_external_id) {
+        picked = await sel.selectOption({ value: String(p.author_external_id) }).then(() => true).catch(() => false);
+      }
+      if (!picked) {
+        await sel.evaluate((el) => {
+          const opt = Array.from(el.options).find((o) => o.value && o.value.startsWith('T') && !/非掲載/.test(o.textContent || ''));
+          if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // 4) コメント / スタイル名 (必須)。
+  await page.locator('textarea[name="frmStyleEditStylistCommentDto.stylistComment"], textarea#stylistCommentTxt').first()
+    .fill(comment, { timeout: 6_000 }).catch(() => {});
+  await page.locator('input[name="frmStyleEditStyleDto.styleName"], input#styleNameTxt').first()
+    .fill(styleName, { timeout: 6_000 }).catch(() => {});
+
+  // 5) カテゴリ=レディース(SG01) 既定 → 長さ(ladiesHairLengthCd) を選択 (空なら先頭の非空)。
+  await page.locator('input[name="frmStyleEditStyleDto.styleCategoryCd"][value="SG01"]').first()
+    .check({ timeout: 4_000 }).catch(() => {});
+  {
+    const lenSel = page.locator('select[name="frmStyleEditStyleDto.ladiesHairLengthCd"], select#ladiesHairLengthCd').first();
+    if ((await lenSel.count().catch(() => 0)) > 0) {
+      const cur = await lenSel.inputValue().catch(() => '');
+      if (!cur || !cur.trim()) {
+        // 既定で「ミディアム(HL03)」、無ければ先頭の非空。
+        const ok = await lenSel.selectOption({ value: 'HL03' }).then(() => true).catch(() => false);
+        if (!ok) {
+          await lenSel.evaluate((el) => {
+            const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
+            if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+          }).catch(() => {});
+        }
+      }
+    }
+  }
+
+  // 6) メニュー内容 (必須): チェックが1つも無ければ「カラー(MC03)」を入れ、詳細テキストも補完。
+  {
+    const anyChecked = await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]:checked').count().catch(() => 0);
+    if (!anyChecked) {
+      const mc = page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"][value="MC03"]').first();
+      if ((await mc.count().catch(() => 0)) > 0) {
+        await mc.check({ timeout: 4_000 }).catch(() => {});
+      } else {
+        // MC03 が無ければ先頭のメニュー content チェックを入れる。
+        await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]').first().check({ timeout: 4_000 }).catch(() => {});
+      }
+    }
+    const detail = page.locator('textarea[name="frmStyleEditStyleDto.menuContents"], textarea#menuDetailTxt').first();
+    if ((await detail.count().catch(() => 0)) > 0) {
+      const cur = await detail.inputValue().catch(() => '');
+      if (!cur || !cur.trim()) {
+        await detail.fill(styleName.slice(0, 50), { timeout: 4_000 }).catch(() => {});
+      }
+    }
+  }
+
+  if (!enablePost) {
+    return { status: 'confirm_only' };
+  }
+
+  // 7) 登録: <a onclick="doRegister(event)"> をクリック。確認パネル/ダイアログにも対応。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let clickedRegister = false;
+  try {
+    const regBtn = page.locator('a[onclick*="doRegister"]').first();
+    if ((await regBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_no_register', { diagnostics: { url: page.url() } });
+      return fail(`スタイルの「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await regBtn.click({ timeout: 10_000 }).catch(() => {});
+    clickedRegister = true;
+    await page.waitForTimeout(1200);
+    // 確認パネル(#termsPanel)や確認画面の最終確定 (登録する/doRegister/送信) を押す。
+    const finalBtn = page.locator(
+      '#termsPanel a:visible:has-text("登録"), #termsPanel input[type="submit"]:visible, a[onclick*="doRegister"]:visible, a:visible:has-text("登録する"), input[type="submit"][value*="登録"]:visible'
+    ).first();
+    if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1200);
+    } else {
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'photo_gallery', 'hair_after', { diagnostics: { clickedRegister, nativeDialogAccepted, url: page.url() } });
+
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /登録しました|保存しました|完了|反映しました|受け付け|追加しました/.test(bodyText)
+    || /styleList/.test(page.url());
+  const looksError = /エラー|失敗|入力してください|必須|選択してください/.test(bodyText) && !looksDone;
+  if (looksError) {
+    return fail(`スタイル登録でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須|選択してください).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !clickedRegister && !nativeDialogAccepted) {
+    return fail(`スタイル登録の完了を確認できませんでした (capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+
+  // external_id: FRONT 画像ID(B...) を回収。
+  return { status: 'ok', externalId: uploaded.imageId || null };
+}
+
+/**
+ * styleEdit の FRONT 枠に画像を1枚アップロードする。
+ * 未設定の FRONT 画像(img#FRONT_IMG_ID_IMG.img_new_no_photo)をクリック→
+ * CN_CMN_imageUploaderModal で画像をアップロード。
+ * 完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B...)が入るかで判定する。
+ * 戻り値: { ok, imageId?, reason? }
+ */
+async function uploadHairStyleFrontImage(page, file) {
+  const idHidden = page.locator('input#FRONT_IMG_ID, input[name="FRONT_IMG_ID"]').first();
+  const before = await idHidden.inputValue().catch(() => '');
+
+  let chooserDone = false;
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
+    await chooser.setFiles(file).catch(() => {});
+    chooserDone = true;
+  }).catch(() => { /* モーダル方式 */ });
+
+  // FRONT 画像エリアをクリックしてアップロードUIを開く。
+  const trigger = page.locator('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG').first();
+  if ((await trigger.count().catch(() => 0)) === 0) {
+    return { ok: false, reason: 'no_front_image_area' };
+  }
+  await trigger.click({ timeout: 8_000 }).catch(() => {});
+  await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
+
+  if (!chooserDone) {
+    await page.waitForTimeout(800);
+    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], input[type="file"]:visible, input[type="file"]').first();
+    if ((await fileInput.count().catch(() => 0)) > 0) {
+      await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      // モーダルの確定 (登録する/アップロード/設定する)。最前面 visible に限定。
+      const okBtn = page.locator(
+        '#imageUploaderModalBody a:visible:has-text("登録"), #imageUploaderModalBody input[type="submit"]:visible, #imageUploaderModalBody button:visible:has-text("登録"), a:visible:has-text("登録する"), a:visible:has-text("アップロード"), input[type="submit"][value*="登録"]:visible'
+      ).first();
+      if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
+        await okBtn.click({ timeout: 8_000 }).catch(() => {});
+      }
+    } else {
+      return { ok: false, reason: 'no_file_input' };
+    }
+  }
+
+  // 完了判定: FRONT_IMG_ID hidden に画像ID(B...) が入る。
+  const done = await page.waitForFunction((prev) => {
+    const el = document.getElementById('FRONT_IMG_ID');
+    const v = el ? (el.value || '') : '';
+    return !!v && v !== prev;
+  }, before, { timeout: 15_000 }).then(() => true).catch(() => false);
+
+  if (!done) return { ok: false, reason: 'imageId_not_set' };
+  const imageId = await idHidden.inputValue().catch(() => '');
+  return { ok: true, imageId: (imageId || '').trim() || null };
 }
 
 module.exports = {

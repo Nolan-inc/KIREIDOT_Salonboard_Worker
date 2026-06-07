@@ -2118,7 +2118,7 @@ async function runPushJobs({ showBrowser } = {}) {
           emit('log', { level: 'warn', msg: `[${tag}] ブログ: ${result.reason}`, at: new Date().toISOString() });
         }
       } else if (isPhotoGallery) {
-        // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル[保留]) ----
+        // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル styleEdit) ----
         const result = await postPhotoGalleryViaForm(page, payload, { baseUrl, enablePost: enablePush });
         if (result.status === 'ok') {
           await postCallback({

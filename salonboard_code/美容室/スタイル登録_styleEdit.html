@@ -1,0 +1,135 @@
+<!--
+  美容室 スタイル掲載情報編集/登録  https://salonboard.com/CNB/draft/styleEdit/
+  POST 先: /CNB/draft/styleEdit/doRegister  (form#styleEditForm, onsubmit=return false)
+  ※ スタイル一覧 /CNB/draft/styleList/ の「スタイル新規追加」(addStyle) から開く新規登録画面と同じフォーム。
+     (上記は既存スタイル編集の例。新規追加時は styleId 等が空になる)
+
+  ■ 登録/キャンセル (フォーム外、上下に2箇所)
+    登録      : <a onclick="doRegister(event); return false;"><img alt="登録"></a>
+    キャンセル: <a onclick="sendToBak(event); return false;"><img alt="キャンセル"></a>
+    → doRegister(event) は JS で確認パネル(#termsPanel)や確認画面を経て doRegister へ POST。
+
+  ■ hidden (主要)
+    org.apache.struts.taglib.html.TOKEN  … Struts CSRF トークン (フォーム送信に必須、改変不可)
+    STORE_ID        value="H000684640"
+    styleId         (既存=L…、新規追加では空)
+    styleLastUpDate / styleSortDate … 楽観ロック
+    FRONT_IMG_ID / SIDE_IMG_ID / BACK_IMG_ID … アップロード成功で画像ID(B…)が入る hidden
+    stylistId       … 送信用 (select の onchange で同期される。下の stylistComment 側 select が実体)
+    frmStyleEditStyleInfoDto.styleRegistFormat  value="0"(写真)/"1"(動画, 通常 disabled)
+
+  ■ 画像 (#photoArea, ul.style_edit-editCommon__upload--list の li × 3)
+    各 li: 区分 select (frmStyleEditStyleInfoDto.styleClassCd01/02/03)
+            <option value="SV01">FRONT</option> SV02 SIDE / SV03 BACK / SV04 ARRANGE / SV05 BEFORE / SV06 FASHION
+           画像表示 img#FRONT_IMG_ID_IMG / #SIDE_IMG_ID_IMG / #BACK_IMG_ID_IMG
+             - 未設定は class="img_new_no_photo"、src=.../style_image_upload.png (これをクリックでアップロードモーダル)
+             - 設定済は class="img_new_photo"、削除は .mod_btn_del_front_photo 等
+           画像ID表示 <span id="FRONT_IMG_ID_ID">B195359246</span>
+    アップロードは CN_CMN_imageUploaderModal.js のモーダル (#imageUploaderModalBody に描画)。
+    → 1枚目(FRONT)が必須。完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B…)が入るかで判定。
+    画像応募チェック: input#agrFlgStyleImgId (任意, 既定OFF)
+
+  ■ スタイリストコメント (必須)
+    スタイリスト名: <select> (option value=T…, 例 T000913903=ADER HAIR)
+        ※送信名は frmStyleEditStylistCommentDto.stylistId 相当 (画面の select)。選択で hidden stylistId も更新。
+    コメント      : <textarea name="frmStyleEditStylistCommentDto.stylistComment" id="stylistCommentTxt"> 最大120字
+
+  ■ スタイル (必須)
+    スタイル名: input name="frmStyleEditStyleDto.styleName" id="styleNameTxt" maxlength=60 (画面上は/30表示)
+    カテゴリ  : radio name="frmStyleEditStyleDto.styleCategoryCd" value="SG01"(レディース)/"SG02"(メンズ)
+                 → レディースで #ladiesHairLength 表示 / メンズで #mensHairLength 表示
+    長さ      : select name="frmStyleEditStyleDto.ladiesHairLengthCd"
+                 HL05 ベリーショート/HL04 ショート/HL03 ミディアム/HL02 セミロング/HL01 ロング/HL08 ヘアセット/HL07 ミセス
+                メンズ時: name="frmStyleEditStyleDto.mensHairLengthCd" (HL09 ボウズ … HL13 ロング/HL06 その他)
+    メニュー内容: checkbox name="frmStyleEditStyleDto.menuContentsCdList" value=MC01(パーマ)/MC02/MC03/MC04(ブリーチ)…
+                 + textarea name="frmStyleEditStyleDto.menuContents" id="menuDetailTxt" maxlength=50
+    クーポン  : モーダル選択 (任意)。hidden frmStyleEditStyleDto.couponId value="CP…"
+    ハッシュタグ: 任意 (#hashTagTxt)
+
+  ■ モデル情報 / ヘアスタイル特集 … すべて任意 (modelHairVolumeKbn 等の radio, hairCatalogSpecialCd select)
+
+  ■ 自動投稿(push_photo_gallery, kind="style")の最小実装方針 (postHairStyleViaForm):
+    1. /CNB/draft/styleList/ → 「スタイル新規追加」(a[onclick*="addStyle"]) で styleEdit を開く。
+    2. FRONT 枠の画像(#FRONT_IMG_ID_IMG.img_new_no_photo)をクリック→imageUploaderModalで画像を1枚アップロード、
+       FRONT_IMG_ID(hidden) / #FRONT_IMG_ID_ID に画像ID(B…)が入るまで待つ。styleClassCd01=SV01(FRONT)は既定。
+    3. 必須項目を入力:
+         - スタイリスト名 select: author_external_id(T…) があれば選択、無ければ先頭の有効(非掲載でない)option。
+         - コメント(stylistComment): caption か title を120字で。
+         - スタイル名(styleName): title (無ければ caption) を30字で。
+         - カテゴリ(styleCategoryCd)=SG01(レディース) 既定。
+         - 長さ(ladiesHairLengthCd): 任意だが必須表示。安全に HL03(ミディアム) 等を既定選択。
+         - メニュー内容: menuContentsCdList を1つ(例 MC03/カラー等)＋menuContents に短文。
+       ※必須が埋まらないとサーバ側エラーになるため、不足はデフォルト値で補完する。
+    4. doRegister(event) を発火(<a onclick="doRegister">クリック)。確認パネル/ダイアログが出たら確定。
+    5. 完了文言で検証。external_id は FRONT 画像ID(B…) か発番された styleId(L…) を回収。
+-->
+<form id="styleEditForm" method="POST" action="/CNB/draft/styleEdit/doRegister" onsubmit="return false;">
+  <input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="2424da7a6ee6e6b94dd59b19e568f767">
+  <input type="hidden" name="STORE_ID" value="H000684640">
+  <input type="hidden" name="styleId" value="L203183513" id="styleId"><!-- 新規追加では空 -->
+  <input type="hidden" name="styleLastUpDate" value="20240321104319">
+  <input type="hidden" name="FRONT_IMG_ID" value="B195359246" id="FRONT_IMG_ID">
+  <input type="hidden" name="SIDE_IMG_ID" value="" id="SIDE_IMG_ID">
+  <input type="hidden" name="BACK_IMG_ID" value="" id="BACK_IMG_ID">
+  <input type="hidden" name="stylistId" value="" id="stylistId">
+  <input type="hidden" name="frmStyleEditStyleInfoDto.styleRegistFormat" value="0" id="styleRegistFormat">
+
+  <!-- 画像 (FRONT/SIDE/BACK の3枠。FRONT が必須) -->
+  <div id="photoArea">
+    <ul class="style_edit-editCommon__upload--list">
+      <li>
+        <select name="frmStyleEditStyleInfoDto.styleClassCd01">
+          <option value="SV01" selected>FRONT</option><option value="SV02">SIDE</option><option value="SV03">BACK</option>
+          <option value="SV04">ARRANGE</option><option value="SV05">BEFORE</option><option value="SV06">FASHION</option>
+        </select>
+        <img id="FRONT_IMG_ID_IMG" class="img_new_photo style_edit-editCommon__input--image wf"><!-- 未設定は class="img_new_no_photo" src=...style_image_upload.png -->
+        <p>画像ID:<span id="FRONT_IMG_ID_ID">B195359246</span></p>
+      </li>
+      <li>
+        <select name="frmStyleEditStyleInfoDto.styleClassCd02"><option value=""></option><option value="SV01">FRONT</option><option value="SV02">SIDE</option>…</select>
+        <img id="SIDE_IMG_ID_IMG" class="img_new_no_photo wf">
+        <p>画像ID:<span id="SIDE_IMG_ID_ID"></span></p>
+      </li>
+      <li>
+        <select name="frmStyleEditStyleInfoDto.styleClassCd03"><option value=""></option>…</select>
+        <img id="BACK_IMG_ID_IMG" class="img_new_no_photo wf">
+        <p>画像ID:<span id="BACK_IMG_ID_ID"></span></p>
+      </li>
+    </ul>
+    <label><input type="checkbox" name="agrFlgStyleImgId" value="1" id="agrFlgStyleImgId">画像応募する</label>
+  </div>
+
+  <!-- スタイリストコメント (必須) -->
+  <select id="stylistSelect"><!-- 送信は frmStyleEditStylistCommentDto.stylistId -->
+    <option value="T000917663">…</option>
+    <option value="T000913903" selected>ADER HAIR</option>
+    <option value="T000965837">金本 光平(非掲載)</option>
+  </select>
+  <textarea name="frmStyleEditStylistCommentDto.stylistComment" id="stylistCommentTxt" maxlength="120"></textarea>
+
+  <!-- スタイル (必須) -->
+  <input type="text" name="frmStyleEditStyleDto.styleName" id="styleNameTxt" maxlength="60" value="柔らかミントアッシュ×レイヤーセミ">
+  <label><input type="radio" name="frmStyleEditStyleDto.styleCategoryCd" value="SG01" checked>レディース</label>
+  <label><input type="radio" name="frmStyleEditStyleDto.styleCategoryCd" value="SG02">メンズ</label>
+  <select name="frmStyleEditStyleDto.ladiesHairLengthCd" id="ladiesHairLengthCd">
+    <option value=""></option><option value="HL05">ベリーショート</option><option value="HL04">ショート</option>
+    <option value="HL03" selected>ミディアム</option><option value="HL02">セミロング</option><option value="HL01">ロング</option>
+    <option value="HL08">ヘアセット</option><option value="HL07">ミセス</option>
+  </select>
+  <select name="frmStyleEditStyleDto.mensHairLengthCd" id="mensHairLengthCd"><!-- メンズ時に表示 -->
+    <option value=""></option><option value="HL09">ボウズ</option>…<option value="HL13">ロング</option><option value="HL06">その他</option>
+  </select>
+  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC01">パーマ</label>
+  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC02">ストレートパーマ・縮毛矯正</label>
+  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC03">カラー</label>
+  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC04">ブリーチ</label>
+  <textarea name="frmStyleEditStyleDto.menuContents" id="menuDetailTxt" maxlength="50">カット/カラー/トリートメント</textarea>
+  <input type="hidden" name="frmStyleEditStyleDto.couponId" value="" class="jsc_SB_modal_coupon_id"><!-- 任意 CP… -->
+</form>
+
+<!-- 登録/キャンセル (フォーム外) -->
+<a onclick="doRegister(event); return false;"><img alt="登録"></a>
+<a onclick="sendToBak(event); return false;"><img alt="キャンセル"></a>
+
+<!-- 画像アップロードモーダルのマウント先 -->
+<div id="imageUploaderModalBody"></div>

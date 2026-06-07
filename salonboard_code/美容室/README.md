@@ -8,6 +8,7 @@
 |---|---|---|---|
 | `スタイリスト_stylistList.html` | スタイリスト一覧 | `https://salonboard.com/CNB/draft/stylistList/` | ✅ scrapeStylists |
 | `スタイル_styleList.html` | スタイル一覧 | `https://salonboard.com/CNB/draft/styleList/` | ✅ scrapeStyles |
+| `スタイル登録_styleEdit.html` | スタイル掲載情報編集/登録（新規追加=`addStyle`） | `https://salonboard.com/CNB/draft/styleEdit/`（POST: `/doRegister`） | ✅ **postHairStyleViaForm**（フォトギャラリー自動投稿 kind=style） |
 | `予約一覧フォーム_hairReservations.html` | 予約一覧の検索フォーム(React SPA) | `https://salonboard.com/CLS/hair/reservations/init/` | 不使用(スケジュール方式に変更) |
 | `スケジュール_salonSchedule.html` | スケジュール(予約明細あり) | `https://salonboard.com/CLP/bt/schedule/salonSchedule/?date=YYYYMMDD` | ✅ **scrapeHairBookings (本採用)** |
 
@@ -42,7 +43,6 @@
 | ✅済 | 予約一覧 検索フォーム | `/CLS/hair/reservations/init/`（検索前） | `予約一覧フォーム_hairReservations.html` | 取得済み・構造確定済 |
 | 中 | 管理TOP | `/CLP/bt/top/` | `管理TOP_btTop.html` | TOPの「予約一覧」等メニューリンクのhref確定（セッション維持の遷移用） |
 | 中 | 新規予約登録フォーム | （TOP/予約一覧から「新規予約」で開く画面のURL） | `予約登録_hair.html` | KIREIDOT→SB の予約書き込み(push)を美容室対応するため |
-| ★ | **スタイル新規追加フォーム** | `/CNB/draft/styleList/` の「スタイル新規追加」(`addStyle(event)`) で開く登録画面 | `スタイル登録_styleEdit.html` | **フォトギャラリー自動投稿(push_photo_gallery)を美容室=スタイル投稿で実装するため。現状フォームDOM未取得につき hair は manual_required で保留中** |
 | 低 | グループ サロン選択 | `/CNC/groupTop/` | `サロン選択_groupTop.html` | 既に対応済みだが念のため(構造確認用) |
 | 低 | ブログ / クーポン | （美容室でのURLを要確認。KLP共通か別系統か） | — | 美容室のブログ/クーポンが /KLP 共通かどうか確認 |
 
