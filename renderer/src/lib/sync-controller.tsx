@@ -90,6 +90,10 @@ type SyncContextValue = {
   setBookingsAutoSyncEnabled: (v: boolean) => void;
   /** 予約自動同期の最後の実行時刻 (ms, ローカル時刻基準) */
   lastBookingsAutoSyncAt: number | null;
+  /** 自動取得の稼働時間帯 (6:00〜24:00)。手動同期はこの制限を受けない。 */
+  activeHours: { startHour: number; endHour: number };
+  /** 現在が自動取得の稼働時間帯内か。false の間 (夜間 0:00〜6:00) は自動取得を停止する。 */
+  isAutoSyncActiveNow: boolean;
 
   syncAll: (
     channels?: ChannelKey[],
@@ -130,6 +134,24 @@ function randomBookingsIntervalMs(): number {
 }
 /** 「予約のみ」自動同期の判定周期 (30 秒)。実行間隔ではなく「実行可否を判定する周期」。 */
 const BOOKINGS_AUTO_SYNC_TICK_MS = 30_000;
+
+/**
+ * 自動取得を許可する時間帯 (ローカル時刻基準、24h)。
+ * 朝 6:00 から深夜 24:00 (= 翌 0:00 直前) まで稼働し、0:00〜6:00 は停止する。
+ * ACTIVE_START_HOUR <= 時 < ACTIVE_END_HOUR を「稼働中」と判定する。
+ * 例: 6:00〜23:59 は稼働、0:00〜5:59 は停止。
+ *
+ * これは「自動」スケジューラ (全チャネル自動同期 / 予約のみ自動同期) にのみ適用される。
+ * 手動の「今すぐ同期」「店舗別同期」(syncAll / syncShops) はこのガードを通らないため
+ * 夜間でも実行できる。
+ */
+const ACTIVE_START_HOUR = 6; // 6:00 から稼働
+const ACTIVE_END_HOUR = 24; // 24:00 (翌 0:00) まで稼働 → 0:00〜6:00 は停止
+/** 現在のローカル時刻が自動取得の稼働時間帯 (6:00〜24:00) 内かどうかを返す。 */
+function isWithinActiveHours(now: Date = new Date()): boolean {
+  const hour = now.getHours();
+  return hour >= ACTIVE_START_HOUR && hour < ACTIVE_END_HOUR;
+}
 
 export function SyncControllerProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
@@ -193,6 +215,19 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
   const [lastBookingsAutoSyncAt, setLastBookingsAutoSyncAt] = useState<number | null>(
     null,
   );
+  /**
+   * 現在が自動取得の稼働時間帯 (6:00〜24:00) 内か。UI 表示用。
+   * 1 分ごとに再評価し、夜間に入った/抜けたタイミングで表示を切り替える。
+   */
+  const [isAutoSyncActiveNow, setIsAutoSyncActiveNow] = useState<boolean>(() =>
+    isWithinActiveHours(),
+  );
+  useEffect(() => {
+    const id = setInterval(() => {
+      setIsAutoSyncActiveNow(isWithinActiveHours());
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Worker 初期化: ログイン状態が変わるたびにセッショントークンを渡し直す
   useEffect(() => {
@@ -551,6 +586,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
     const tick = async () => {
       if (cancelled) return;
       if (runningRef.current) return; // 既に走っているならスキップ
+      // 夜間 (0:00〜6:00) は自動取得を停止する。手動同期はこのループを通らない。
+      if (!isWithinActiveHours()) return;
 
       // v0.2.5: device 設定 (userData) 経由で overview を取得 (main 経由)。
       // active な店舗が 1 つでもあれば 12 分間隔で同期する (このループは
@@ -602,6 +639,11 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       if (cancelled) return;
       // 既に同期が走っているならスキップ (全チャネル同期と競合させない)
       if (runningRef.current) return;
+      // 夜間 (0:00〜6:00) は自動取得を停止する。
+      // ここで return しても各店舗の次回時刻 (sched) は据え置かれるため、
+      // 6:00 を過ぎた最初の tick で「次回時刻を過ぎている店舗」が順次取得される。
+      // 朝イチに全店が同時に走らないよう、その際の再抽選は通常どおり 50〜70 分後に分散される。
+      if (!isWithinActiveHours()) return;
 
       const now = Date.now();
       const sched = shopNextRunAtRef.current;
@@ -652,6 +694,19 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
         }
       }
 
+      // 夜間滞留の再分散:
+      // 0:00〜6:00 の停止中に次回時刻が過ぎてしまった店舗が複数あると、6:00 直後の
+      // 最初の tick で全店が一斉に発火してしまい SalonBoard 側のアクセス検知を招きやすい。
+      // 「過去になっている店舗」が 2 店舗以上ある場合は、それらの次回時刻を
+      // 0〜interval のランダムオフセットで未来に置き直し、稼働再開直後に分散させる。
+      // (1 店舗だけなら一斉発火にならないのでそのまま実行する)
+      const overdueIds = eligibleShopIds.filter((id) => (sched.get(id) ?? 0) <= now);
+      if (overdueIds.length >= 2) {
+        for (const id of overdueIds) {
+          sched.set(id, now + Math.floor(Math.random() * randomBookingsIntervalMs()));
+        }
+      }
+
       // 次回時刻が到来した店舗だけを対象にする
       const dueShopIds = eligibleShopIds.filter((id) => (sched.get(id) ?? 0) <= now);
       if (dueShopIds.length === 0) return;
@@ -690,6 +745,8 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       bookingsAutoSyncEnabled,
       setBookingsAutoSyncEnabled,
       lastBookingsAutoSyncAt,
+      activeHours: { startHour: ACTIVE_START_HOUR, endHour: ACTIVE_END_HOUR },
+      isAutoSyncActiveNow,
       syncAll,
       syncShops,
       abort,
@@ -707,6 +764,7 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       bookingsAutoSyncEnabled,
       setBookingsAutoSyncEnabled,
       lastBookingsAutoSyncAt,
+      isAutoSyncActiveNow,
       syncAll,
       syncShops,
       abort,
