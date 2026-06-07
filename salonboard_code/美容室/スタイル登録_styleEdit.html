@@ -29,10 +29,11 @@
     → 1枚目(FRONT)が必須。完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B…)が入るかで判定。
     画像応募チェック: input#agrFlgStyleImgId (任意, 既定OFF)
 
-  ■ スタイリストコメント (必須)
-    スタイリスト名: <select> (option value=T…, 例 T000913903=ADER HAIR)
-        ※送信名は frmStyleEditStylistCommentDto.stylistId 相当 (画面の select)。選択で hidden stylistId も更新。
-    コメント      : <textarea name="frmStyleEditStylistCommentDto.stylistComment" id="stylistCommentTxt"> 最大120字
+  ■ スタイリストコメント (必須) ← フォトギャラリー(美容室)はここを必ず入力させる
+    スタイリスト名: <select name="frmStyleEditStylistCommentDto.stylistId" id="stylistCheckCd">
+                    option value=T…(例 T000913903=ADER HAIR)。**必須**。投稿はこの担当者の
+                    「スタイリストコメント」枠に入る。新規フォームでは選択肢のみで未選択(value="")。
+    コメント      : <textarea name="frmStyleEditStylistCommentDto.stylistComment" id="stylistCommentTxt"> 最大120字 必須
 
   ■ スタイル (必須)
     スタイル名: input name="frmStyleEditStyleDto.styleName" id="styleNameTxt" maxlength=60 (画面上は/30表示)
@@ -119,9 +120,10 @@
   <select name="frmStyleEditStyleDto.mensHairLengthCd" id="mensHairLengthCd"><!-- メンズ時に表示 -->
     <option value=""></option><option value="HL09">ボウズ</option>…<option value="HL13">ロング</option><option value="HL06">その他</option>
   </select>
+  <!-- メニュー内容(必須): MC01=パーマ / MC02=ストパー・縮毛矯正 / MC03=エクステ / MC04=ブリーチ -->
   <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC01">パーマ</label>
   <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC02">ストレートパーマ・縮毛矯正</label>
-  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC03">カラー</label>
+  <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC03">エクステ</label>
   <label><input type="checkbox" name="frmStyleEditStyleDto.menuContentsCdList" value="MC04">ブリーチ</label>
   <textarea name="frmStyleEditStyleDto.menuContents" id="menuDetailTxt" maxlength="50">カット/カラー/トリートメント</textarea>
   <input type="hidden" name="frmStyleEditStyleDto.couponId" value="" class="jsc_SB_modal_coupon_id"><!-- 任意 CP… -->

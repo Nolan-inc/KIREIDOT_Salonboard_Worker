@@ -2511,9 +2511,15 @@ const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
  *   - 一意 ID: input[name="frmStylistListStylistDtoList[N].stylistId"] value="T000917663"
  *   - 各スタイリストは table.table_list_store の連続行。名前/職種は td.td_value_store_c。
  */
-async function scrapeStylists(page, _opts = {}) {
+async function scrapeStylists(page, opts = {}) {
   await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
+  const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+  if (sel.selected) {
+    await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  }
 
   const raw = await page.evaluate(() => {
     function txt(el) {
@@ -4681,25 +4687,29 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 3) スタイリスト名 (必須): author_external_id(T...) があれば選択、無ければ先頭の「非掲載でない」option。
+  // 3) スタイリスト名 (必須): 選択されたスタッフ(author_external_id=T...)で投稿する。
+  //    フォトギャラリー(美容室)では必ずスタイリストを選ばせる方針のため、
+  //    author_external_id が無い/SalonBoard の選択肢に無い場合は投稿しない(誤った
+  //    スタイリストでの投稿を防ぐ)。スタイリストコメントはこの担当者の枠に入る。
   {
-    const stylistSel = page.locator('select[name="frmStyleEditStylistCommentDto.stylistId"], select#stylistSelect').first();
-    let sel = stylistSel;
+    const sel = page.locator('select[name="frmStyleEditStylistCommentDto.stylistId"], select#stylistCheckCd').first();
     if ((await sel.count().catch(() => 0)) === 0) {
-      // name が違う場合: T... option を持つ select を総当たりで探す。
-      sel = page.locator('select:has(option[value^="T0"])').first();
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_no_stylist_select', { diagnostics: { url: page.url() } });
+      return fail(`スタイリスト選択欄が見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
-    if ((await sel.count().catch(() => 0)) > 0) {
-      let picked = false;
-      if (p.author_external_id) {
-        picked = await sel.selectOption({ value: String(p.author_external_id) }).then(() => true).catch(() => false);
-      }
-      if (!picked) {
-        await sel.evaluate((el) => {
-          const opt = Array.from(el.options).find((o) => o.value && o.value.startsWith('T') && !/非掲載/.test(o.textContent || ''));
-          if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
-        }).catch(() => {});
-      }
+    const wantT = p.author_external_id ? String(p.author_external_id).trim() : '';
+    if (!wantT) {
+      return fail('スタイリストが選択されていません。フォトギャラリー投稿時にスタッフ(スタイリスト)を選択してください。', 'STYLIST_REQUIRED', true);
+    }
+    // 当該 option が存在するか確認してから選択。
+    const hasOpt = await sel.evaluate((el, v) => Array.from(el.options).some((o) => o.value === v), wantT).catch(() => false);
+    if (!hasOpt) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_stylist_not_in_list', { diagnostics: { url: page.url(), want: wantT } });
+      return fail(`選択したスタッフがSalonBoardのスタイリスト一覧に見つかりません (T=${wantT}, capture=${cap || '?'})。スタッフ同期でスタイリストを紐付けてください。`, 'STYLIST_NOT_FOUND', true);
+    }
+    const picked = await sel.selectOption({ value: wantT }).then(() => true).catch(() => false);
+    if (!picked) {
+      return fail(`スタイリストの選択に失敗しました (T=${wantT})`, 'UNKNOWN_ERROR', true);
     }
   }
 
@@ -4729,17 +4739,12 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     }
   }
 
-  // 6) メニュー内容 (必須): チェックが1つも無ければ「カラー(MC03)」を入れ、詳細テキストも補完。
+  // 6) メニュー内容 (必須): チェックが1つも無ければ先頭(パーマ=MC01)を入れて必須を満たす。
+  //    ※ メニュー内容コードは MC01=パーマ / MC02=ストパー・縮毛 / MC03=エクステ / MC04=ブリーチ。
   {
     const anyChecked = await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]:checked').count().catch(() => 0);
     if (!anyChecked) {
-      const mc = page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"][value="MC03"]').first();
-      if ((await mc.count().catch(() => 0)) > 0) {
-        await mc.check({ timeout: 4_000 }).catch(() => {});
-      } else {
-        // MC03 が無ければ先頭のメニュー content チェックを入れる。
-        await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]').first().check({ timeout: 4_000 }).catch(() => {});
-      }
+      await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]').first().check({ timeout: 4_000 }).catch(() => {});
     }
     const detail = page.locator('textarea[name="frmStyleEditStyleDto.menuContents"], textarea#menuDetailTxt').first();
     if ((await detail.count().catch(() => 0)) > 0) {

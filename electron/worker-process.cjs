@@ -999,7 +999,7 @@ async function processShop(target, channels, runId, opts = {}) {
         // 美容室(hair)はスタッフ→スタイリスト一覧 (/CNB/draft/stylistList) に分岐。
         const staffLabel = genre === 'hair' ? 'スタイリスト' : 'スタッフ';
         emit('shop:progress', { shopId, step: 'staff', msg: `${staffLabel}一覧を取得中…` });
-        const { rows, debug } = await scrapeStaff(page, { genre });
+        const { rows, debug } = await scrapeStaff(page, { genre, salonId: creds.salonId ?? null, shopName });
         const sent = await sendStaff(shopId, rows);
         counts.staff = sent;
         summary.push(`${staffLabel} ${sent} 件 (検出${rows.length})`);
