@@ -7,6 +7,7 @@ import { Staff } from './pages/Staff';
 import { Menus } from './pages/Menus';
 import { Coupons } from './pages/Coupons';
 import { Shifts } from './pages/Shifts';
+import { Styles } from './pages/Styles';
 import { Blog } from './pages/Blog';
 import { Settings } from './pages/Settings';
 import { SalonboardPage } from './pages/Salonboard';
@@ -52,6 +53,7 @@ function Routes() {
       {active === 'menus' && selectedShopId && <Menus />}
       {active === 'coupons' && selectedShopId && <Coupons />}
       {active === 'shifts' && selectedShopId && <Shifts />}
+      {active === 'styles' && selectedShopId && <Styles />}
       {active === 'blog' && selectedShopId && <Blog />}
       {active === 'salonboard' && <SalonboardPage />}
       {active === 'settings' && <Settings />}

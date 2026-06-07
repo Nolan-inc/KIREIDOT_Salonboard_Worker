@@ -5,6 +5,7 @@ import {
   CalendarClock,
   Newspaper,
   BookOpen,
+  Scissors,
   Ticket,
   Link2,
   Settings as SettingsIcon,
@@ -20,6 +21,7 @@ export type NavKey =
   | 'menus'
   | 'coupons'
   | 'shifts'
+  | 'styles'
   | 'blog'
   | 'salonboard'
   | 'settings';
@@ -81,6 +83,12 @@ export const NAV_ITEMS: NavItem[] = [
     icon: CalendarClock,
   },
   {
+    key: 'styles',
+    label: 'スタイル',
+    description: 'SalonBoard から取得した美容室スタイル一覧',
+    icon: Scissors,
+  },
+  {
     key: 'blog',
     label: 'ブログ',
     description: 'ブログ記事の作成・投稿',
@@ -102,6 +110,7 @@ const SHOP_SCOPED_KEYS: ReadonlySet<NavKey> = new Set<NavKey>([
   'menus',
   'coupons',
   'shifts',
+  'styles',
   'blog',
 ]);
 

@@ -288,6 +288,42 @@ export async function fetchMenuList(scope: StaffScope): Promise<MenuRow[]> {
 }
 
 // =========================
+// salonboard_style_imports を読む (美容室スタイル同期で投入される。画像付き)。
+// =========================
+export type StyleRow = {
+  id: string;
+  external_id: string;
+  name: string | null;
+  image_url: string | null;
+  length: string | null;
+  stylist_name: string | null;
+  last_synced_at: string | null;
+};
+
+export async function fetchStyleList(scope: StaffScope): Promise<StyleRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_style_imports')
+    .select('id, external_id, name, image_url, length, stylist_name, last_synced_at')
+    .eq('shop_id', scope.shopId)
+    .order('last_synced_at', { ascending: false, nullsFirst: false })
+    .limit(100);
+  if (error) {
+    console.warn('[data] fetchStyleList error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    external_id: r.external_id,
+    name: r.name ?? null,
+    image_url: r.image_url ?? null,
+    length: r.length ?? null,
+    stylist_name: r.stylist_name ?? null,
+    last_synced_at: r.last_synced_at ?? null,
+  })) as StyleRow[];
+}
+
+// =========================
 // メニュー統合一覧 (SalonBoard取得 + KIREIDOT) — 出所付きで両方表示
 // =========================
 export type MergedMenuRow = {

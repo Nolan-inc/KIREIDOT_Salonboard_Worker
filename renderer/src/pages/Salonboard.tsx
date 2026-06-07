@@ -18,6 +18,7 @@ import {
   PlayCircle,
   PlugZap,
   RefreshCcw,
+  Scissors,
   ShieldCheck,
   ShieldOff,
   Store,
@@ -822,12 +823,17 @@ function ShopCredentialCard({
               { ch: 'bookings' as const, label: '予約', icon: <CalendarRange className="h-2.5 w-2.5" /> },
               { ch: 'staff' as const, label: 'スタッフ', icon: <Users className="h-2.5 w-2.5" /> },
               { ch: 'menus' as const, label: 'メニュー', icon: <BookOpen className="h-2.5 w-2.5" /> },
+              // 美容室(hair)はスタイル一覧 (styleList) を取得できる。スタイルは menus
+              // チャネルで取得され、salonboard_style_imports に画像付きで保存される。
+              ...(row.shop_genre === 'hair'
+                ? [{ ch: 'menus' as const, label: 'スタイル', icon: <Scissors className="h-2.5 w-2.5" /> }]
+                : []),
               { ch: 'coupons' as const, label: 'クーポン', icon: <Ticket className="h-2.5 w-2.5" /> },
               { ch: 'shifts' as const, label: 'シフト', icon: <CalendarClock className="h-2.5 w-2.5" /> },
               { ch: 'blog' as const, label: 'ブログ', icon: <Newspaper className="h-2.5 w-2.5" /> },
             ]
           ).map(({ ch, label, icon }) => (
-            <span key={ch} className="inline-flex overflow-hidden rounded-[6px] border border-brand-200 bg-white">
+            <span key={`${ch}:${label}`} className="inline-flex overflow-hidden rounded-[6px] border border-brand-200 bg-white">
               <button
                 type="button"
                 disabled={!ready || isRunning || !row.enabled}
