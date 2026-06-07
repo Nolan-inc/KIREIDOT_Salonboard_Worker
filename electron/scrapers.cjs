@@ -736,6 +736,15 @@ async function scrapeHairBookings(page, opts = {}) {
       added++;
     }
     if (added > 0) diag.push(`hair ${ymd}: ${added}件`);
+
+    // 日付めくりの間隔を一定にしない (人手の操作に近づける)。
+    // 0.5〜2.0秒の範囲でばらつかせ、中央(約1秒)が出やすいよう三角分布気味にする。
+    // 最終日(これ以上めくらない)は待たない。
+    if (i < MAX_DAYS - 1) {
+      const r = (Math.random() + Math.random()) / 2; // 0..1, 0.5中心
+      const waitMs = Math.round(500 + r * 1500); // 500〜2000ms
+      await page.waitForTimeout(waitMs).catch(() => {});
+    }
   }
 
   return {
