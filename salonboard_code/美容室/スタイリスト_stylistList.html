@@ -1,0 +1,861 @@
+<div class="section">
+	
+	
+		<!-- mod_title01_03 -->
+		<div class="mod_title01_02 cf">
+			<h1 class="ttl">スタイリスト掲載情報一覧</h1>
+			
+			
+				<p class="btn_help01"><a href="javascript:void(0);" onclick="CNBopenWinContents('https://sbhd.salonboard.com/hc/ja/articles/360001638553');return false;"><img src="https://imgbp.salonboard.com/CNB/img/btn_help_01.png" height="29" width="29" class="rollover mr10" alt="ヘルプ"></a></p>
+			
+			
+			
+		</div>
+		<!-- /mod_title01_03 -->
+
+
+	<input type="hidden" name="storeId" value="H000684640" id="store_id">
+	<form id="stylistAddForm" method="POST" action="/CNB/draft/stylistEdit/"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div></form>
+	<form id="stylistEditForm" method="POST" action="/CNB/draft/stylistEdit/"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div>
+		<input type="hidden" name="stylistId" value="">
+	</form>
+	<form id="stylistDeleteForm" method="POST" action="/CNB/draft/stylistList/doDelete"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div>
+		<input type="hidden" name="stylistId" value="">
+		<input type="hidden" name="stylistLastUpDate" value="20260602194617000">
+		<input type="hidden" name="stylistSortDate" value="20260602055012000">
+	</form>
+	<form id="stylistPresentForm" method="POST" action="/CNB/draft/stylistList/doPresent"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div>
+		<input type="hidden" name="stylistId" value="">
+		<input type="hidden" name="stylistAttriCd" value="">
+		<input type="hidden" name="stylistLastUpDate" value="20260602194617000">
+		<input type="hidden" name="stylistSortDate" value="20260602055012000">
+		<input type="hidden" name="styleSortDate" value="20260606212311000">
+		<input type="hidden" name="lastUpDate" value="">
+		<input type="hidden" name="processSt" value="">
+	</form>
+	<form name="hiddenForm">
+		<input type="hidden" id="JS_NOM_PRICE_FLG" name="JS_NOM_PRICE_FLG" value="">
+		<input type="hidden" id="JS_STYLIST_ASSISTANT_SORT_FLG" name="JS_STYLIST_ASSISTANT_SORT_FLG" value="">
+	</form>
+
+	
+	
+	
+	<br>
+
+
+	<form id="stylistSetNomPriceFlgForm" method="POST" action="/CNB/draft/stylistList/doRegisterNomPriceSetFlg"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div>
+		<input type="hidden" name="nomPriceSetFlgPre" value="1">
+		<table class="table_list_store">
+			<tbody>
+				<tr>
+					<th class="th_title_store">&nbsp;スタイリスト指名料設定</th>
+				</tr>
+			</tbody>
+		</table>
+		<table class="common-sbCommon__columnTable mt16">
+			<tbody>
+				<tr>
+					<th class="common-sbCommon__columnTableTh w154">指名料</th>
+					<td class="common-sbCommon__columnTableTd">
+						<p class="stylistList__priceSetTableDivText">指名料を「あり」に設定すると、スタイリスト詳細で指名料の登録ができます。</p>
+						<div class="stylistList__priceSetTableDiv-radio">
+							<label><input type="radio" name="nomPriceSetFlg" value="1" checked="checked" id="nomPriceSetFlgId">あり</label>
+							<label><input type="radio" name="nomPriceSetFlg" value="0" id="nomPriceSetFlgId">なし</label>
+						</div>
+					</td>
+					<td class="stylistList__priceSetTableButton">
+						<a href="javascript:void();" onclick="setNomPrice(event, 'stylistSetNomPriceFlg', '/CNB/draft/stylistList/'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/btn_price_set.png" alt="指名料設定"></a>
+					</td>
+				</tr>
+			</tbody>
+		</table>
+		<table class="table_list_btn mt8">
+			<tbody><tr>
+				<td class="fs14" align="left">&nbsp;&nbsp;※指名料を「あり」で設定した後、「メニュー掲載情報」「クーポン掲載情報」で指名料対象メニュー・クーポンの設定が必要です。</td>
+			</tr>
+		</tbody></table>
+		<br><br>
+	</form>
+
+	<form id="stylistSortForm" method="POST" action="/CNB/draft/stylistList/doSort"><div style="display:none;"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="8de35eded50743f60c615dd912616dc0"></div><div style="display:none;"><input type="hidden" name="STORE_ID" value="H000684640"><input type="hidden" name="modified" value="0"></div>
+		<input type="hidden" name="stylistLastUpDate" value="20260602194617000">
+		<input type="hidden" name="stylistSortDate" value="20260602055012000">
+
+		<table class="table_list_btn">
+			<tbody>
+				<tr>
+					<td align="left" valign="top">
+					
+					
+						<a href="javascript:void();" onclick="stylistAdd(event); return false;"><img src="https://imgbp.salonboard.com/CNB/img/btn_new_add.png" alt="新規追加"></a>
+					
+					</td>
+					<td align="right" valign="top">
+					
+					
+					
+					
+						<a href="javascript:void();" onclick="stylistSort(event); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_changes.png" alt="変更内容を登録する"></a>
+					
+					</td>
+				</tr>
+			</tbody>
+		</table>
+		<br>
+		<table class="table_list_store">
+			<tbody>
+				<tr>
+					<th class="th_title_store thTitleInner">&nbsp;スタッフ一覧
+						<a href="javascript:void(0);" class="thTitleInnerBtn jscPlanPanelOpen"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_plan.png" alt="表示プランを確認"></a>
+					</th>
+				</tr>
+			</tbody>
+		</table>
+		<p class="CNBcommon_subHeadline mt16">スタイリスト</p>
+		<table class="table_list_store mt8">
+			<colgroup width="11%"></colgroup>
+			<colgroup width="11%"></colgroup>
+			<colgroup width="10%"></colgroup>
+			<colgroup width="15%"></colgroup>
+			<colgroup width="15%"></colgroup>
+			<colgroup width="10%"></colgroup>
+			<colgroup width="8%"></colgroup>
+			<colgroup width="10%"></colgroup>
+			<colgroup width="13%"></colgroup>
+			<tbody><tr>
+				<th class="th_item_store">順番</th>
+				<th class="th_item_store">PickUp</th>
+				<th class="th_item_store">スタイリスト<br>写真</th>
+				<th class="th_item_store" colspan="4">氏名/ランク/スタイリスト歴/チェック<br>キャッチ</th>
+				<th class="th_item_store">詳細</th>
+				<th class="th_item_store_gray">非掲載<br>削除</th>
+			</tr>
+			
+			
+			
+			<tr name="stylist_info">
+				<td name="td[0]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[0].stylistId" value="T000917663">
+					<input type="hidden" name="frmStylistListStylistDtoList[0].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[0].sortNo" maxlength="3" size="3" value="1" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[0]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[0].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[0]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/37/37/B258333737/B258333737.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[0]" class="td_value_store_c">谷橋　龍也</td>
+				<td name="td[0]" class="td_value_store_c">統括店長　指名料　700円</td>
+				<td name="td[0]" class="td_value_store_c">20年以上</td>
+				<td name="td[0]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[0]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000917663'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[0]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000917663', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000917663'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[0]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						似合わせカット／レイヤーカット
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[1]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[1].stylistId" value="T000913826">
+					<input type="hidden" name="frmStylistListStylistDtoList[1].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[1].sortNo" maxlength="3" size="3" value="2" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[1]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[1].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[1]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/37/38/B258333738/B258333738.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[1]" class="td_value_store_c">ニシヤマ　ユーキ</td>
+				<td name="td[1]" class="td_value_store_c">副店長　指名料500円</td>
+				<td name="td[1]" class="td_value_store_c">16年</td>
+				<td name="td[1]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[1]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000913826'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[1]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000913826', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000913826'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[1]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						レディースショート・メンズスタイルお任せ下さい。
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[2]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[2].stylistId" value="T000919590">
+					<input type="hidden" name="frmStylistListStylistDtoList[2].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[2].sortNo" maxlength="3" size="3" value="3" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[2]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[2].pickupFlg" value="on" checked="checked" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[2]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/92/71/B258699271/B258699271.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[2]" class="td_value_store_c">野崎　琉</td>
+				<td name="td[2]" class="td_value_store_c">スタイリスト 指名料500円</td>
+				<td name="td[2]" class="td_value_store_c">3年</td>
+				<td name="td[2]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[2]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000919590'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[2]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000919590', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000919590'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[2]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						艶髪ストレート、メンズパーマ
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[3]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[3].stylistId" value="T000993653">
+					<input type="hidden" name="frmStylistListStylistDtoList[3].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[3].sortNo" maxlength="3" size="3" value="4" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[3]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[3].pickupFlg" value="on" checked="checked" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[3]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/80/04/B258378004/B258378004.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[3]" class="td_value_store_c">稲村　聖空</td>
+				<td name="td[3]" class="td_value_store_c">スタイリスト　指名料500円</td>
+				<td name="td[3]" class="td_value_store_c">5年</td>
+				<td name="td[3]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[3]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000993653'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[3]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000993653', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000993653'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[3]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						作り込みすぎないパーマやメンズスタイル得意です！
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[4]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[4].stylistId" value="T000972568">
+					<input type="hidden" name="frmStylistListStylistDtoList[4].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[4].sortNo" maxlength="3" size="3" value="5" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[4]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[4].pickupFlg" value="on" checked="checked" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[4]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/37/29/B258333729/B258333729.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[4]" class="td_value_store_c">木下　秀斗</td>
+				<td name="td[4]" class="td_value_store_c">スタイリスト 指名料500円</td>
+				<td name="td[4]" class="td_value_store_c">5年</td>
+				<td name="td[4]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[4]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000972568'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[4]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000972568', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000972568'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[4]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						ハイトーン、デザインカラー 指名率No.1
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[5]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[5].stylistId" value="T001116150">
+					<input type="hidden" name="frmStylistListStylistDtoList[5].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[5].sortNo" maxlength="3" size="3" value="6" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[5]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[5].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[5]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/63/24/B262186324/B262186324.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[5]" class="td_value_store_c">長谷川　ひとみ</td>
+				<td name="td[5]" class="td_value_store_c">スタイリスト</td>
+				<td name="td[5]" class="td_value_store_c">18年</td>
+				<td name="td[5]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[5]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T001116150'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[5]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T001116150', 'ST02', '20260602194617000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T001116150'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[5]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						ナチュラルでスタイリングがしやすい！を目指します♪
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[6]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[6].stylistId" value="T001041117">
+					<input type="hidden" name="frmStylistListStylistDtoList[6].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[6].sortNo" maxlength="3" size="3" value="7" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[6]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[6].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[6]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/13/30/B258391330/B258391330.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[6]" class="td_value_store_c">山尾　直也</td>
+				<td name="td[6]" class="td_value_store_c">スタイリスト　指名料700円</td>
+				<td name="td[6]" class="td_value_store_c">16年</td>
+				<td name="td[6]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[6]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T001041117'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[6]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T001041117', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T001041117'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[6]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						5月中旬より新店舗の武生店に異動になります
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[7]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[7].stylistId" value="T000910123">
+					<input type="hidden" name="frmStylistListStylistDtoList[7].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[7].sortNo" maxlength="3" size="3" value="8" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[7]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[7].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[7]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/05/97/B218640597/B218640597.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[7]" class="td_value_store_c">Ogura　Shunsuke</td>
+				<td name="td[7]" class="td_value_store_c">スタイリスト　指名料 1000円</td>
+				<td name="td[7]" class="td_value_store_c">10年</td>
+				<td name="td[7]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[7]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000910123'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[7]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000910123', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000910123'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[7]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						韓国カット/パーマ職人/開発店
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[8]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[8].stylistId" value="T001075129">
+					<input type="hidden" name="frmStylistListStylistDtoList[8].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[8].sortNo" maxlength="3" size="3" value="9" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[8]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[8].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[8]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/80/56/B258378056/B258378056.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[8]" class="td_value_store_c">紺谷　実果</td>
+				<td name="td[8]" class="td_value_store_c">スタイリスト/指名料500円</td>
+				<td name="td[8]" class="td_value_store_c">11年</td>
+				<td name="td[8]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[8]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T001075129'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[8]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T001075129', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T001075129'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[8]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						5月中旬から武生店に移動になります
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[9]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[9].stylistId" value="T001115665">
+					<input type="hidden" name="frmStylistListStylistDtoList[9].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[9].sortNo" maxlength="3" size="3" value="10" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[9]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[9].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[9]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/91/82/B260599182/B260599182.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[9]" class="td_value_store_c">前田　憲宏</td>
+				<td name="td[9]" class="td_value_store_c">スタイリスト指名料500円</td>
+				<td name="td[9]" class="td_value_store_c">16年</td>
+				<td name="td[9]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[9]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T001115665'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[9]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T001115665', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T001115665'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[9]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						全てのお客様に喜んで頂けるデザインを提案致します。
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[10]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[10].stylistId" value="T000910121">
+					<input type="hidden" name="frmStylistListStylistDtoList[10].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[10].sortNo" maxlength="3" size="3" value="11" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[10]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[10].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[10]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/19/35/B199981935/B199981935.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[10]" class="td_value_store_c">辻　吉輝</td>
+				<td name="td[10]" class="td_value_store_c">代表　指名料1000円</td>
+				<td name="td[10]" class="td_value_store_c">10年</td>
+				<td name="td[10]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[10]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000910121'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[10]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000910121', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000910121'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[10]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						色落ちまで楽しめるカラー／似合わせカット得意です！
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[11]" class="td_value_store_c" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[11].stylistId" value="T000913903">
+					<input type="hidden" name="frmStylistListStylistDtoList[11].presentFlg" value="1">
+					No.<input type="text" name="frmStylistListStylistDtoList[11].sortNo" maxlength="3" size="3" value="12" id="text_sortnoS" style="ime-mode:disabled">
+				</td>
+				<td name="td[11]" class="td_value_store_c" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[11].pickupFlg" value="on" id="checkbox_pickup" class="translate1">
+				</td>
+				<td name="td[11]" class="td_value_store_c ptb5" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/97/44/B190759744/B190759744.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[11]" class="td_value_store_c">ADER　HAIR</td>
+				<td name="td[11]" class="td_value_store_c">プロデューサー</td>
+				<td name="td[11]" class="td_value_store_c">10年</td>
+				<td name="td[11]" class="td_value_store_c">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[11]" class="td_value_store_c ptb5" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000913903'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[11]" class="td_value_store_c" rowspan="2">
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '5', 'T000913903', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_hikeisai_of_B.gif" alt="非掲載"></a>
+				
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000913903'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[11]" class="td_value_store_c" colspan="4" style="text-align:left;">
+					
+						ご来店心よりお待ちしてます。
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[12]" class="td_value_store_c td_value_store_gray" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[12].stylistId" value="T000965837">
+					<input type="hidden" name="frmStylistListStylistDtoList[12].presentFlg" value="0">
+					No.<input type="text" name="frmStylistListStylistDtoList[12].sortNo" maxlength="3" size="3" value="13" id="text_sortnoS" style="ime-mode:disabled" disabled="disabled">
+				</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[12].pickupFlg" value="on" id="checkbox_pickup" class="translate1" disabled="disabled">
+				</td>
+				<td name="td[12]" class="td_value_store_c ptb5 td_value_store_gray" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/35/30/B207493530/B207493530.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray">金本　光平</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray">スタイリスト　指名料500円　@koheiiilader</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray">10年</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[12]" class="td_value_store_c ptb5 td_value_store_gray" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000965837'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray" rowspan="2">
+				
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '4', 'T000965837', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_keisai_B.gif" alt="掲載"></a>
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000965837'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[12]" class="td_value_store_c td_value_store_gray" colspan="4" style="text-align:left;">
+					
+						再現スタイル/似合わせスタイルが得意です
+					
+					
+				</td>
+			</tr>
+			
+			
+			<tr name="stylist_info">
+				<td name="td[13]" class="td_value_store_c td_value_store_gray" rowspan="2">
+					<input type="hidden" name="frmStylistListStylistDtoList[13].stylistId" value="T000912770">
+					<input type="hidden" name="frmStylistListStylistDtoList[13].presentFlg" value="0">
+					No.<input type="text" name="frmStylistListStylistDtoList[13].sortNo" maxlength="3" size="3" value="14" id="text_sortnoS" style="ime-mode:disabled" disabled="disabled">
+				</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray" rowspan="2">
+					<input type="checkbox" name="frmStylistListStylistDtoList[13].pickupFlg" value="on" id="checkbox_pickup" class="translate1" disabled="disabled">
+				</td>
+				<td name="td[13]" class="td_value_store_c ptb5 td_value_store_gray" rowspan="2">
+					
+					<img src="https://imgbp.salonboard.com/IMGDB_HD/15/95/B199981595/B199981595.jpg?impolicy=SB_policy_default&amp;w=45&amp;h=60" name="stylistPhoto" style="width: 45px; height: 60px;">
+					
+					
+				</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray">齋藤　未希</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray">スタイリスト 指名料500円</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray">3年</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray">
+				
+					OK
+				
+				
+				</td>
+				<td name="td[13]" class="td_value_store_c ptb5 td_value_store_gray" rowspan="2">
+					<a href="javascript:void();" onclick="stylistEdit(event, 'T000912770'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_detail_B.gif" alt="詳細へ"></a>
+				</td>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray" rowspan="2">
+				
+				
+					<a href="javascript:void();" onclick="stylistPresent(event, '4', 'T000912770', 'ST02', '20260602055012000'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn3_keisai_B.gif" alt="掲載"></a>
+				
+				<p class="mt10">
+				<a href="javascript:void();" onclick="stylistDelete(event, 'T000912770'); return false;"><img src="https://imgbp.salonboard.com/CNB/img/bns_btn_delete.png" alt="削除"></a>
+				</p>
+				</td>
+			</tr>
+			<tr>
+				<td name="td[13]" class="td_value_store_c td_value_store_gray" colspan="4" style="text-align:left;">
+					
+						基本は森田店勤務です。
+					
+					
+				</td>
+			</tr>
+			
+			
+		</tbody></table>
+
+		<br><br>
+
+		<p class="CNBcommon_subHeadline">アシスタント</p>
+		<table class="table_list_store mt8">
+			<colgroup width="7%"></colgroup>
+			<colgroup width="10%"></colgroup>
+			<colgroup width="51%"></colgroup>
+			<colgroup width="8%"></colgroup>
+			<colgroup width="12%"></colgroup>
+			<colgroup width="12%"></colgroup>
+			<tbody><tr>
+				<th class="th_item_store">順番</th>
+				<th class="th_item_store">アシスタント<br>写真</th>
+				<th class="th_item_store" colspan="1">氏名<br>キャッチ</th>
+				<th class="th_item_store">チェック</th>
+				<th class="th_item_store">詳細</th>
+				<th class="th_item_store_gray">非掲載<br>削除</th>
+			</tr>
+			
+		</tbody></table>
+
+	</form>
+	<br><br>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+		
+		<!-- mod_pagetop01 -->
+		<div class="mod_pagetop01 cf">
+			<a href="#top">ページのトップへ</a>
+		</div>
+		
+		
+		
+		<!-- /mod_pagetop01 -->
+	</div>

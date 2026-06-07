@@ -1,0 +1,57 @@
+<!--
+  美容室 スケジュール  https://salonboard.com/CLP/bt/schedule/salonSchedule/?date=YYYYMMDD
+  ※ 予約明細が全て含まれる。予約一覧(検索結果)より確実に取得できる。日次(1日=1ページ)、
+     a.btn_go_next_business_day / a.btn_go_last_business_day で前後日へ。
+  ※ 旧式DOM (style_xxx ではない)。予約番号は B... と YG... の両系統あり。
+
+  確定した予約ブロック構造 (抽出に使う):
+    div.panel_reserve[id^="reserve_item_"]
+      p.reserveItemCustomer            → 顧客名 "前芝 直輝 様" (末尾 様 を除去)
+      span.panel_reserve_id            → 予約番号 "BF07088252" / "YG68414650"
+      span.panel_reserve_stylistId     → スタイリストID "T000919590" (0000000000=フリー)
+      span.panel_reserve_date          → 来店日 "20260607"
+      span.panel_reserve_start         → 開始 "0900" (HHMM)
+      span.panel_reserve_registeredFlg → 来店処理済みフラグ "1"/"0"
+      span.panel_reserve_reserveTypeFlg→ 予約種別フラグ
+      td[colspan=N] の N で所要枠数(30分刻み) → 所要分 = colspan*30 の目安
+    スタイリスト名: div.mod_btn_22[id^="stylist_"] .name (例 #stylist_T000919590 → "野崎 琉")
+    日付: input#date value="20260607"
+  ※ 休日スタイリストは tbody内に panel_plan(msg=休日)が並ぶだけで予約なし。
+  ※ panel_plan は「枠/休日」、panel_reserve が「実予約」。抽出は panel_reserve のみ対象。
+
+  以下はユーザー提供のスケジュールDOM(主要部の抜粋。全行は容量のため割愛、構造は上記で確定)。
+-->
+<form id="salonSchedule" method="post" action="/CLP/bt/schedule/salonSchedule/">
+  <input type="hidden" name="date" value="20260607" id="date">
+  <table class="mod_table05 jscScheduleMain" id="scheduleItemArea">
+    <tbody id="stylistScheduleArea">
+      <!-- スタイリスト行ヘッダ -->
+      <div class="mod_btn_22" id="stylist_T000919590"><div class="inner"><p class="name"><a href="#">野崎 琉</a></p></div></div>
+
+      <!-- 予約ブロック例1 (B系) -->
+      <div class="customer02 panel_reserve" id="reserve_item_BF07088252">
+        <p class="reserveItemCustomer">前芝 直輝 様</p>
+        <span class="panel_reserve_id">BF07088252</span>
+        <span class="panel_reserve_stylistId">T000919590</span>
+        <span class="panel_reserve_date">20260607</span>
+        <span class="panel_reserve_start">0900</span>
+        <span class="panel_reserve_registeredFlg">1</span>
+        <span class="panel_reserve_reserveTypeFlg">0</span>
+      </div>
+
+      <!-- 予約ブロック例2 (YG系=ネット予約) -->
+      <div class="customer04 panel_reserve" id="reserve_item_YG68414650">
+        <p class="reserveItemCustomer">オク マサフミ 様</p>
+        <span class="panel_reserve_id">YG68414650</span>
+        <span class="panel_reserve_stylistId">T000993653</span>
+        <span class="panel_reserve_date">20260607</span>
+        <span class="panel_reserve_start">1500</span>
+        <span class="panel_reserve_registeredFlg">0</span>
+        <span class="panel_reserve_reserveTypeFlg">0</span>
+      </div>
+
+      <!-- フリー枠スタイリスト (0000000000) にも panel_reserve が入りうる -->
+      <div class="mod_btn_22" id="stylist_0000000000"><div class="inner"><p class="name"><a href="#">フリー</a></p></div></div>
+    </tbody>
+  </table>
+</form>

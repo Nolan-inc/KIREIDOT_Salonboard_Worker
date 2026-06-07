@@ -581,17 +581,177 @@ async function applyBookingDateFilter(page, { fromStr, toStr }, { diag } = {}) {
  *  - 日付範囲: 昨日〜N ヶ月後の月末 (デフォルト 3 ヶ月)
  *  - ページネーション: 「次へ」リンクがある限り辿る (最大 30 ページ)
  */
+/** YYYY-MM-DD 文字列の範囲を YYYYMMDD の配列 (JST) にする。最大 maxDays 日。 */
+function hairDateList(fromStr, toStr, maxDays) {
+  const out = [];
+  const from = new Date(`${fromStr}T00:00:00+09:00`);
+  const to = new Date(`${toStr}T00:00:00+09:00`);
+  let cur = from;
+  let guard = 0;
+  while (cur.getTime() <= to.getTime() && guard < (maxDays || 120)) {
+    const jst = new Date(cur.getTime() + 9 * 3600_000);
+    const ymd = `${jst.getUTCFullYear()}${String(jst.getUTCMonth() + 1).padStart(2, '0')}${String(jst.getUTCDate()).padStart(2, '0')}`;
+    out.push(ymd);
+    cur = new Date(cur.getTime() + 24 * 3600_000);
+    guard++;
+  }
+  return out;
+}
+
 /**
- * 美容室(hair)の予約一覧 (/CLS/hair/reservations/init/) を取得する。
+ * 美容室(hair)の予約を「スケジュール画面」から取得する。
  *
- * エステ(/KLP)とは検索フォーム・結果テーブルの DOM が異なる。例外を投げない
- * (ブラウザを閉じない) ことを最優先にし、検索→結果ページ capture→明細抽出を行う。
+ * 予約一覧(/CLS/hair/reservations/init/)は React SPA で検索操作が複雑なため、
+ * 旧式で予約明細が全て入る スケジュール画面
+ *   /CLP/bt/schedule/salonSchedule/?date=YYYYMMDD
+ * を日付ごとに開いて予約ブロック(div.panel_reserve)を集める方式にする。
  *
- * ※ 結果テーブルの厳密な DOM が未確定のため、現時点では「日付範囲を入れて検索 →
- *    結果ページを capture (DOM 取得用) → 取れる範囲で明細抽出」とする。capture した
- *    page.html から行構造を確定したら、下記 extract を確定セレクタに差し替える。
+ * 確定 DOM (salonboard_code/美容室/スケジュール_salonSchedule.html):
+ *   div.panel_reserve[id^="reserve_item_"]
+ *     p.reserveItemCustomer            顧客名 (末尾「様」除去)
+ *     span.panel_reserve_id            予約番号 (B.../YG...)
+ *     span.panel_reserve_stylistId     スタイリストID (T... / 0000000000=フリー)
+ *     span.panel_reserve_date          来店日 YYYYMMDD
+ *     span.panel_reserve_start         開始 HHMM
+ *     span.panel_reserve_registeredFlg 来店処理フラグ
+ *   div.mod_btn_22[id^="stylist_"] .name  スタイリスト名
+ *
+ * 例外は投げない (ブラウザを閉じない)。
  */
 async function scrapeHairBookings(page, opts = {}) {
+  const range = opts.range || defaultBookingDateRange(3);
+  const diag = opts.diag || [];
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const dates = hairDateList(range.fromStr, range.toStr, 100);
+  diag.push(`hair schedule: ${dates.length}日分を巡回 (${range.fromStr}〜${range.toStr})`);
+
+  const allRows = [];
+  const seen = new Set();
+  let capturedOnce = false;
+  let MAX_DAYS = dates.length;
+
+  for (let i = 0; i < MAX_DAYS; i++) {
+    const ymd = dates[i];
+    let schedUrl;
+    try {
+      const u = new URL('/CLP/bt/schedule/salonSchedule/', baseUrl);
+      u.searchParams.set('date', ymd);
+      schedUrl = u.toString();
+    } catch (_e) {
+      schedUrl = `https://salonboard.com/CLP/bt/schedule/salonSchedule/?date=${ymd}`;
+    }
+    try {
+      await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    } catch (_e) {
+      diag.push(`hair: ${ymd} goto失敗`);
+      continue;
+    }
+
+    // 1日目だけ capture (DOM確認用) + セッション切れ判定。
+    if (!capturedOnce) {
+      capturedOnce = true;
+      const expired = await page.evaluate(() => {
+        const body = (document.body?.innerText || '').replace(/\s+/g, '');
+        return {
+          hasPw: !!document.querySelector('input[type="password"]'),
+          expired: /有効期限が切れ|再度ログイン|操作されなかった/.test(body) || /KPCL\d{3}V\d{2}/.test(body),
+          hasSchedule: !!document.getElementById('scheduleItemArea') || !!document.getElementById('stylistScheduleArea'),
+        };
+      }).catch(() => ({ hasPw: false, expired: false, hasSchedule: false }));
+      if (expired.hasPw || expired.expired || /\/CNC\/groupTop/i.test(page.url())) {
+        const cap = await captureScrapeDebug(page, 'bookings', 'logged_out_or_group_top', {
+          diagnostics: { url: page.url(), expired },
+        }).catch(() => null);
+        return {
+          rows: [],
+          debug: {
+            itemsFound: 0, loggedOut: true,
+            landedOn: /\/CNC\/groupTop/i.test(page.url()) ? 'group_top' : (expired.hasPw ? 'login' : 'session_expired'),
+            genre: 'hair',
+            diag: [...diag, `スケジュール到達不可 (capture=${cap || '?'})`],
+          },
+        };
+      }
+      await captureScrapeDebug(page, 'bookings', 'hair_schedule', {
+        diagnostics: { url: page.url(), date: ymd, hasSchedule: expired.hasSchedule },
+      }).catch(() => null);
+    }
+
+    // 予約ブロックを抽出。
+    const dayItems = await page.evaluate(() => {
+      const txt = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '');
+      // スタイリストID → 名前 のマップ
+      const nameById = {};
+      for (const head of Array.from(document.querySelectorAll('div.mod_btn_22[id^="stylist_"]'))) {
+        const id = (head.id || '').replace(/^stylist_/, '');
+        const name = txt(head.querySelector('.name'));
+        if (id && name && !nameById[id]) nameById[id] = name;
+      }
+      const out = [];
+      for (const rv of Array.from(document.querySelectorAll('div.panel_reserve[id^="reserve_item_"]'))) {
+        const get = (cls) => txt(rv.querySelector(`.${cls}`));
+        const id = get('panel_reserve_id');
+        if (!id) continue;
+        const stylistId = get('panel_reserve_stylistId');
+        out.push({
+          external_id: id,
+          customer: (rv.querySelector('.reserveItemCustomer')?.textContent || '').replace(/\s*様\s*$/, '').trim(),
+          stylist_id: stylistId,
+          stylist_name: nameById[stylistId] || null,
+          date: get('panel_reserve_date'),
+          start: get('panel_reserve_start'),
+          registered: get('panel_reserve_registeredFlg'),
+        });
+      }
+      return out;
+    }).catch(() => []);
+
+    let added = 0;
+    for (const it of dayItems) {
+      if (!it.external_id || seen.has(it.external_id)) continue;
+      seen.add(it.external_id);
+      // scheduled_at を JST ISO に組み立てる (date=YYYYMMDD, start=HHMM)。
+      let scheduledAt = null;
+      if (/^\d{8}$/.test(it.date || '') && /^\d{3,4}$/.test(it.start || '')) {
+        const d = it.date;
+        const hhmm = it.start.padStart(4, '0');
+        scheduledAt = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${hhmm.slice(0, 2)}:${hhmm.slice(2, 4)}:00+09:00`;
+      }
+      allRows.push({
+        external_id: it.external_id,
+        scheduled_at: scheduledAt,
+        duration_min: null, // スケジュールの colspan から将来推定可
+        customer_name: cleanText(it.customer) || null,
+        customer_code: null,
+        customer_phone: null,
+        customer_email: null,
+        customer_birthday: null,
+        menu_name: null,
+        amount: null,
+        status: it.registered === '1' ? 'completed' : null,
+        staff_name: cleanText(it.stylist_name) || null,
+        staff_external_id: it.stylist_id && it.stylist_id !== '0000000000' ? it.stylist_id : null,
+      });
+      added++;
+    }
+    if (added > 0) diag.push(`hair ${ymd}: ${added}件`);
+  }
+
+  return {
+    rows: allRows,
+    debug: {
+      itemsFound: allRows.length,
+      genre: 'hair',
+      source: 'salonSchedule',
+      range: `${range.fromStr} 〜 ${range.toStr}`,
+      diag,
+    },
+  };
+}
+
+/** (旧) 美容室の予約一覧SPAをcaptureするだけの実装。スケジュール方式に置換済み。未使用。 */
+async function _scrapeHairBookingsLegacy(page, opts = {}) {
   const range = opts.range || defaultBookingDateRange(3);
   const diag = opts.diag || [];
   const slashFrom = range.fromStr.replace(/-/g, '/');
@@ -740,6 +900,20 @@ async function scrapeBookings(page, opts = {}) {
   const range = defaultBookingDateRange(months);
   const diag = [];
 
+  // 美容室(hair)はスケジュール画面 (/CLP/bt/schedule/salonSchedule/) から取得する。
+  // エステ用の予約一覧フロー(reserveList navigation/検索/抽出)は通さない。
+  if (opts.genre === 'hair') {
+    try {
+      return await scrapeHairBookings(page, { range, diag, baseUrl: opts.baseUrl });
+    } catch (e) {
+      const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e) },
+      }).catch(() => null);
+      diag.push(`hair scrape error: ${e?.message ?? e} (capture=${capDir || '?'})`);
+      return { rows: [], debug: { itemsFound: 0, genre: 'hair', diag } };
+    }
+  }
+
   // ジャンル別の予約一覧 URL とマッチパターン:
   //   - 美容室(hair): /CLS/hair/reservations/init/  (KLP系ではない)
   //   - エステ等     : /KLP/reserve/reserveList/init (従来。銀座店などはこれで動作中)
@@ -851,21 +1025,7 @@ async function scrapeBookings(page, opts = {}) {
     /* 診断失敗は本処理を止めない */
   }
 
-  // 美容室(hair)は予約一覧の DOM がエステ(/KLP)と異なる。エステ用の検索フォーム操作
-  // (applyBookingDateFilter / #resultList 抽出) をそのまま流すと未対応のフォームで
-  // 例外→ブラウザが閉じてしまう。hair は専用ハンドラに分岐し、例外を出さず
-  // (検索→結果ページを capture→明細抽出) を行う。
-  if (isHair) {
-    try {
-      return await scrapeHairBookings(page, { range, diag, baseUrl: opts.baseUrl });
-    } catch (e) {
-      const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
-        diagnostics: { url: page.url(), error: e?.message ?? String(e) },
-      }).catch(() => null);
-      diag.push(`hair scrape error: ${e?.message ?? e} (capture=${capDir || '?'})`);
-      return { rows: [], debug: { itemsFound: 0, genre: 'hair', diag } };
-    }
-  }
+  // (美容室(hair)は関数冒頭で scrapeHairBookings に分岐済み)
 
   // 検索フォームに日付範囲を入れて検索を実行 (これが無いと結果が出ない)
   const searched = await applyBookingDateFilter(page, range, { diag });
@@ -2416,7 +2576,7 @@ const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
  * 美容室「スタイリスト掲載情報一覧」(/CNB/draft/stylistList/) を取得する。
  * エステの scrapeStaff の hair 版。出力 row 形は sendStaff 互換 (external_id/name/...)。
  *
- * 確認済み DOM (salonboard_code/美容室/stylistlist.html):
+ * 確認済み DOM (salonboard_code/美容室/スタイリスト_stylistList.html):
  *   - 一意 ID: input[name="frmStylistListStylistDtoList[N].stylistId"] value="T000917663"
  *   - 各スタイリストは table.table_list_store の連続行。名前/職種は td.td_value_store_c。
  */
@@ -2485,7 +2645,7 @@ async function scrapeStylists(page, _opts = {}) {
  * 美容室「スタイル一覧」(/CNB/draft/styleList/) を取得する。
  * エステの scrapeMenus の hair 版。出力 row 形は sendMenus 互換 (external_id/name/...)。
  *
- * 確認済み DOM (salonboard_code/美容室/stylelist.html):
+ * 確認済み DOM (salonboard_code/美容室/スタイル_styleList.html):
  *   - 一意 ID: input[name="frmStyleListStyleInfoDtoList[N].styleId"] value="L203183513"
  *   - スタイル名: td.td_value_store_c[colspan="3"] (主行)
  *   - 紐付けクーポン: input[name="...couponId"] value="CP..."

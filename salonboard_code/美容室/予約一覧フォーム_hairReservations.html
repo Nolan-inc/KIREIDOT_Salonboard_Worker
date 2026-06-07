@@ -1,0 +1,56 @@
+<!--
+  美容室 予約一覧 検索フォーム  https://salonboard.com/CLS/hair/reservations/init/
+  ※ React製SPA (CSS modules: style_xxx__hash)。name属性は意味のある英語名。エステの旧式とは別物。
+  ※ 検索ボタンは type="button"(JS実行) / 日付inputは readonly で値は「2026年6月7日（日）」形式。
+  以下はユーザー提供の検索フォームDOM抜粋(検索結果=明細リストは未取得)。
+-->
+<main class="style_container__D7SYO"><section class="style_section__jq_Pv"><h1 class="style_root__aITZK">予約一覧</h1></section><section><div class="style_root__Mm_9R style_form__fvkz3"><div class="style_inner__Ay_4l">
+  <div class="style_shortCut__gBnW9"><p class="style_text__3ahdm">ショートカット検索</p><div class="style_buttons__5XAno">
+    <a class="style_button__aJSO2 style_root__V95b_" data-variant="primary" data-size="L" href="/CLS/hair/reservations/search/nonRead/">未読の予約</a>
+    <a class="style_button__aJSO2 style_root__V95b_" data-variant="primary" data-size="L" href="/CLS/hair/reservations/search/tempReserve/">確定待ちの仮予約</a>
+    <a class="style_button__aJSO2 style_root__V95b_" data-variant="primary" data-size="L" href="/CLS/hair/reservations/search/accountant/">来店処理未登録の予約</a>
+  </div></div>
+  <form class="style_conditions__yAPML">
+    <!-- 来店日 -->
+    <input type="text" readonly name="startDate" value="2026年6月7日（日）">
+    <input type="text" readonly name="endDate" value="2026年6月7日（日）">
+    <!-- 昨日/本日/明日 ボタン -->
+    <!-- ステータス -->
+    <input type="checkbox" name="nonCancelStatus" value="TEMPORARY">仮予約確定待ち
+    <input type="checkbox" name="nonCancelStatus" value="WAITING">受付待ち
+    <input type="checkbox" name="nonCancelStatus" value="IN_PROGRESS">施術中
+    <input type="checkbox" name="nonCancelStatus" value="DONE">来店処理待ち
+    <input type="checkbox" name="nonCancelStatus" value="FIXED">済み
+    <input type="checkbox" name="nonCancelStatus" value="SALES_REGISTERED">会計済み
+    <input type="checkbox" name="cancelStatus" value="REFUSAL">お断り
+    <input type="checkbox" name="cancelStatus" value="CANCEL">お客様キャンセル
+    <input type="checkbox" name="cancelStatus" value="SALON_CANCEL">サロンキャンセル
+    <input type="checkbox" name="cancelStatus" value="UNAUTHORIZED_CANCEL">無断キャンセル
+    <input type="checkbox" name="cancelStatus" value="TEMPORARY_CANCEL">自動キャンセル
+    <!-- 確認状況 -->
+    <input type="checkbox" name="confirmationStatus" value="UNREAD">未読
+    <input type="checkbox" name="confirmationStatus" value="READ">既読
+    <!-- お客様名(カナ) -->
+    <input name="customerLastName" type="text" placeholder="ビヨウ" maxlength="30">
+    <input name="customerFirstName" type="text" placeholder="ハナコ" maxlength="30">
+    <!-- 予約番号 -->
+    <input name="reservationId" type="text" placeholder="B000000000" maxlength="10">
+    <!-- スタイリスト (T...) -->
+    <select name="staffId">
+      <option value="" label="すべてのスタイリスト">すべてのスタイリスト</option>
+      <option value="T000917663" label="谷橋　龍也">谷橋　龍也</option>
+      <option value="T000913826" label="ニシヤマ　ユーキ">ニシヤマ　ユーキ</option>
+      <!-- ...他スタイリスト... -->
+      <option value="0000000000" label="フリー">フリー</option>
+    </select>
+    <!-- 予約経路 (K...) -->
+    <select name="reservationRouteId">
+      <option value="" label="すべての予約経路">すべての予約経路</option>
+      <option value="K000000001" label="電話(自社)">電話(自社)</option>
+      <option value="K000000003" label="HOT PEPPER Beauty">HOT PEPPER Beauty</option>
+    </select>
+    <!-- ボタン (どちらも type=button = JS実行) -->
+    <button data-variant="negative" data-size="L" type="button">条件をクリア</button>
+    <button data-variant="primary" data-size="L" type="button">検索する</button>
+  </form>
+</div></div></section></main>
