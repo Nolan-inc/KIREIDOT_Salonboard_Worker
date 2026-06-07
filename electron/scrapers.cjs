@@ -4383,7 +4383,7 @@ const PHOTO_GALLERY_EDIT_URL = 'https://salonboard.com/CNK/draft/photoGalleryEdi
  * 公開URLの画像を一時ファイルにダウンロードする。
  * 戻り値: { file, cleanup } | null
  */
-async function downloadImageToTmp(page, url, tag) {
+async function downloadImageToTmp(page, url, tag, opts = {}) {
   try {
     const resp = await page.context().request.get(url, { timeout: 20_000 });
     if (!resp.ok()) {
@@ -4402,8 +4402,40 @@ async function downloadImageToTmp(page, url, tag) {
       const um = String(url).split('?')[0].match(/\.(jpe?g|png|gif|webp)$/i);
       if (um) ext = um[1].toLowerCase().replace('jpeg', 'jpg');
     }
-    const file = path.join(os.tmpdir(), `sb_${tag}_${Date.now()}.${ext}`);
-    fs.writeFileSync(file, buf);
+    let outBuf = buf;
+    let outExt = ext;
+    // SalonBoard のスタイル/フォトギャラリー画像は小さすぎると
+    // 「通信に失敗しました」でアップロードが拒否される。
+    // opts.minShortSide 指定時、短辺がそれ未満なら Chromium canvas で拡大する。
+    const minShort = Number(opts.minShortSide) || 0;
+    if (minShort > 0) {
+      try {
+        const dataUrl = `data:${ct || 'image/jpeg'};base64,${buf.toString('base64')}`;
+        const resized = await page.evaluate(async ({ src, minShort }) => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = src; });
+          const w = img.naturalWidth, h = img.naturalHeight;
+          if (!w || !h) return null;
+          const short = Math.min(w, h);
+          if (short >= minShort) return null; // 拡大不要
+          const scale = minShort / short;
+          const cw = Math.round(w * scale), ch = Math.round(h * scale);
+          const canvas = document.createElement('canvas');
+          canvas.width = cw; canvas.height = ch;
+          const ctx = canvas.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(img, 0, 0, cw, ch);
+          return canvas.toDataURL('image/jpeg', 0.92);
+        }, { src: dataUrl, minShort }).catch(() => null);
+        if (resized && /^data:image\/jpeg;base64,/.test(resized)) {
+          outBuf = Buffer.from(resized.replace(/^data:image\/jpeg;base64,/, ''), 'base64');
+          outExt = 'jpg';
+        }
+      } catch (_e) { /* 拡大失敗時は元画像のまま続行 */ }
+    }
+    const file = path.join(os.tmpdir(), `sb_${tag}_${Date.now()}.${outExt}`);
+    fs.writeFileSync(file, outBuf);
     return { file, cleanup: () => { try { fs.unlinkSync(file); } catch (_e) { /* noop */ } } };
   } catch (e) {
     await captureScrapeDebug(page, tag, 'image_download_error', {
@@ -4497,7 +4529,8 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   await rowTable.evaluate((el) => { el.classList.remove('dn'); el.scrollIntoView({ block: 'center' }); }).catch(() => {});
 
   // 2) 画像をダウンロード → 枠のアップロードUIで添付。
-  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
+  //    小さい画像は SalonBoard に拒否されるため短辺720px未満は拡大する。
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery', { minShortSide: 720 });
   if (!dl) {
     return fail('フォトギャラリー画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
   }
@@ -4712,13 +4745,17 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     return fail(`スタイル登録フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 2) FRONT 画像をアップロード。
-  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery');
+  // 2) FRONT 画像をアップロード。小さい画像は SalonBoard が
+  //    「通信に失敗しました」で拒否するため短辺720px未満は拡大する。
+  const dl = await downloadImageToTmp(page, imageUrl, 'photo_gallery', { minShortSide: 720 });
   if (!dl) return fail('スタイル画像のダウンロードに失敗しました', 'UNKNOWN_ERROR', true);
   const uploaded = await uploadHairStyleFrontImage(page, dl.file);
   dl.cleanup();
   if (!uploaded.ok) {
     const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason } });
+    if (uploaded.reason === 'sb_upload_comm_failed') {
+      return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。画像が小さすぎる/形式が非対応の可能性があります。より大きい画像でお試しください (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
+    }
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
@@ -4918,25 +4955,40 @@ async function uploadHairStyleFrontImage(page, file) {
     return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
   }, before).catch(() => false);
 
-  // 最大3回、確定ボタンを押しつつ完了を待つ (各 8s)。
+  // SalonBoard が画像を拒否すると「通信に失敗しました」等のエラーダイアログが出る。
+  // これを検知したら即座に失敗扱いにする (長時間ローディングで待たない)。
+  const hasCommError = () => page.evaluate(() => {
+    const t = (document.body?.innerText || '');
+    return /通信に失敗しました|アップロードに失敗|画像のサイズ|ファイルサイズ|形式が正しくありません|エラーが発生しました/.test(t);
+  }).catch(() => false);
+
+  // 最大3回、確定ボタンを押しつつ完了を待つ (各 8s)。途中でエラーダイアログが出たら中断。
+  let commError = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (await isDone()) break;
+    if (await hasCommError()) { commError = true; break; }
     await tryClickModalConfirm();
     const ok = await page.waitForFunction((prev) => {
       const h = document.getElementById('FRONT_IMG_ID');
       const hv = h ? (h.value || '') : '';
       const s = document.getElementById('FRONT_IMG_ID_ID');
       const sv = s ? (s.textContent || '').trim() : '';
-      return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
+      const err = /通信に失敗しました|アップロードに失敗|エラーが発生しました/.test(document.body?.innerText || '');
+      return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv) || err;
     }, before, { timeout: 8_000 }).then(() => true).catch(() => false);
-    if (ok) break;
+    if (ok && await hasCommError()) { commError = true; break; }
+    if (ok && await isDone()) break;
   }
 
   if (!(await isDone())) {
     // 失敗時はモーダルのHTMLも残して次回修正できるようにする。
     await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', {
-      diagnostics: { url: page.url() },
+      diagnostics: { url: page.url(), commError },
     }).catch(() => {});
+    if (commError) {
+      // SalonBoard 側がアップロードを拒否 (通信に失敗しました)。多くは画像が小さい/不正。
+      return { ok: false, reason: 'sb_upload_comm_failed' };
+    }
     return { ok: false, reason: 'imageId_not_set' };
   }
   // 画像ID は hidden 優先、無ければ span から。
