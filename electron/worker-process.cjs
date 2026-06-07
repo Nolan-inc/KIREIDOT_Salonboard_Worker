@@ -1029,7 +1029,7 @@ async function processShop(target, channels, runId, opts = {}) {
         // 美容室(hair)はメニュー→スタイル一覧 (/CNB/draft/styleList) に分岐。
         const menuLabel = genre === 'hair' ? 'スタイル' : 'メニュー';
         emit('shop:progress', { shopId, step: 'menus', msg: `${menuLabel}一覧を取得中…` });
-        const { rows, debug } = await scrapeMenus(page, { genre });
+        const { rows, debug } = await scrapeMenus(page, { genre, salonId: creds.salonId ?? null, shopName });
         const sent = await sendMenus(shopId, rows);
         counts.menus = sent;
         // 美容室(hair)はスタイル一覧を画像付きで salonboard_style_imports にも保存する
@@ -1046,7 +1046,7 @@ async function processShop(target, channels, runId, opts = {}) {
           // (フォトギャラリー画面で「SalonBoard フォトギャラリー一覧」を表示するため)。最大100件。
           try {
             emit('shop:progress', { shopId, step: 'menus', msg: 'フォトギャラリーを取得中…' });
-            const { rows: galleryRows } = await scrapePhotoGallery(page, { genre });
+            const { rows: galleryRows } = await scrapePhotoGallery(page, { genre, salonId: creds.salonId ?? null, shopName });
             const sentGallery = await sendPhotoGalleries(shopId, galleryRows);
             emit('shop:progress', { shopId, step: 'menus', msg: `フォトギャラリー ${sentGallery} 件保存` });
           } catch (e) {
@@ -2211,7 +2211,7 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isPhotoGallery) {
         // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル styleEdit) ----
-        const result = await postPhotoGalleryViaForm(page, payload, { baseUrl, enablePost: enablePush });
+        const result = await postPhotoGalleryViaForm(page, payload, { baseUrl, enablePost: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',

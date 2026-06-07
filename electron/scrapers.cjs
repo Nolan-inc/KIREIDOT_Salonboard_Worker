@@ -2582,7 +2582,7 @@ async function scrapeStylists(page, _opts = {}) {
  *   - 紐付けクーポン: input[name="...couponId"] value="CP..."
  *   - ページング: a.pgLink / a.pgNext / a.pgLast (?pn=N)
  */
-async function scrapeStyles(page, _opts = {}) {
+async function scrapeStyles(page, opts = {}) {
   const MAX_PAGES = 30;
   // フォトギャラリー画面で「SalonBoard スタイル一覧」を表示するための取得上限。
   // 多すぎると画面/取込負荷が大きいので最大 100 件で打ち切る (ユーザー要望)。
@@ -2594,6 +2594,15 @@ async function scrapeStyles(page, _opts = {}) {
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+
+    // 1ページ目: グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
+    if (pageNum === 1) {
+      const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+      if (sel.selected) {
+        await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      }
+    }
 
     const pageData = await page.evaluate(() => {
       function txt(el) {
@@ -2725,12 +2734,18 @@ async function scrapeStyles(page, _opts = {}) {
 // 画像URL/タイトル/キャプション/ジャンル/掲載状態を抽出する。最大100件。
 // 実DOM: salonboard_code/エステサロン/フォトギャラリー_photoGalleryEdit.html
 // =====================================================================
-async function scrapePhotoGallery(page, _opts = {}) {
+async function scrapePhotoGallery(page, opts = {}) {
   const MAX_ITEMS = 100;
   let url;
   try { url = new URL('/CNK/draft/photoGalleryEdit', 'https://salonboard.com').toString(); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
+  const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+  if (sel.selected) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  }
 
   const pageData = await page.evaluate(() => {
     function txt(el) { return el ? (el.textContent || '').trim() : ''; }
@@ -4220,6 +4235,79 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
 }
 
 // =====================================================================
+// グループ店舗(1ログイン複数サロン)対応:
+// 現在 /CNC/groupTop/ (サロン選択画面) に居る場合、対象サロンを選んで店舗文脈に入る。
+// worker-process.cjs の ensureStoreSelected と同等の処理を scrapers 内でも使えるようにする。
+// スタイル/フォトギャラリーは page.goto で /CNB ・/CNK の編集画面に直接遷移するため、
+// 遷移後に groupTop へ跳ね返されることがある。各 goto 後にこれを呼んで復帰させる。
+//
+// opts: { salonId?, shopName? }
+// 戻り値: { ok, selected, reason? }
+//   - groupTop に居ない (単一店舗 or 既に店舗文脈) → { ok:true, selected:false }
+//   - サロンを選べた → { ok:true, selected:true }
+//   - 選べない → { ok:false, reason }
+// =====================================================================
+async function ensureSalonSelected(page, opts = {}) {
+  const salonId = (opts.salonId || '').trim().toUpperCase();
+  const shopName = (opts.shopName || '').trim();
+
+  let onGroupTop = /\/CNC\/groupTop/i.test(page.url());
+  if (!onGroupTop) {
+    onGroupTop = await page
+      .locator('#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^="H"]')
+      .first()
+      .count()
+      .then((n) => n > 0)
+      .catch(() => false);
+  }
+  if (!onGroupTop) {
+    return { ok: true, selected: false };
+  }
+
+  const stores = await page.evaluate(() => {
+    const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+    const out = [];
+    for (const a of Array.from(document.querySelectorAll('a[id^="H"]'))) {
+      const id = (a.getAttribute('id') || '').trim();
+      if (!/^H\d{6,}$/i.test(id)) continue;
+      out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
+    }
+    return out;
+  });
+  if (!stores.length) return { ok: false, selected: false, reason: 'group_top_no_stores' };
+
+  let target = null;
+  if (salonId) {
+    target = stores.find((s) => s.id === salonId) || null;
+    if (!target) return { ok: false, selected: false, reason: `salon_id_not_in_group(${salonId})` };
+  } else if (shopName) {
+    const want = shopName.replace(/\s+/g, '');
+    target =
+      stores.find((s) => s.name && (s.name === want || s.name.includes(want) || want.includes(s.name))) || null;
+    if (!target) return { ok: false, selected: false, reason: 'group_top_name_unmatched' };
+  } else {
+    // salon_id も店舗名も無く、グループが1店舗だけならそれを選ぶ。複数なら特定不能。
+    if (stores.length === 1) target = stores[0];
+    else return { ok: false, selected: false, reason: 'group_top_no_target' };
+  }
+
+  try {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
+      page.locator(`a[id="${target.id}"]`).first().click({ timeout: 8_000 }),
+    ]);
+    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  } catch (e2) {
+    return { ok: false, selected: false, reason: `store_click_failed: ${e2?.message ?? e2}`, salonId: target.id };
+  }
+
+  if (/\/CNC\/groupTop/i.test(page.url())) {
+    return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
+  }
+  return { ok: true, selected: true, salonId: target.id };
+}
+
+// =====================================================================
 // フォトギャラリー投稿 (push_photo_gallery)
 //
 // 投稿先は payload.kind で分岐:
@@ -4302,6 +4390,19 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   try { formUrl = new URL('/CNK/draft/photoGalleryEdit', baseUrl).toString(); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+
+  // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直してから入り直す。
+  {
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+    if (!sel.ok) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'store_select', { diagnostics: { url: page.url(), reason: sel.reason } });
+      return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason}, capture=${cap || '?'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`, 'STORE_SELECT_REQUIRED', true);
+    }
+    if (sel.selected) {
+      await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    }
+  }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -4522,6 +4623,17 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     const listUrl = new URL('/CNB/draft/styleList/', baseUrl).toString();
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直す。
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+    if (!sel.ok) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_store_select', { diagnostics: { url: page.url(), reason: sel.reason } });
+      return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason}, capture=${cap || '?'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`, 'STORE_SELECT_REQUIRED', true);
+    }
+    if (sel.selected) {
+      // サロン選択後にスタイル一覧へ入り直す。
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    }
   } catch (_e) { /* noop */ }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
