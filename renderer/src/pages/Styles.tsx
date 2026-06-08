@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Loader2, RefreshCcw, Scissors, Image as ImageIcon, ImageOff } from 'lucide-react';
+import { Loader2, RefreshCcw, Scissors, Image as ImageIcon, ImageOff, FlaskConical, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
 import {
   fetchStyleList,
   fetchPhotoGalleryList,
   fetchShopGenre,
+  fetchStaffList,
   type StyleRow,
   type PhotoGalleryRow,
+  type StaffRow,
 } from '../lib/data';
 import { useSyncController } from '../lib/sync-controller';
 
@@ -107,6 +109,9 @@ export function Styles() {
         </button>
       </div>
 
+      {/* スタイル画像アップロードのテスト投稿パネル (美容室のみ) */}
+      {isHair && <StyleTestPanel />}
+
       <Card className="overflow-hidden">
         {loading ? (
           <div className="flex items-center gap-2 px-5 py-10 text-[13px] text-ink-soft">
@@ -160,5 +165,150 @@ export function Styles() {
         )}
       </Card>
     </div>
+  );
+}
+
+// =====================================================================
+// スタイル画像アップロードのテスト投稿パネル
+// 画像URLとスタイリストを選んで「テスト投稿」を押すと、worker が実Chrome優先で
+// styleEdit を開き、画像アップロード(〜任意で登録)まで実行。各ステップを表示する。
+// =====================================================================
+type TestLine = { at: string; text: string; kind: 'info' | 'ok' | 'error' };
+
+function StyleTestPanel() {
+  const scope = useEffectiveScope();
+  const [stylists, setStylists] = useState<StaffRow[]>([]);
+  const [imageUrl, setImageUrl] = useState('');
+  const [stylistExt, setStylistExt] = useState('');
+  const [enablePost, setEnablePost] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [lines, setLines] = useState<TestLine[]>([]);
+
+  const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+
+  useEffect(() => {
+    if (!scope?.shopId) return;
+    let cancelled = false;
+    fetchStaffList(scope).then((rows) => {
+      if (cancelled) return;
+      // SalonBoard スタイリスト(T...)のみ
+      const t = rows.filter((s) => (s.external_id || '').toUpperCase().startsWith('T'));
+      setStylists(t);
+      if (t[0]?.external_id) setStylistExt(t[0].external_id);
+      // 取得済みスタイルの先頭画像をデフォルト画像にする(あれば)
+      if (!imageUrl) {
+        fetchStyleList(scope).then((styles) => {
+          const first = styles.find((x) => x.image_url)?.image_url;
+          if (first && !cancelled) setImageUrl(first);
+        });
+      }
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
+
+  useEffect(() => {
+    if (!bridge?.onWorkerEvent) return;
+    return bridge.onWorkerEvent((msg) => {
+      if (msg.type !== 'style:test') return;
+      const p = msg.payload;
+      const now = new Date().toLocaleTimeString('ja-JP');
+      if (p.step === 'done') {
+        setRunning(false);
+        setLines((c) => [...c, { at: now, text: p.ok ? (p.msg || '✅ 完了') : (p.error || `失敗 (${p.errorCode || 'unknown'})`), kind: p.ok ? 'ok' : 'error' }]);
+      } else {
+        setLines((c) => [...c, { at: now, text: p.msg || p.step, kind: 'info' }]);
+      }
+    });
+  }, [bridge]);
+
+  const canRun = !!scope?.shopId && !!imageUrl.trim() && !running;
+
+  const run = async () => {
+    if (!scope?.shopId || !bridge?.workerTestStyleImage) return;
+    setLines([]);
+    setRunning(true);
+    await bridge.workerTestStyleImage({
+      shopId: scope.shopId,
+      imageUrl: imageUrl.trim(),
+      stylistExternalId: stylistExt || null,
+      enablePost,
+    });
+    setTimeout(() => setRunning(false), 120_000); // 安全網
+  };
+
+  if (!bridge?.workerTestStyleImage) return null; // ブラウザ版では非表示
+
+  const ic = 'h-10 w-full rounded-[10px] border border-hairline bg-white px-3 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20';
+
+  return (
+    <Card className="border-amber-200">
+      <div className="border-b border-hairline/70 bg-amber-50/60 px-5 py-3">
+        <div className="flex items-center gap-2 text-[14px] font-bold text-ink">
+          <FlaskConical className="h-4 w-4 text-amber-600" /> スタイル画像アップロード テスト
+        </div>
+        <p className="mt-0.5 text-[11px] text-ink-soft">
+          画像URLとスタイリストを選んで「テスト投稿」を押すと、実ブラウザを表示して
+          styleEdit を開き、画像アップロード（任意で登録）まで実行します。
+        </p>
+      </div>
+      <div className="px-5 py-4">
+        {!scope?.shopId ? (
+          <p className="text-[12px] text-ink-soft">先に店舗を選択してください。</p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">画像URL (公開URL)</span>
+              <input type="text" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…/image.jpg" className={ic} />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">担当スタイリスト</span>
+              {stylists.length === 0 ? (
+                <span className="text-[11px] text-amber-700">SalonBoard スタイリスト(T…)が未取得。先にスタイリストを同期してください。</span>
+              ) : (
+                <select value={stylistExt} onChange={(e) => setStylistExt(e.target.value)} className={ic}>
+                  {stylists.map((s) => (
+                    <option key={s.id} value={s.external_id ?? ''}>{s.full_name}（{s.external_id}）</option>
+                  ))}
+                </select>
+              )}
+            </label>
+            <label className="flex items-center gap-2 text-[12px]">
+              <input type="checkbox" checked={enablePost} onChange={(e) => setEnablePost(e.target.checked)} className="h-4 w-4 accent-brand" />
+              <span className={enablePost ? 'font-semibold text-amber-700' : 'text-ink-soft'}>
+                実登録する (ON: スタイル登録まで実行 / OFF: 画像アップロードのみ・登録しない)
+              </span>
+            </label>
+            <div>
+              <button
+                type="button"
+                onClick={run}
+                disabled={!canRun}
+                className="inline-flex h-10 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-5 text-[13px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+              >
+                {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+                {running ? 'テスト実行中… (ブラウザが開きます)' : 'テスト投稿'}
+              </button>
+            </div>
+
+            {lines.length > 0 && (
+              <div className="mt-1 rounded-[10px] border border-hairline bg-surface-soft/60 p-3">
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">実行ログ</div>
+                <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                  {lines.map((l, i) => (
+                    <div key={i} className={l.kind === 'ok' ? 'text-emerald-700' : l.kind === 'error' ? 'text-red-600' : 'text-ink-soft'}>
+                      <span className="text-muted-faint">{l.at}</span>{' '}
+                      {l.kind === 'error' && <AlertTriangle className="mr-0.5 inline h-3 w-3" />}
+                      {l.kind === 'ok' && <CheckCircle2 className="mr-0.5 inline h-3 w-3" />}
+                      {l.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }

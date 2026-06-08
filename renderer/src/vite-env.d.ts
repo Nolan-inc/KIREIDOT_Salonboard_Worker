@@ -96,6 +96,16 @@ type WorkerEvent =
       };
     }
   | {
+      type: 'style:test';
+      payload: {
+        step: string;
+        ok?: boolean;
+        msg?: string;
+        error?: string;
+        errorCode?: string;
+      };
+    }
+  | {
       type: 'cancel:test';
       payload: {
         step: string;
@@ -177,6 +187,16 @@ interface Window {
       enablePush?: boolean;
       /** 予約一覧からの挿入時に渡す本物の予約ID (成功時に同期状態を synced に更新) */
       bookingId?: string;
+    }) => Promise<{ ok: boolean }>;
+    /** スタイル画像アップロードのテスト (画面表示・実Chrome優先)。結果は style:test イベントで届く。 */
+    workerTestStyleImage: (payload: {
+      shopId: string;
+      imageUrl: string;
+      stylistExternalId?: string | null;
+      title?: string;
+      caption?: string;
+      shopName?: string | null;
+      enablePost?: boolean;
     }) => Promise<{ ok: boolean }>;
     /** 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。結果は cancel:test イベントで届く。 */
     workerCancelBooking: (payload: {

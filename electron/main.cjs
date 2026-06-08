@@ -498,6 +498,11 @@ ipcMain.handle('worker:test-push', async (_event, payload) => {
   const ok = postToWorker({ type: 'test-push', payload });
   return { ok };
 });
+ipcMain.handle('worker:test-style-image', async (_event, payload) => {
+  // 単発のスタイル画像アップロードテスト (画面表示・実Chrome優先)。
+  const ok = postToWorker({ type: 'test-style-image', payload });
+  return { ok };
+});
 ipcMain.handle('worker:cancel-booking', async (_event, payload) => {
   // 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。
   const ok = postToWorker({ type: 'cancel-booking', payload });

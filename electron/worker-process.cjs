@@ -55,6 +55,35 @@ function browserLaunchOptions(base = {}) {
   return opts;
 }
 
+// 投稿(push/書き込み)用ブラウザ起動。
+// SalonBoard のスタイル画像アップロード(CN_CMN_imageUploaderModal の XHR)は
+// **Chrome for Testing(同梱Chromium)だと「通信に失敗しました」になり、OSインストール済みの
+// 実 Google Chrome だと成功する**ことが判明したため、push 経路は **実Chrome(channel:'chrome')を
+// 優先**で起動し、無ければ同梱Chromium→最後にheadlessへフォールバックする。
+// (取得スクレイピングは従来どおり同梱Chromiumのまま。)
+async function launchPushBrowser(base = {}) {
+  const args = base.args || ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
+  const headless = base.headless !== undefined ? base.headless : true;
+  const slowMo = base.slowMo || 0;
+  // 環境変数で明示的に同梱を強制したいとき用 (=実Chromeを使わない)。
+  const forceBundled = /^(1|true|yes)$/i.test(process.env.SALONBOARD_FORCE_BUNDLED_CHROMIUM ?? '');
+  if (!forceBundled) {
+    try {
+      const b = await chromium.launch({ channel: 'chrome', headless, slowMo, args });
+      return { browser: b, usedChrome: true };
+    } catch (e) {
+      emit('log', { level: 'warn', msg: `実Chrome(channel:chrome)起動不可→同梱Chromiumで続行: ${e?.message?.split('\n')[0] ?? e}`, at: new Date().toISOString() });
+    }
+  }
+  try {
+    const b = await chromium.launch({ headless, slowMo, args });
+    return { browser: b, usedChrome: false };
+  } catch (_e) {
+    const b = await chromium.launch({ headless: true, args });
+    return { browser: b, usedChrome: false };
+  }
+}
+
 // プロセス全体のクラッシュ防止:
 // スクレイピング中の未捕捉の例外/Promise reject (Playwright の
 // "Execution context was destroyed" 等) が utilityProcess を即死させ、
@@ -2093,18 +2122,11 @@ async function runPushJobs({ showBrowser } = {}) {
         '--no-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
       ];
-      const pushLaunchBase = { headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs };
-      try {
-        browser = await chromium.launch(browserLaunchOptions(pushLaunchBase));
-      } catch (e) {
-        // 実Chrome無し/headed起動失敗時のフォールバック。
-        if (USE_SYSTEM_CHROME) emit('log', { level: 'warn', msg: `実Chrome起動失敗→同梱Chromiumで続行: ${e?.message ?? e}`, at: new Date().toISOString() });
-        try {
-          browser = await chromium.launch(pushLaunchBase);
-        } catch (_e2) {
-          browser = await chromium.launch({ headless: true, args: pushArgs });
-        }
-      }
+      // 投稿(書き込み)は実Chrome優先で起動 (スタイル画像アップロードが
+      // Chrome for Testing だと失敗するため)。
+      const launched = await launchPushBrowser({ headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs });
+      browser = launched.browser;
+      emit('log', { level: 'info', msg: `[${tag}] ブラウザ: ${launched.usedChrome ? '実Google Chrome' : '同梱Chromium'}`, at: new Date().toISOString() });
       const ssPath = storageStatePathFor(job.shop_id);
       const ctx = await browser.newContext({
         ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
@@ -2678,6 +2700,85 @@ async function runTestPush(payload) {
 }
 
 /**
+ * スタイル画像アップロードのテスト。画面(予約同期くん「スタイル」ページ)から実行。
+ * 指定店舗で styleEdit を開き、テスト画像を FRONT にアップロードする所まで行う
+ * (enablePost=false なので最終登録はしない=安全)。実Chrome優先で画面表示。
+ * payload: { shopId, imageUrl, stylistExternalId?, enablePost? }
+ * 結果は style:test イベントで返す。
+ */
+async function runTestStyleImage(payload) {
+  const step = (s, extra = {}) => emit('style:test', { step: s, ...extra });
+  const p = payload || {};
+  if (!p.shopId || !p.imageUrl) {
+    step('done', { ok: false, error: '必須項目が不足 (店舗・画像URL)' });
+    return;
+  }
+  step('start', { msg: `開始: shop=${String(p.shopId).slice(0, 8)} 画像=${String(p.imageUrl).slice(0, 60)}… 実登録=${p.enablePost ? 'ON' : 'OFF(画像のみ)'}` });
+
+  let creds;
+  try { creds = await revealCredentials(p.shopId); }
+  catch (e) { step('done', { ok: false, error: `認証情報の取得に失敗: ${e?.message ?? e}` }); return; }
+  const baseUrl = creds.baseUrl || 'https://salonboard.com/login/';
+
+  let browser = null;
+  try {
+    step('launch', { msg: 'ブラウザ起動 (画面表示)' });
+    const launched = await launchPushBrowser({ headless: false, slowMo: 400 });
+    browser = launched.browser;
+    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '同梱Chromium (Chrome for Testing)'}` });
+
+    const ssPath = storageStatePathFor(p.shopId);
+    const ctx = await browser.newContext({
+      ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1366, height: 900 },
+    });
+    const page = await ctx.newPage();
+
+    step('login', { msg: 'ログイン確認中' });
+    let auth = await isLoggedIn(page, baseUrl, 'hair');
+    if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
+    if (auth !== 'logged_in') {
+      step('login', { msg: 'ID/パスワードを入力中…' });
+      const lr = await tryLogin(page, { ...creds, slow: true });
+      if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
+      await saveStorageState(ctx, ssPath);
+    }
+    step('login_ok', { msg: 'ログイン成功' });
+
+    // グループ店舗のサロン選択。
+    try {
+      const sel = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
+      if (sel.selected) step('store', { msg: `サロン選択: ${sel.salonId ?? ''}` });
+      if (!sel.ok) { step('done', { ok: false, error: `サロン選択に失敗: ${sel.reason ?? 'unknown'} (サロンID登録が必要かも)` }); await browser.close().catch(() => {}); return; }
+    } catch (_e) { /* 単一店舗は no-op */ }
+
+    step('upload', { msg: 'styleEdit を開いて画像をアップロードします…' });
+    const result = await postPhotoGalleryViaForm(page, {
+      kind: 'style',
+      image_url: p.imageUrl,
+      images: [p.imageUrl],
+      title: p.title || 'テスト投稿',
+      caption: p.caption || 'テスト',
+      author_external_id: p.stylistExternalId || null,
+    }, { baseUrl, enablePost: !!p.enablePost, salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
+
+    if (result.status === 'ok') {
+      step('done', { ok: true, msg: `✅ 成功 (画像ID=${result.externalId || '?'})${p.enablePost ? ' スタイル登録まで完了' : ' 画像アップロードOK(登録は未実行)'}` });
+    } else if (result.status === 'confirm_only') {
+      step('done', { ok: true, msg: '✅ 画像アップロードOK (実登録OFFのため登録は未実行)' });
+    } else {
+      step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode || '?'}] ${result.reason}` });
+    }
+    await page.waitForTimeout(4000).catch(() => {});
+    await browser.close().catch(() => {});
+  } catch (e) {
+    step('done', { ok: false, error: `例外: ${e?.message ?? e}` });
+    await browser?.close().catch(() => {});
+  }
+}
+
+/**
  * 単発キャンセル。画面 (予約同期くん) からの直接実行。reserveId を使って
  * SalonBoard 上の予約をキャンセルし、成功したら DB を cancelled + cancelled_synced に。
  *
@@ -2927,6 +3028,17 @@ process.parentPort?.on('message', async (event) => {
             return;
           }
           await runTestPush(m.payload ?? {});
+        });
+        break;
+      case 'test-style-image':
+        await enqueueSerial(async () => {
+          try {
+            await ensureReady();
+          } catch (e) {
+            emit('style:test', { step: 'done', ok: false, error: e instanceof Error ? e.message : String(e) });
+            return;
+          }
+          await runTestStyleImage(m.payload ?? {});
         });
         break;
       case 'cancel-booking':
