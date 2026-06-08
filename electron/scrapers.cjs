@@ -4764,7 +4764,11 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   if (!uploaded.ok) {
     // 画像アップロードの /imgreg/ 通信ログ(URL/status/本文先頭)を捉えていれば要約して残す。
     const imgregSummary = Array.isArray(uploaded.imgreg) && uploaded.imgreg.length
-      ? uploaded.imgreg.map((r) => `${(r.url || '').replace(/^https?:\/\/[^/]+/, '')} → ${r.failed ? 'FAIL:' + r.failed : 'HTTP ' + r.status}`).join(' | ')
+      ? uploaded.imgreg.map((r) => {
+          if (r.direct_post_params) return `directParams:${JSON.stringify(r.direct_post_params)}`;
+          if (r.via === 'direct_post') return `directPOST ${(r.url || '').replace(/^https?:\/\/[^/]+/, '')} → ${r.failed ? 'FAIL:' + r.failed : 'HTTP ' + r.status}`;
+          return `${(r.url || '').replace(/^https?:\/\/[^/]+/, '')} → ${r.failed ? 'FAIL:' + r.failed : 'HTTP ' + r.status}`;
+        }).join(' | ')
       : '(no imgreg log)';
     const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason, imgreg: uploaded.imgreg || [] } });
     if (uploaded.reason === 'sb_upload_comm_failed') {
@@ -4948,9 +4952,12 @@ async function uploadHairStyleFrontImage(page, file) {
   // setUploadImage(...) を呼んで親フォーム(FRONT_IMG_ID 等)に反映する。
   // ============================================================
   if (!chooserDone) {
-    // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ。
-    await page.locator('#imgUploadForm, input.jscImageUploaderModalInput').first()
-      .waitFor({ state: 'attached', timeout: 12_000 }).catch(() => {});
+    // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ (AJAXで遅れて入るため十分待つ)。
+    await page.waitForFunction(() => {
+      const f = document.querySelector('#imgUploadForm');
+      const t = f && f.querySelector('input[name="targetActionId"]');
+      return !!(t && (t.value || '').trim());
+    }, null, { timeout: 15_000 }).catch(() => {});
     // 必要パラメータを #imgUploadForm から取得 + doUpload の絶対URLを組み立てる。
     const params = await page.evaluate(() => {
       const g = (name) => {
@@ -4972,8 +4979,13 @@ async function uploadHairStyleFrontImage(page, file) {
         modified: g('modified'),
         pubManageId: g('pubManageId'),
         hasForm: !!document.querySelector('#imgUploadForm'),
+        ctxStr: (typeof window !== 'undefined' && window.CONTEXT_URL_STR) || null,
+        urlStr: (typeof window !== 'undefined' && window.URL_STR) || null,
       };
     }).catch(() => null);
+
+    // 診断: 直接POSTのパラメータが取れたか必ず記録する。
+    imgregLog.push({ direct_post_params: params ? { hasForm: params.hasForm, targetActionId: params.targetActionId ? 'set' : 'EMPTY', token: params.token ? 'set' : 'EMPTY', setImgId: params.setImgId ? 'set' : 'EMPTY', ctxStr: params.ctxStr, urlStr: params.urlStr, url: params.url } : 'params=null' });
 
     if (params && params.hasForm && params.targetActionId) {
       try {
