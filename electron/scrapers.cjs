@@ -4661,15 +4661,88 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   await trigger.click({ timeout: 8_000 }).catch(() => {});
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
-  // file chooser で入らなかったらモーダル/直 input にセット。
+  // ============================================================
+  // 直接POST方式 (本命): エステのフォトギャラリーも美容室と同じ
+  // CN_CMN_imageUploaderModal(#imgUploadForm / doUpload) を使う。
+  // ブラウザXHR(file_upload)は ERR_ABORTED で中断するため、worker から
+  // page.context().request.post で doUpload へ直接 multipart POST する。
+  // レスポンスの画像ID等をページの setUploadImage(...) で当該枠に反映する。
+  // ============================================================
+  if (!chooserDone) {
+    await page.waitForFunction(() => {
+      const f = document.querySelector('#imgUploadForm');
+      const t = f && f.querySelector('input[name="targetActionId"]');
+      return !!(t && (t.value || '').trim());
+    }, null, { timeout: 15_000 }).catch(() => {});
+    const params = await page.evaluate(() => {
+      const f = document.querySelector('#imgUploadForm');
+      if (!f) return null;
+      const g = (name) => { const el = f.querySelector(`input[name="${name}"]`); return el ? (el.value || '') : ''; };
+      const ctx = (typeof window !== 'undefined' && window.CONTEXT_URL_STR) || '/CNK';
+      const ustr = (typeof window !== 'undefined' && window.URL_STR) || 'imgUpload/';
+      const wFlg = g('wFlg');
+      const url = ctx + '/imgreg/' + ustr + 'doUpload' + (wFlg === 'true' ? '?wFlg=true' : '');
+      return {
+        url, setImgId: g('setImgId'), dataKey: g('dataKey'), targetActionId: g('targetActionId'),
+        token: g('org.apache.struts.taglib.html.TOKEN'), storeId: g('STORE_ID'),
+        modified: g('modified'), pubManageId: g('pubManageId'), hasForm: true,
+      };
+    }).catch(() => null);
+
+    if (params && params.targetActionId) {
+      try {
+        const buf = fs.readFileSync(file);
+        const name = path.basename(file);
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        const absUrl = new URL(params.url, page.url()).toString();
+        const resp = await page.context().request.post(absUrl, {
+          timeout: 60_000,
+          multipart: {
+            formFile: { name, mimeType: mime, buffer: buf },
+            setImgId: params.setImgId, dataKey: params.dataKey, targetActionId: params.targetActionId,
+            'org.apache.struts.taglib.html.TOKEN': params.token, STORE_ID: params.storeId,
+            modified: params.modified, pubManageId: params.pubManageId,
+          },
+        });
+        const html = await resp.text().catch(() => '');
+        const applied = await page.evaluate((resHtml) => {
+          try {
+            const tmp = document.createElement('div'); tmp.innerHTML = resHtml;
+            const get = (id) => { const e = tmp.querySelector('#' + id); return e ? (e.value !== undefined ? e.value : e.textContent) : ''; };
+            if (String(get('userErrorFlg')) !== '0') return { ok: false };
+            const imageId = get('imageId'); const elementName = get('elementName'); const imageFilePath = get('imageFilePath');
+            if (typeof window.setUploadImage === 'function') { try { window.setUploadImage(imageId, elementName, imageFilePath); } catch (_e) {} }
+            if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
+            try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
+            return { ok: true, imageId };
+          } catch (_e) { return { ok: false }; }
+        }, html).catch(() => ({ ok: false }));
+
+        if (applied && applied.ok) {
+          const ok = await page.waitForFunction(({ i, prev }) => {
+            const el = document.querySelector(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryPhoto"]`);
+            const v = el ? (el.value || '') : '';
+            return !!v && v !== prev;
+          }, { i: idx, prev: before }, { timeout: 8_000 }).then(() => true).catch(() => false);
+          if (ok) {
+            const imageId = await idHidden.inputValue().catch(() => '');
+            return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
+          }
+        }
+      } catch (_e) { /* フォールバックへ */ }
+    }
+  }
+
+  // file chooser で入らなかったらモーダル/直 input にセット (直接POSTが使えない時のフォールバック)。
   if (!chooserDone) {
     await page.waitForTimeout(700);
-    const fileInput = page.locator('input[type="file"]:visible, .modal input[type="file"], input[type="file"]').first();
+    const fileInput = page.locator('input.jscImageUploaderModalInput, input[type="file"]:visible, .modal input[type="file"], input[type="file"]').first();
     if ((await fileInput.count().catch(() => 0)) > 0) {
       await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
       await page.waitForTimeout(1200);
-      // モーダルに「登録する」「アップロード」等があれば押す (最前面 visible に限定)。
-      const okBtn = page.locator('a:visible:has-text("登録する"), button:visible:has-text("登録する"), a:visible:has-text("アップロード"), button:visible:has-text("アップロード"), input[type="submit"][value*="登録"]:visible').first();
+      // モーダルの「登録する」(input.jscImageUploaderModalSubmitButton)。
+      const okBtn = page.locator('input.jscImageUploaderModalSubmitButton, a:visible:has-text("登録する"), button:visible:has-text("登録する"), input[type="submit"][value*="登録"]:visible').first();
       if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
         await okBtn.click({ timeout: 8_000 }).catch(() => {});
       }

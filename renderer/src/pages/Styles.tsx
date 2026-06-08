@@ -109,8 +109,8 @@ export function Styles() {
         </button>
       </div>
 
-      {/* スタイル画像アップロードのテスト投稿パネル (美容室のみ) */}
-      {isHair && <StyleTestPanel />}
+      {/* 画像アップロードのテスト投稿パネル (美容室=スタイル / エステ等=フォトギャラリー) */}
+      {genre && <StyleTestPanel isHair={isHair} />}
 
       <Card className="overflow-hidden">
         {loading ? (
@@ -175,7 +175,7 @@ export function Styles() {
 // =====================================================================
 type TestLine = { at: string; text: string; kind: 'info' | 'ok' | 'error' };
 
-function StyleTestPanel() {
+function StyleTestPanel({ isHair }: { isHair: boolean }) {
   const scope = useEffectiveScope();
   const [stylists, setStylists] = useState<StaffRow[]>([]);
   const [imageUrl, setImageUrl] = useState('');
@@ -184,28 +184,33 @@ function StyleTestPanel() {
   const [running, setRunning] = useState(false);
   const [lines, setLines] = useState<TestLine[]>([]);
 
+  const target = isHair ? 'スタイル' : 'フォトギャラリー';
+  const formName = isHair ? 'styleEdit' : 'photoGalleryEdit';
   const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
 
   useEffect(() => {
     if (!scope?.shopId) return;
     let cancelled = false;
-    fetchStaffList(scope).then((rows) => {
-      if (cancelled) return;
-      // SalonBoard スタイリスト(T...)のみ
-      const t = rows.filter((s) => (s.external_id || '').toUpperCase().startsWith('T'));
-      setStylists(t);
-      if (t[0]?.external_id) setStylistExt(t[0].external_id);
-      // 取得済みスタイルの先頭画像をデフォルト画像にする(あれば)
-      if (!imageUrl) {
-        fetchStyleList(scope).then((styles) => {
-          const first = styles.find((x) => x.image_url)?.image_url;
-          if (first && !cancelled) setImageUrl(first);
-        });
-      }
-    });
+    // 美容室のみスタイリスト(T...)が必須。エステは任意。
+    if (isHair) {
+      fetchStaffList(scope).then((rows) => {
+        if (cancelled) return;
+        const t = rows.filter((s) => (s.external_id || '').toUpperCase().startsWith('T'));
+        setStylists(t);
+        if (t[0]?.external_id) setStylistExt(t[0].external_id);
+      });
+    }
+    // デフォルト画像: 美容室=取得済みスタイル / エステ=取得済みフォトギャラリーの先頭画像。
+    if (!imageUrl) {
+      const loader = isHair ? fetchStyleList(scope) : fetchPhotoGalleryList(scope);
+      loader.then((rows: Array<{ image_url: string | null }>) => {
+        const first = rows.find((x) => x.image_url)?.image_url;
+        if (first && !cancelled) setImageUrl(first);
+      });
+    }
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope?.shopId]);
+  }, [scope?.shopId, isHair]);
 
   useEffect(() => {
     if (!bridge?.onWorkerEvent) return;
@@ -231,7 +236,8 @@ function StyleTestPanel() {
     await bridge.workerTestStyleImage({
       shopId: scope.shopId,
       imageUrl: imageUrl.trim(),
-      stylistExternalId: stylistExt || null,
+      kind: isHair ? 'style' : 'photo_gallery',
+      stylistExternalId: isHair ? (stylistExt || null) : null,
       enablePost,
     });
     setTimeout(() => setRunning(false), 120_000); // 安全網
@@ -245,11 +251,11 @@ function StyleTestPanel() {
     <Card className="border-amber-200">
       <div className="border-b border-hairline/70 bg-amber-50/60 px-5 py-3">
         <div className="flex items-center gap-2 text-[14px] font-bold text-ink">
-          <FlaskConical className="h-4 w-4 text-amber-600" /> スタイル画像アップロード テスト
+          <FlaskConical className="h-4 w-4 text-amber-600" /> {target}画像アップロード テスト
         </div>
         <p className="mt-0.5 text-[11px] text-ink-soft">
-          画像URLとスタイリストを選んで「テスト投稿」を押すと、実ブラウザを表示して
-          styleEdit を開き、画像アップロード（任意で登録）まで実行します。
+          画像URL{isHair ? 'とスタイリスト' : ''}を選んで「テスト投稿」を押すと、実ブラウザを表示して
+          {formName} を開き、画像アップロード（任意で登録）まで実行します。
         </p>
       </div>
       <div className="px-5 py-4">
@@ -261,22 +267,24 @@ function StyleTestPanel() {
               <span className="text-[10px] uppercase tracking-wide text-muted">画像URL (公開URL)</span>
               <input type="text" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…/image.jpg" className={ic} />
             </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-[10px] uppercase tracking-wide text-muted">担当スタイリスト</span>
-              {stylists.length === 0 ? (
-                <span className="text-[11px] text-amber-700">SalonBoard スタイリスト(T…)が未取得。先にスタイリストを同期してください。</span>
-              ) : (
-                <select value={stylistExt} onChange={(e) => setStylistExt(e.target.value)} className={ic}>
-                  {stylists.map((s) => (
-                    <option key={s.id} value={s.external_id ?? ''}>{s.full_name}（{s.external_id}）</option>
-                  ))}
-                </select>
-              )}
-            </label>
+            {isHair && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted">担当スタイリスト</span>
+                {stylists.length === 0 ? (
+                  <span className="text-[11px] text-amber-700">SalonBoard スタイリスト(T…)が未取得。先にスタイリストを同期してください。</span>
+                ) : (
+                  <select value={stylistExt} onChange={(e) => setStylistExt(e.target.value)} className={ic}>
+                    {stylists.map((s) => (
+                      <option key={s.id} value={s.external_id ?? ''}>{s.full_name}（{s.external_id}）</option>
+                    ))}
+                  </select>
+                )}
+              </label>
+            )}
             <label className="flex items-center gap-2 text-[12px]">
               <input type="checkbox" checked={enablePost} onChange={(e) => setEnablePost(e.target.checked)} className="h-4 w-4 accent-brand" />
               <span className={enablePost ? 'font-semibold text-amber-700' : 'text-ink-soft'}>
-                実登録する (ON: スタイル登録まで実行 / OFF: 画像アップロードのみ・登録しない)
+                実登録する (ON: {target}登録まで実行 / OFF: 画像アップロードのみ・登録しない)
               </span>
             </label>
             <div>

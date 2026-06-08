@@ -2737,8 +2737,13 @@ async function runTestStyleImage(payload) {
     });
     const page = await ctx.newPage();
 
+    // kind: 'style'(美容室) / 'photo_gallery'(エステ等)。
+    const kind = p.kind === 'photo_gallery' ? 'photo_gallery' : 'style';
+    const isEsthetic = kind === 'photo_gallery';
+    const target = isEsthetic ? 'フォトギャラリー' : 'スタイル';
+
     step('login', { msg: 'ログイン確認中' });
-    let auth = await isLoggedIn(page, baseUrl, 'hair');
+    let auth = await isLoggedIn(page, baseUrl, isEsthetic ? 'esthetic' : 'hair');
     if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
     if (auth !== 'logged_in') {
       step('login', { msg: 'ID/パスワードを入力中…' });
@@ -2755,9 +2760,9 @@ async function runTestStyleImage(payload) {
       if (!sel.ok) { step('done', { ok: false, error: `サロン選択に失敗: ${sel.reason ?? 'unknown'} (サロンID登録が必要かも)` }); await browser.close().catch(() => {}); return; }
     } catch (_e) { /* 単一店舗は no-op */ }
 
-    step('upload', { msg: 'styleEdit を開いて画像をアップロードします…' });
+    step('upload', { msg: `${isEsthetic ? 'photoGalleryEdit' : 'styleEdit'} を開いて画像をアップロードします…` });
     const result = await postPhotoGalleryViaForm(page, {
-      kind: 'style',
+      kind,
       image_url: p.imageUrl,
       images: [p.imageUrl],
       title: p.title || 'テスト投稿',
@@ -2766,7 +2771,7 @@ async function runTestStyleImage(payload) {
     }, { baseUrl, enablePost: !!p.enablePost, salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
 
     if (result.status === 'ok') {
-      step('done', { ok: true, msg: `✅ 成功 (画像ID=${result.externalId || '?'})${p.enablePost ? ' スタイル登録まで完了' : ' 画像アップロードOK(登録は未実行)'}` });
+      step('done', { ok: true, msg: `✅ 成功 (画像ID=${result.externalId || '?'})${p.enablePost ? ` ${target}登録まで完了` : ' 画像アップロードOK(登録は未実行)'}` });
     } else if (result.status === 'confirm_only') {
       step('done', { ok: true, msg: '✅ 画像アップロードOK (実登録OFFのため登録は未実行)' });
     } else {

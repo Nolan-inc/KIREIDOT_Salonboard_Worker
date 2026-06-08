@@ -188,10 +188,12 @@ interface Window {
       /** 予約一覧からの挿入時に渡す本物の予約ID (成功時に同期状態を synced に更新) */
       bookingId?: string;
     }) => Promise<{ ok: boolean }>;
-    /** スタイル画像アップロードのテスト (画面表示・実Chrome優先)。結果は style:test イベントで届く。 */
+    /** スタイル/フォトギャラリー画像アップロードのテスト (画面表示・実Chrome優先)。結果は style:test イベントで届く。 */
     workerTestStyleImage: (payload: {
       shopId: string;
       imageUrl: string;
+      /** 'style'=美容室 / 'photo_gallery'=エステ等 */
+      kind?: 'style' | 'photo_gallery';
       stylistExternalId?: string | null;
       title?: string;
       caption?: string;
