@@ -84,6 +84,55 @@ async function launchPushBrowser(base = {}) {
   }
 }
 
+// =====================================================================
+// ステルス永続コンテキストで実Chromeを起動する。
+// Akamai Bot Manager は navigator.webdriver / --enable-automation /
+// AutomationControlled などの「自動化指紋」を見てボット判定し、doUpload を
+// ホールドする。これらを **付けない/隠す** ことで人間のChromeに近づける。
+// - launchPersistentContext(専用 userDataDir) で、Akamaiのセンサーcookie等を
+//   回をまたいで蓄積させ、信頼スコアを育てる。
+// - ignoreDefaultArgs で Playwright が付ける --enable-automation を除去。
+// - addInitScript で navigator.webdriver を undefined に偽装。
+// 返り値: { context, browser, usedChrome, persistent:true }
+// =====================================================================
+async function launchStealthPersistentContext(opts = {}) {
+  const headless = opts.headless !== undefined ? opts.headless : false;
+  const slowMo = opts.slowMo || 0;
+  // 専用プロファイル(予約同期くん専用)。worker(utilityProcess)では electron の app は
+  // 使えないため、他の永続データと同じ ~/.kireidot 配下に置く。
+  const userDataDir = path.join(os.homedir(), '.kireidot', 'salonboard-chrome-profile');
+  try { fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 }); } catch (_e) { /* noop */ }
+  // 自動化検知につながる既定フラグを除去 (--enable-automation 等)。
+  const ignoreDefaultArgs = ['--enable-automation', '--disable-blink-features=AutomationControlled'];
+  const args = [
+    '--no-sandbox',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-blink-features=AutomationControlled', // ←Playwrightが付ける別の検知系。あえて自前で付けず除去側に回す
+  ].filter((a) => a !== '--disable-blink-features=AutomationControlled');
+  const contextOpts = {
+    headless,
+    slowMo,
+    channel: 'chrome',
+    ignoreDefaultArgs,
+    args,
+    viewport: { width: 1366, height: 900 },
+    locale: 'ja-JP',
+    timezoneId: 'Asia/Tokyo',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+  };
+  const ctx = await chromium.launchPersistentContext(userDataDir, contextOpts);
+  // navigator.webdriver を隠す + 軽いステルス。
+  await ctx.addInitScript(() => {
+    try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (_e) {}
+    try { window.chrome = window.chrome || { runtime: {} }; } catch (_e) {}
+    try {
+      const orig = navigator.permissions && navigator.permissions.query;
+      if (orig) navigator.permissions.query = (p) => (p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : orig(p));
+    } catch (_e) {}
+  }).catch(() => {});
+  return { context: ctx, browser: ctx.browser(), usedChrome: true, persistent: true, userDataDir };
+}
+
 // プロセス全体のクラッシュ防止:
 // スクレイピング中の未捕捉の例外/Promise reject (Playwright の
 // "Execution context was destroyed" 等) が utilityProcess を即死させ、
@@ -2721,34 +2770,58 @@ async function runTestStyleImage(payload) {
   const baseUrl = creds.baseUrl || 'https://salonboard.com/login/';
 
   let browser = null;
+  let persistentCtx = null;
   try {
-    step('launch', { msg: 'ブラウザ起動 (画面表示)' });
-    const launched = await launchPushBrowser({ headless: false, slowMo: 400 });
+    step('launch', { msg: 'ブラウザ起動 (画面表示・実Chrome/ステルス)' });
+    // ★Akamai対策: 自動化指紋を消した実Chrome(永続プロファイル)で起動。
+    let launched;
+    try {
+      launched = await launchStealthPersistentContext({ headless: false, slowMo: 300 });
+      persistentCtx = launched.context;
+    } catch (e) {
+      step('launch', { msg: `ステルス起動に失敗(${e?.message?.split('\n')[0] ?? e})→通常起動にフォールバック` });
+      launched = await launchPushBrowser({ headless: false, slowMo: 400 });
+    }
     browser = launched.browser;
     let ver = '';
     try { ver = browser.version(); } catch (_e) {}
-    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '⚠️ 同梱Chromium (Chrome for Testing)'} (v${ver})` });
+    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '⚠️ 同梱Chromium'} (v${ver})${launched.persistent ? ' / 専用プロファイル・自動化フラグ除去' : ''}` });
 
     const ssPath = storageStatePathFor(p.shopId);
-    const ctx = await browser.newContext({
-      ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-      locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1366, height: 900 },
-    });
-    const page = await ctx.newPage();
+    // 永続コンテキストはそのまま使う。非永続時のみ newContext で作る。
+    let ctx;
+    if (persistentCtx) {
+      ctx = persistentCtx;
+      // 既存セッションがあれば storageState を流し込む(初回ログイン省略のため)。
+      try {
+        const ss = readStorageStatePath(ssPath);
+        if (ss && Array.isArray(ss.cookies) && ss.cookies.length) await ctx.addCookies(ss.cookies).catch(() => {});
+      } catch (_e) { /* noop */ }
+    } else {
+      ctx = await browser.newContext({
+        ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1366, height: 900 },
+      });
+    }
+    const page = ctx.pages()[0] || await ctx.newPage();
 
     // kind: 'style'(美容室) / 'photo_gallery'(エステ等)。
     const kind = p.kind === 'photo_gallery' ? 'photo_gallery' : 'style';
     const isEsthetic = kind === 'photo_gallery';
     const target = isEsthetic ? 'フォトギャラリー' : 'スタイル';
 
+    const closeAll = async () => {
+      try { if (persistentCtx) await persistentCtx.close(); else await browser.close(); } catch (_e) {}
+    };
+
     step('login', { msg: 'ログイン確認中' });
     let auth = await isLoggedIn(page, baseUrl, isEsthetic ? 'esthetic' : 'hair');
-    if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await browser.close().catch(() => {}); return; }
+    if (auth === 'captcha') { step('done', { ok: false, error: 'reCAPTCHA が表示されました' }); await closeAll(); return; }
     if (auth !== 'logged_in') {
       step('login', { msg: 'ID/パスワードを入力中…' });
       const lr = await tryLogin(page, { ...creds, slow: true });
-      if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await browser.close().catch(() => {}); return; }
+      if (lr.status !== 'ok') { step('done', { ok: false, error: `ログイン失敗: ${lr.reason || lr.status}` }); await closeAll(); return; }
       await saveStorageState(ctx, ssPath);
     }
     step('login_ok', { msg: 'ログイン成功' });
@@ -2757,7 +2830,7 @@ async function runTestStyleImage(payload) {
     try {
       const sel = await ensureStoreSelected(page, { salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
       if (sel.selected) step('store', { msg: `サロン選択: ${sel.salonId ?? ''}` });
-      if (!sel.ok) { step('done', { ok: false, error: `サロン選択に失敗: ${sel.reason ?? 'unknown'} (サロンID登録が必要かも)` }); await browser.close().catch(() => {}); return; }
+      if (!sel.ok) { step('done', { ok: false, error: `サロン選択に失敗: ${sel.reason ?? 'unknown'} (サロンID登録が必要かも)` }); await closeAll(); return; }
     } catch (_e) { /* 単一店舗は no-op */ }
 
     step('upload', { msg: `${isEsthetic ? 'photoGalleryEdit' : 'styleEdit'} を開いて画像をアップロードします…` });
@@ -2778,10 +2851,10 @@ async function runTestStyleImage(payload) {
       step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode || '?'}] ${result.reason}` });
     }
     await page.waitForTimeout(4000).catch(() => {});
-    await browser.close().catch(() => {});
+    await closeAll();
   } catch (e) {
     step('done', { ok: false, error: `例外: ${e?.message ?? e}` });
-    await browser?.close().catch(() => {});
+    try { if (persistentCtx) await persistentCtx.close(); else await browser?.close(); } catch (_e) {}
   }
 }
 
