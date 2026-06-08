@@ -5057,7 +5057,16 @@ async function uploadHairStyleFrontImage(page, file) {
   if ((await trigger.count().catch(() => 0)) === 0) {
     return { ok: false, reason: 'no_front_image_area' };
   }
-  await trigger.click({ timeout: 8_000 }).catch(() => {});
+  // ★エステで実証済みの方式に統一: jQuery 委譲ハンドラ(img_upload_modal_view)で
+  //   モーダルが開くため、普通の click だけだとハンドラが走らずモーダルが開かない。
+  //   FRONT 画像へ本物の MouseEvent(mousedown/mouseup/click)を dispatch して確実に発火させる。
+  await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
+  await page.evaluate(() => {
+    const el = document.querySelector('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG');
+    if (el) ['mousedown', 'mouseup', 'click'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+  }).catch(() => {});
+  // playwright のクリックも併用 (どちらかが効けばよい)。
+  await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   // ============================================================
