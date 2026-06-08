@@ -4674,11 +4674,26 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
     return { ok: false, reason: 'no_upload_trigger', diag };
   }
   diag.push({ trigger: 'found' });
-  // dn/非表示でもクリックを発火させる (handler は jQuery 委譲なので JS click でも可)。
+  // dn/非表示でもクリックを発火させる。jQuery 委譲ハンドラが拾えるよう、当該枠の
+  // mod_btn_upload(アップロードボタン) と jscUploadImg(画像) の両方に
+  // 本物の MouseEvent を dispatch する (force click だけだと handler が走らないことがある)。
   await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
-  await trigger.click({ timeout: 8_000, force: true }).catch(async () => {
-    await trigger.evaluate((el) => el.click()).catch(() => {});
-  });
+  const clickResult = await page.evaluate((i) => {
+    const fire = (el) => { if (!el) return false; ['mousedown', 'mouseup', 'click'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); return true; };
+    // idx に対応する枠 (photogalleryPhoto[i]) の table を起点に upload ボタンを探す。
+    const hid = document.querySelector(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryPhoto"]`);
+    const table = hid ? hid.closest('table.jscTableBody') : null;
+    const scope = table || document;
+    const btn = scope.querySelector('img.mod_btn_upload');
+    const img = scope.querySelector('a.jscUploadImg, img.jscPhotogalleryPhotoImg');
+    let fired = false;
+    if (btn) fired = fire(btn) || fired;
+    if (img) fired = fire(img) || fired;
+    return { fired, hasTable: !!table };
+  }, idx).catch(() => ({ fired: false }));
+  diag.push({ clickDispatch: clickResult });
+  // playwright のクリックも併用 (どちらかが効けばよい)。
+  await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   // ============================================================
@@ -4689,11 +4704,14 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   // レスポンスの画像ID等をページの setUploadImage(...) で当該枠に反映する。
   // ============================================================
   if (!chooserDone) {
-    await page.waitForFunction(() => {
+    const modalOpened = await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
       const t = f && f.querySelector('input[name="targetActionId"]');
-      return !!(t && (t.value || '').trim());
-    }, null, { timeout: 15_000 }).catch(() => {});
+      // モーダル本体やファイル input が現れたかも含めて検知。
+      const anyModal = document.querySelector('#imageUploaderModalBody #imgUploadForm, input.jscImageUploaderModalInput, .jscImageUploaderModalDropArea');
+      return !!(t && (t.value || '').trim()) || !!anyModal;
+    }, null, { timeout: 15_000 }).then(() => true).catch(() => false);
+    diag.push({ modalOpened });
     const params = await page.evaluate(() => {
       const f = document.querySelector('#imgUploadForm');
       if (!f) return null;
