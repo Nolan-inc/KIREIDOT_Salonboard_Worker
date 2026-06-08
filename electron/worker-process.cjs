@@ -42,6 +42,19 @@ const {
   scrapePhotoGallery,
 } = require('./scrapers.cjs');
 
+// =====================================================================
+// ブラウザ起動オプション。既定は Playwright 同梱 Chromium (Chrome for Testing)。
+// SALONBOARD_USE_SYSTEM_CHROME=1 のときは OS インストール済みの実 Google Chrome
+// (channel:'chrome') を使う。Chrome for Testing 固有の挙動 (アップロード等) を
+// 切り分け/回避したいときの逃げ道。実Chromeが無ければ同梱版にフォールバックする。
+// =====================================================================
+const USE_SYSTEM_CHROME = /^(1|true|yes)$/i.test(process.env.SALONBOARD_USE_SYSTEM_CHROME ?? '');
+function browserLaunchOptions(base = {}) {
+  const opts = { ...base };
+  if (USE_SYSTEM_CHROME) opts.channel = 'chrome';
+  return opts;
+}
+
 // プロセス全体のクラッシュ防止:
 // スクレイピング中の未捕捉の例外/Promise reject (Playwright の
 // "Execution context was destroyed" 等) が utilityProcess を即死させ、
@@ -723,7 +736,7 @@ async function processShop(target, channels, runId, opts = {}) {
   // showBrowser=true のときは headful (ブラウザ画面を表示)、slowMo で動きを見やすく。
   // Akamai / リクルート系の bot 検知を回避するため、自動化検知シグナルを抑える
   // フラグを追加: --disable-blink-features=AutomationControlled
-  const browser = await chromium.launch({
+  const syncLaunchBase = {
     headless: !showBrowser,
     slowMo: showBrowser ? 250 : 0,
     args: [
@@ -731,7 +744,15 @@ async function processShop(target, channels, runId, opts = {}) {
       '--no-sandbox',
       '--disable-features=IsolateOrigins,site-per-process',
     ],
-  });
+  };
+  let browser;
+  try {
+    browser = await chromium.launch(browserLaunchOptions(syncLaunchBase));
+  } catch (e) {
+    // 実Chrome(channel:'chrome')が無い等で失敗したら同梱Chromiumで起動。
+    if (USE_SYSTEM_CHROME) emit('log', { level: 'warn', msg: `実Chrome起動失敗→同梱Chromiumで続行: ${e?.message ?? e}`, at: new Date().toISOString() });
+    browser = await chromium.launch(syncLaunchBase);
+  }
   currentBrowser = browser;
   // shop_id ごとの storageState (ログインセッション) を流用
   const ssPath = storageStatePathFor(shopId);
@@ -2072,11 +2093,17 @@ async function runPushJobs({ showBrowser } = {}) {
         '--no-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
       ];
+      const pushLaunchBase = { headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs };
       try {
-        browser = await chromium.launch({ headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs });
+        browser = await chromium.launch(browserLaunchOptions(pushLaunchBase));
       } catch (e) {
-        // 完全版 Chromium が無い等で headed 起動に失敗したら headless で続行
-        browser = await chromium.launch({ headless: true, args: pushArgs });
+        // 実Chrome無し/headed起動失敗時のフォールバック。
+        if (USE_SYSTEM_CHROME) emit('log', { level: 'warn', msg: `実Chrome起動失敗→同梱Chromiumで続行: ${e?.message ?? e}`, at: new Date().toISOString() });
+        try {
+          browser = await chromium.launch(pushLaunchBase);
+        } catch (_e2) {
+          browser = await chromium.launch({ headless: true, args: pushArgs });
+        }
       }
       const ssPath = storageStatePathFor(job.shop_id);
       const ctx = await browser.newContext({
