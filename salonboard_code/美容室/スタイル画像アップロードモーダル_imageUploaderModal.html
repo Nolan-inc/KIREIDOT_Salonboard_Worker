@@ -17,6 +17,19 @@
     ※新規スタイル(styleId="")では CautionText/CreateText(写真変更確認)は dn のまま=追加確認なし。
        既存写真の差し替え時のみ確認spanが出る。
 
+  ■ CN_CMN_imageUploaderModal.js の実挙動 (JS解析で確定):
+    - ファイル input = **input.jscImageUploaderModalInput** (.jscImageUploaderModalDropArea 内、非表示)。
+      その 'change'(or drop) で prepareFileInfo() → グローバル waitImgeFile に File を保持 + プレビュー表示。
+      uploadMode が true(モーダル表示中)のときだけ動く。#fileSizeLimit を超えると #uploadError 表示。
+    - 「登録する」(input.jscImageUploaderModalSubmitButton) クリック → file_upload():
+        FormData.append('formFile', waitImgeFile) ＋ setImgId/dataKey/targetActionId/TOKEN/STORE_ID 等
+        を /imgreg/<URL_STR>doUpload?... へ $.ajax POST (timeout 35000ms)。
+        成功で #imageUploaderModalBody に結果HTMLを append し、親フォームの FRONT_IMG_ID 等を更新。
+    ★ハマりどころ: setInputFiles を **input.jscImageUploaderModalInput に**入れて change を
+      発火させないと waitImgeFile が空のまま → formFile=空で POST → サーバが35sでタイムアウト
+      →「通信に失敗しました」。generic な input[type=file] を狙うと別inputに入って失敗する(v0.2.113まで)。
+      → v0.2.114 で input.jscImageUploaderModalInput を明示ターゲットに修正。
+
   ■ 主要セレクタ:
     見出し:   p.imageUploaderModalHeadingText (「画像アップロード」)
     ドロップ: div.jscImageUploaderModalDropArea (.imageUploaderModalDropArea)

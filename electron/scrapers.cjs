@@ -4916,13 +4916,23 @@ async function uploadHairStyleFrontImage(page, file) {
   //   閉じる:       a.jscImageUploaderModalCloseButton
   //   エラー表示:   #uploadError (通信失敗時にメッセージ)
   if (!chooserDone) {
-    // モーダル内の file input にセット (drop領域に紐づく hidden input を含めて探す)。
-    const fileInput = page.locator('#imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"], input[type="file"]').first();
-    if ((await fileInput.count().catch(() => 0)) > 0) {
-      await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
-    } else {
+    // ★CN_CMN_imageUploaderModal.js の実挙動 (実JSを解析して確定):
+    //   - ファイル input は **input.jscImageUploaderModalInput** (.jscImageUploaderModalDropArea 内)。
+    //     その 'change' で prepareFileInfo() が走り、グローバル waitImgeFile に File を保持する。
+    //   - 「登録する」(jscImageUploaderModalSubmitButton) クリックで file_upload():
+    //     FormData に append('formFile', waitImgeFile) して /imgreg/.../doUpload へ POST (timeout 35s)。
+    //   → つまり **正しい input(.jscImageUploaderModalInput)に setInputFiles して change を
+    //      発火させれば waitImgeFile に File が入り、手動と同じく一瞬でアップロードされる**。
+    //      以前は generic な input[type=file] に入れて change が prepareFileInfo を呼ばず、
+    //      waitImgeFile が空のまま formFile=空で送られ、サーバが35sでタイムアウト
+    //      →「通信に失敗しました」になっていた。
+    const modalInput = page.locator('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]').first();
+    if ((await modalInput.count().catch(() => 0)) === 0) {
       return { ok: false, reason: 'no_file_input' };
     }
+    await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
+    // setInputFiles は change を発火するが、念のため明示的にも発火して prepareFileInfo を確実に呼ぶ。
+    await modalInput.dispatchEvent('change').catch(() => {});
   }
 
   const isDone = () => page.evaluate((prev) => {
