@@ -4965,10 +4965,45 @@ async function uploadHairStyleFrontImage(page, file) {
     if ((await modalInput.count().catch(() => 0)) === 0) {
       return { ok: false, reason: 'no_file_input' };
     }
-    // setInputFiles が change を発火 → prepareFileInfo → addWaitImgeFile(waitImgeFile) +
-    // previewThumbnail。手動と同じ挙動。余計な再発火/直接代入はしない(競合で
-    // doUpload が ERR_ABORTED になりうるため)。
-    await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
+    // ★ERR_ABORTED 対策: Playwright の setInputFiles はディスク上の一時ファイル
+    //   ハンドルに紐づく File を作る。jQuery が FormData にこの File を append して
+    //   POST すると、実Chromeでも doUpload が net::ERR_ABORTED (35sタイムアウト)で
+    //   止まることがある(ハンドル/ストリーミングの相性)。
+    //   → 画像バイトを **base64 でページに渡し、メモリ上の Blob/File** を作って
+    //     input.files と window.waitImgeFile にセットし、change を発火する。
+    //     こうすると multipart 本体がメモリから確実に送られ、アップロードが通る。
+    let usedInMemory = false;
+    try {
+      const buf = fs.readFileSync(file);
+      const b64 = buf.toString('base64');
+      const name = path.basename(file);
+      const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+      const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+      usedInMemory = await page.evaluate(({ b64, name, mime }) => {
+        try {
+          const bin = atob(b64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const f = new File([bytes], name, { type: mime });
+          const dt = new DataTransfer();
+          dt.items.add(f);
+          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
+          if (inp) {
+            inp.files = dt.files;
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          // 念のため waitImgeFile も同一の in-memory File に。
+          if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
+          else window.waitImgeFile = f;
+          return true;
+        } catch (_e) { return false; }
+      }, { b64, name, mime }).catch(() => false);
+    } catch (_e) { /* fallthrough */ }
+
+    if (!usedInMemory) {
+      // in-memory に失敗したら従来の setInputFiles。
+      await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
+    }
   }
 
   const isDone = () => page.evaluate((prev) => {
