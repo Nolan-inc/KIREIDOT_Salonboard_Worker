@@ -4939,6 +4939,124 @@ async function uploadHairStyleFrontImage(page, file) {
   await trigger.click({ timeout: 8_000 }).catch(() => {});
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
+  // ============================================================
+  // 直接POST方式 (本命): ブラウザの XHR(file_upload)は実Chromeでも doUpload が
+  // net::ERR_ABORTED で中断するため、ページのXHRに頼らず、worker から
+  // page.request.post で /imgreg/imgUpload/doUpload へ直接 multipart POST する。
+  // page.request はブラウザのCookie/セッションを共有しつつ、ページのライフサイクルに
+  // 縛られないので中断されない。レスポンスHTMLから画像ID等を取り出し、ページの
+  // setUploadImage(...) を呼んで親フォーム(FRONT_IMG_ID 等)に反映する。
+  // ============================================================
+  if (!chooserDone) {
+    // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ。
+    await page.locator('#imgUploadForm, input.jscImageUploaderModalInput').first()
+      .waitFor({ state: 'attached', timeout: 12_000 }).catch(() => {});
+    // 必要パラメータを #imgUploadForm から取得 + doUpload の絶対URLを組み立てる。
+    const params = await page.evaluate(() => {
+      const g = (name) => {
+        const el = document.querySelector(`#imgUploadForm input:hidden[name="${name}"], #imgUploadForm input[name="${name}"]`);
+        return el ? (el.value || '') : '';
+      };
+      // CONTEXT_URL_STR / URL_STR はグローバルに入っている(img_upload_modal_view が設定)。
+      const ctx = (typeof window !== 'undefined' && window.CONTEXT_URL_STR) || '/CNB';
+      const ustr = (typeof window !== 'undefined' && window.URL_STR) || 'imgUpload/';
+      const wFlg = g('wFlg');
+      const url = ctx + '/imgreg/' + ustr + 'doUpload' + (wFlg === 'true' ? '?wFlg=true' : '');
+      return {
+        url,
+        setImgId: g('setImgId'),
+        dataKey: g('dataKey'),
+        targetActionId: g('targetActionId'),
+        token: g('org.apache.struts.taglib.html.TOKEN'),
+        storeId: g('STORE_ID'),
+        modified: g('modified'),
+        pubManageId: g('pubManageId'),
+        hasForm: !!document.querySelector('#imgUploadForm'),
+      };
+    }).catch(() => null);
+
+    if (params && params.hasForm && params.targetActionId) {
+      try {
+        const buf = fs.readFileSync(file);
+        const name = path.basename(file);
+        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
+        const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        const absUrl = new URL(params.url, page.url()).toString();
+        const resp = await page.context().request.post(absUrl, {
+          timeout: 60_000,
+          multipart: {
+            formFile: { name, mimeType: mime, buffer: buf },
+            setImgId: params.setImgId,
+            dataKey: params.dataKey,
+            targetActionId: params.targetActionId,
+            'org.apache.struts.taglib.html.TOKEN': params.token,
+            STORE_ID: params.storeId,
+            modified: params.modified,
+            pubManageId: params.pubManageId,
+          },
+        });
+        const html = await resp.text().catch(() => '');
+        // レスポンスHTMLを #imageUploaderModalBody に流し込み、ページのハンドラ相当で
+        // 親フォームへ反映する。userErrorFlg==0 で imageId 等が入っている。
+        const applied = await page.evaluate((resHtml) => {
+          try {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = resHtml;
+            const get = (id) => { const e = tmp.querySelector('#' + id); return e ? (e.value !== undefined ? e.value : e.textContent) : ''; };
+            const userErrorFlg = get('userErrorFlg');
+            if (String(userErrorFlg) !== '0') return { ok: false, userErrorFlg };
+            const imageId = get('imageId');
+            const elementName = get('elementName');
+            const meetStandardFlg = get('meetStandardFlg');
+            const imageFilePath = get('imageFilePath');
+            const lengthSizeOrg = get('lengthSizeOrg');
+            const sideSizeOrg = get('sideSizeOrg');
+            const resolutionOrg = get('resolutionOrg');
+            // ページの setUploadImage が styleEditForm 用シグネチャを持つので呼ぶ。
+            if (typeof window.setUploadImage === 'function') {
+              try {
+                if (window.ACTION_FORM_NAME === 'styleEditForm') {
+                  window.setUploadImage(imageId, elementName, meetStandardFlg, lengthSizeOrg, sideSizeOrg, resolutionOrg, imageFilePath);
+                } else {
+                  window.setUploadImage(imageId, elementName, imageFilePath);
+                }
+              } catch (_e) { /* 直書きにフォールバック */ }
+            }
+            // 保険: FRONT_IMG_ID 等が未反映なら直接セット。
+            const h = document.getElementById('FRONT_IMG_ID');
+            if (h && !h.value && imageId) h.value = imageId;
+            const span = document.getElementById('FRONT_IMG_ID_ID');
+            if (span && !span.textContent && imageId) span.textContent = imageId;
+            // モーダルを閉じる。
+            if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
+            try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
+            return { ok: true, imageId };
+          } catch (e) { return { ok: false, error: String(e) }; }
+        }, html).catch(() => ({ ok: false }));
+
+        if (applied && applied.ok) {
+          // FRONT_IMG_ID 反映を確認。
+          const ok = await page.waitForFunction((prev) => {
+            const h = document.getElementById('FRONT_IMG_ID');
+            const hv = h ? (h.value || '') : '';
+            const s = document.getElementById('FRONT_IMG_ID_ID');
+            const sv = s ? (s.textContent || '').trim() : '';
+            return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
+          }, before, { timeout: 8_000 }).then(() => true).catch(() => false);
+          if (ok) {
+            page.off('response', onResp); page.off('requestfailed', onReqFail);
+            let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
+            return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
+          }
+        }
+        imgregLog.push({ url: absUrl, status: resp.status(), bodyHead: (html || '').slice(0, 300), via: 'direct_post' });
+      } catch (e) {
+        imgregLog.push({ url: params.url, failed: `direct_post_error: ${e?.message ?? e}` });
+      }
+    }
+    // 直接POSTが使えない/失敗 → 下のブラウザXHR方式にフォールバック。
+  }
+
   // 実DOM (CN_CMN_imageUploaderModal, #imageUploaderModalBody 内):
   //   ドロップ領域: .jscImageUploaderModalDropArea (ここに drop / クリックで file 選択)
   //   サムネ:       img.jscImageUploaderModalThumbnail (src がセットされたらプレビュー完了)
