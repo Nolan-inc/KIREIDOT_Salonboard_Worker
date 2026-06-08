@@ -4959,9 +4959,14 @@ async function uploadHairStyleFrontImage(page, file) {
       return !!(t && (t.value || '').trim());
     }, null, { timeout: 15_000 }).catch(() => {});
     // 必要パラメータを #imgUploadForm から取得 + doUpload の絶対URLを組み立てる。
+    // ★注意: '#form input:hidden[name=..]' は jQuery専用セレクタで querySelector では
+    //   SyntaxError になり evaluate 全体が reject→params=null になっていた(v0.2.123)。
+    //   有効なCSS('input[name=..]')で取得する。
     const params = await page.evaluate(() => {
       const g = (name) => {
-        const el = document.querySelector(`#imgUploadForm input:hidden[name="${name}"], #imgUploadForm input[name="${name}"]`);
+        const f = document.querySelector('#imgUploadForm');
+        if (!f) return '';
+        const el = f.querySelector(`input[name="${name}"]`);
         return el ? (el.value || '') : '';
       };
       // CONTEXT_URL_STR / URL_STR はグローバルに入っている(img_upload_modal_view が設定)。
