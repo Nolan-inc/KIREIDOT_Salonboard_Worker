@@ -4736,15 +4736,23 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
         const absUrl = new URL(params.url, page.url()).toString();
-        const resp = await page.context().request.post(absUrl, {
-          timeout: 60_000,
-          multipart: {
-            formFile: { name, mimeType: mime, buffer: buf },
-            setImgId: params.setImgId, dataKey: params.dataKey, targetActionId: params.targetActionId,
-            'org.apache.struts.taglib.html.TOKEN': params.token, STORE_ID: params.storeId,
-            modified: params.modified, pubManageId: params.pubManageId,
-          },
+        const pageUrl = page.url();
+        // Akamai 対策: ブラウザ風ヘッダ + タイムアウト/中断時リトライ(最大3回)。
+        const reqHeaders = { 'referer': pageUrl, 'origin': new URL(pageUrl).origin, 'x-requested-with': 'XMLHttpRequest', 'accept': 'text/html, */*; q=0.01' };
+        const buildMultipart = () => ({
+          formFile: { name, mimeType: mime, buffer: buf },
+          setImgId: params.setImgId, dataKey: params.dataKey, targetActionId: params.targetActionId,
+          'org.apache.struts.taglib.html.TOKEN': params.token, STORE_ID: params.storeId,
+          modified: params.modified, pubManageId: params.pubManageId,
         });
+        let resp = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            resp = await page.context().request.post(absUrl, { timeout: 25_000, headers: reqHeaders, multipart: buildMultipart() });
+            break;
+          } catch (e) { diag.push({ direct_post_retry: attempt, error: e?.message?.split('\n')[0] ?? String(e) }); await page.waitForTimeout(1200).catch(() => {}); }
+        }
+        if (!resp) { detach(); return { ok: false, reason: 'direct_post_blocked', diag }; }
         const html = await resp.text().catch(() => '');
         const applied = await page.evaluate((resHtml) => {
           try {
@@ -5125,19 +5133,49 @@ async function uploadHairStyleFrontImage(page, file) {
         const ext = (name.split('.').pop() || 'jpg').toLowerCase();
         const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
         const absUrl = new URL(params.url, page.url()).toString();
-        const resp = await page.context().request.post(absUrl, {
-          timeout: 60_000,
-          multipart: {
-            formFile: { name, mimeType: mime, buffer: buf },
-            setImgId: params.setImgId,
-            dataKey: params.dataKey,
-            targetActionId: params.targetActionId,
-            'org.apache.struts.taglib.html.TOKEN': params.token,
-            STORE_ID: params.storeId,
-            modified: params.modified,
-            pubManageId: params.pubManageId,
-          },
+        const pageUrl = page.url();
+        // ★Akamai Bot Manager 対策: doUpload は Akamai 配下で、自動化リクエストだと
+        //   ホールドされて 60s タイムアウトすることがある(_abck 等のcookieあり)。
+        //   ブラウザの $.ajax に近いヘッダ(referer/origin/x-requested-with)を付け、
+        //   タイムアウト/中断時は短い間隔で最大3回リトライする(Akamaiは断続的)。
+        const buildMultipart = () => ({
+          formFile: { name, mimeType: mime, buffer: buf },
+          setImgId: params.setImgId,
+          dataKey: params.dataKey,
+          targetActionId: params.targetActionId,
+          'org.apache.struts.taglib.html.TOKEN': params.token,
+          STORE_ID: params.storeId,
+          modified: params.modified,
+          pubManageId: params.pubManageId,
         });
+        const reqHeaders = {
+          'referer': pageUrl,
+          'origin': new URL(pageUrl).origin,
+          'x-requested-with': 'XMLHttpRequest',
+          'accept': 'text/html, */*; q=0.01',
+        };
+        let resp = null;
+        let lastErr = '';
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            resp = await page.context().request.post(absUrl, {
+              timeout: 25_000,
+              headers: reqHeaders,
+              multipart: buildMultipart(),
+            });
+            break; // 応答が返れば(2xx/4xx/5xx問わず)ループ終了
+          } catch (e) {
+            lastErr = e?.message?.split('\n')[0] ?? String(e);
+            imgregLog.push({ direct_post_retry: attempt, error: lastErr });
+            await page.waitForTimeout(1200).catch(() => {});
+          }
+        }
+        if (!resp) {
+          // 3回ともタイムアウト/中断 → Akamai にブロックされている可能性。
+          page.off('response', onResp); page.off('requestfailed', onReqFail);
+          imgregLog.push({ direct_post: 'all_retries_failed', lastErr });
+          return { ok: false, reason: 'direct_post_blocked', imgreg: imgregLog };
+        }
         const html = await resp.text().catch(() => '');
         // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT_IMG_ID)へ反映する。
         const applied = await page.evaluate((resHtml) => {
