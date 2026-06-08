@@ -30,6 +30,21 @@
       →「通信に失敗しました」。generic な input[type=file] を狙うと別inputに入って失敗する(v0.2.113まで)。
       → v0.2.114 で input.jscImageUploaderModalInput を明示ターゲットに修正。
 
+  ■ 2段AJAX (実JSで確定):
+    1. FRONT画像クリック → onclick が img_upload_modal_view(setImgId, targetActionId, dataKey, ...) を呼ぶ。
+       POST /imgreg/imgUpload/ (timeout 5s) → 返ってきたモーダルHTML(#imgUploadForm 入り)を
+       #imageUploaderModalBody に append → viewModal → change ハンドラ等を attach。
+    2. 「登録する」(jscImageUploaderModalSubmitButton) → file_upload():
+       #imgUploadForm の hidden(setImgId/dataKey/targetActionId/TOKEN/STORE_ID/modified/pubManageId)
+       ＋ FormData.append('formFile', **window.waitImgeFile**) を /imgreg/imgUpload/doUpload へ $.ajax(35s)。
+       成功で res の #imageId 等を取り出し setUploadImage()→親フォーム FRONT_IMG_ID 更新→modalClose。
+       userErrorFlg や「通信に失敗しました」をレスポンスで分岐。
+    ★ waitImgeFile は **グローバル var**(=window.waitImgeFile)。prepareFileInfo(change/drop)で addWaitImgeFile(file)
+      されないと空。空のまま doUpload すると 35s タイムアウト→「通信に失敗しました」(=ずっとローディング)。
+    ★ 確実策(v0.2.116): モーダル input が attach されるまで待つ → input.jscImageUploaderModalInput に
+      setInputFiles+change → window.waitImgeFile を検証(無ければ input.files[0]から addWaitImgeFile で補償) →
+      **window.file_upload() を直接呼ぶ**(ボタンの click ハンドラと同等)。ボタン非活性/clickの取りこぼしを回避。
+
   ■ 主要セレクタ:
     見出し:   p.imageUploaderModalHeadingText (「画像アップロード」)
     ドロップ: div.jscImageUploaderModalDropArea (.imageUploaderModalDropArea)
