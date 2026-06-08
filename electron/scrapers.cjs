@@ -4545,8 +4545,9 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   const uploaded = await uploadPhotoGallerySlotImage(page, idx, rowTable, dl.file);
   dl.cleanup();
   if (!uploaded.ok) {
-    const cap = await captureScrapeDebug(page, 'photo_gallery', 'image_upload_unconfirmed', { diagnostics: { url: page.url(), idx, reason: uploaded.reason } });
-    return fail(`フォトギャラリー画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    const diagStr = Array.isArray(uploaded.diag) && uploaded.diag.length ? JSON.stringify(uploaded.diag) : '(no diag)';
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'image_upload_unconfirmed', { diagnostics: { url: page.url(), idx, reason: uploaded.reason, diag: uploaded.diag || [] } });
+    return fail(`フォトギャラリー画像のアップロードを確認できませんでした (${uploaded.reason || ''}) diag=${diagStr} (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
   // 3) タイトル(任意 30字) / キャプション(任意 60字) を入力。
@@ -4646,6 +4647,13 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   const idHidden = page.locator(`input[name="frmPhotoGalleryInfoDtoList[${idx}].photogalleryPhoto"]`).first();
   const before = await idHidden.inputValue().catch(() => '');
 
+  // 診断ログ (失敗時に何が起きたかを surface する)。
+  const diag = [];
+  const onResp = async (resp) => { try { if (/\/imgreg\//i.test(resp.url())) diag.push({ url: resp.url().replace(/^https?:\/\/[^/]+/, ''), status: resp.status() }); } catch (_e) {} };
+  const onReqFail = (req) => { try { if (/\/imgreg\//i.test(req.url())) diag.push({ url: req.url().replace(/^https?:\/\/[^/]+/, ''), failed: req.failure()?.errorText || 'fail' }); } catch (_e) {} };
+  page.on('response', onResp); page.on('requestfailed', onReqFail);
+  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); } catch (_e) {} };
+
   // クリックで file chooser が直接開くケースに備える
   let chooserDone = false;
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
@@ -4654,11 +4662,23 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   }).catch(() => { /* モーダル方式 */ });
 
   // アップロードトリガー (枠内のアップロードボタン → 無ければ画像エリア)。
-  const trigger = rowTable.locator('img.mod_btn_upload, a.jscUploadImg, .jscUploadImg').first();
+  // 当該枠の <a class="db jscUploadImg"><img class="mod_btn_upload">。click ハンドラ(委譲)で
+  // img_upload_modal_view(...) が呼ばれモーダル(#imgUploadForm)がAJAXで開く。
+  let trigger = rowTable.locator('a.jscUploadImg, img.mod_btn_upload, .jscUploadImg').first();
   if ((await trigger.count().catch(() => 0)) === 0) {
-    return { ok: false, reason: 'no_upload_trigger' };
+    // rowTable 内に無ければページ全体から idx に紐づくトリガーを探す保険。
+    trigger = page.locator('a.jscUploadImg, img.mod_btn_upload').first();
   }
-  await trigger.click({ timeout: 8_000 }).catch(() => {});
+  if ((await trigger.count().catch(() => 0)) === 0) {
+    detach();
+    return { ok: false, reason: 'no_upload_trigger', diag };
+  }
+  diag.push({ trigger: 'found' });
+  // dn/非表示でもクリックを発火させる (handler は jQuery 委譲なので JS click でも可)。
+  await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
+  await trigger.click({ timeout: 8_000, force: true }).catch(async () => {
+    await trigger.evaluate((el) => el.click()).catch(() => {});
+  });
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   // ============================================================
@@ -4688,6 +4708,8 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
         modified: g('modified'), pubManageId: g('pubManageId'), hasForm: true,
       };
     }).catch(() => null);
+
+    diag.push({ direct_post_params: params ? { hasForm: params.hasForm, targetActionId: params.targetActionId ? 'set' : 'EMPTY', token: params.token ? 'set' : 'EMPTY' } : 'params=null(modal未表示)' });
 
     if (params && params.targetActionId) {
       try {
@@ -4726,11 +4748,13 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
             return !!v && v !== prev;
           }, { i: idx, prev: before }, { timeout: 8_000 }).then(() => true).catch(() => false);
           if (ok) {
+            detach();
             const imageId = await idHidden.inputValue().catch(() => '');
-            return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
+            return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post', diag };
           }
         }
-      } catch (_e) { /* フォールバックへ */ }
+        diag.push({ direct_post_result: { status: resp.status(), bodyHead: (html || '').slice(0, 200) } });
+      } catch (e) { diag.push({ direct_post_error: e?.message ?? String(e) }); }
     }
   }
 
@@ -4747,7 +4771,8 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
         await okBtn.click({ timeout: 8_000 }).catch(() => {});
       }
     } else {
-      return { ok: false, reason: 'no_file_input' };
+      detach();
+      return { ok: false, reason: 'no_file_input', diag };
     }
   }
 
@@ -4757,10 +4782,11 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
     const v = el ? (el.value || '') : '';
     return !!v && v !== prev;
   }, { i: idx, prev: before }, { timeout: 15_000 }).then(() => true).catch(() => false);
+  detach();
 
-  if (!done) return { ok: false, reason: 'imageId_not_set' };
+  if (!done) return { ok: false, reason: 'imageId_not_set', diag };
   const imageId = await idHidden.inputValue().catch(() => '');
-  return { ok: true, imageId: (imageId || '').trim() || null };
+  return { ok: true, imageId: (imageId || '').trim() || null, diag };
 }
 
 // ---- 美容室: /CNB スタイル掲載情報編集/登録 (styleEdit) ----
