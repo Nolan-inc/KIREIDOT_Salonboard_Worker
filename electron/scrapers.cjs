@@ -4753,9 +4753,13 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   const uploaded = await uploadHairStyleFrontImage(page, dl.file);
   dl.cleanup();
   if (!uploaded.ok) {
-    const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason } });
+    // 画像アップロードの /imgreg/ 通信ログ(URL/status/本文先頭)を捉えていれば要約して残す。
+    const imgregSummary = Array.isArray(uploaded.imgreg) && uploaded.imgreg.length
+      ? uploaded.imgreg.map((r) => `${(r.url || '').replace(/^https?:\/\/[^/]+/, '')} → ${r.failed ? 'FAIL:' + r.failed : 'HTTP ' + r.status}`).join(' | ')
+      : '(no imgreg log)';
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason, imgreg: uploaded.imgreg || [] } });
     if (uploaded.reason === 'sb_upload_comm_failed') {
-      return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。画像が小さすぎる/形式が非対応の可能性があります。より大きい画像でお試しください (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
+      return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
     }
     if (uploaded.reason === 'modal_register_not_found') {
       return fail(`画像アップロードモーダルの「登録する」を特定できませんでした (capture=${cap || '?'})。モーダルDOMの共有が必要です。`, 'UNKNOWN_ERROR', true);
@@ -4894,6 +4898,24 @@ async function uploadHairStyleFrontImage(page, file) {
   const idHidden = page.locator('input#FRONT_IMG_ID, input[name="FRONT_IMG_ID"]').first();
   const before = await idHidden.inputValue().catch(() => '');
 
+  // /imgreg/ (モーダル表示 & doUpload) のリクエスト/レスポンスを記録して、
+  // 失敗時に「なぜ通信に失敗したか」を実データで確認できるようにする。
+  const imgregLog = [];
+  const onResp = async (resp) => {
+    try {
+      const url = resp.url();
+      if (!/\/imgreg\//i.test(url)) return;
+      let bodyHead = '';
+      try { bodyHead = (await resp.text()).slice(0, 600); } catch (_e) { bodyHead = '(body unread)'; }
+      imgregLog.push({ url, status: resp.status(), bodyHead });
+    } catch (_e) { /* noop */ }
+  };
+  const onReqFail = (req) => {
+    try { if (/\/imgreg\//i.test(req.url())) imgregLog.push({ url: req.url(), failed: req.failure()?.errorText || 'request failed' }); } catch (_e) {}
+  };
+  page.on('response', onResp);
+  page.on('requestfailed', onReqFail);
+
   let chooserDone = false;
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
     await chooser.setFiles(file).catch(() => {});
@@ -5020,14 +5042,19 @@ async function uploadHairStyleFrontImage(page, file) {
     return done || err;
   }, before, { timeout: 40_000 }).catch(() => {});
 
+  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); } catch (_e) {} };
+
   if (await hasCommError()) {
-    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: true } }).catch(() => {});
-    return { ok: false, reason: 'sb_upload_comm_failed' };
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: true, imgreg: imgregLog } }).catch(() => {});
+    detach();
+    return { ok: false, reason: 'sb_upload_comm_failed', imgreg: imgregLog };
   }
   if (!(await isDone())) {
-    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: false } }).catch(() => {});
-    return { ok: false, reason: 'imageId_not_set' };
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: false, imgreg: imgregLog } }).catch(() => {});
+    detach();
+    return { ok: false, reason: 'imageId_not_set', imgreg: imgregLog };
   }
+  detach();
   // 画像ID は hidden 優先、無ければ span から。
   let imageId = (await idHidden.inputValue().catch(() => '')) || '';
   if (!imageId) {
