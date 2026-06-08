@@ -2725,7 +2725,9 @@ async function runTestStyleImage(payload) {
     step('launch', { msg: 'ブラウザ起動 (画面表示)' });
     const launched = await launchPushBrowser({ headless: false, slowMo: 400 });
     browser = launched.browser;
-    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '同梱Chromium (Chrome for Testing)'}` });
+    let ver = '';
+    try { ver = browser.version(); } catch (_e) {}
+    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '⚠️ 同梱Chromium (Chrome for Testing)'} (v${ver})` });
 
     const ssPath = storageStatePathFor(p.shopId);
     const ctx = await browser.newContext({

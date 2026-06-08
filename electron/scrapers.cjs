@@ -4965,30 +4965,10 @@ async function uploadHairStyleFrontImage(page, file) {
     if ((await modalInput.count().catch(() => 0)) === 0) {
       return { ok: false, reason: 'no_file_input' };
     }
+    // setInputFiles が change を発火 → prepareFileInfo → addWaitImgeFile(waitImgeFile) +
+    // previewThumbnail。手動と同じ挙動。余計な再発火/直接代入はしない(競合で
+    // doUpload が ERR_ABORTED になりうるため)。
     await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
-    await modalInput.dispatchEvent('change').catch(() => {});
-
-    // ★最重要: 「登録する」は グローバル waitImgeFile を formFile として送る。
-    //   change ハンドラ(prepareFileInfo)が走らないと waitImgeFile が空のまま →
-    //   空ファイル送信 → サーバが35sタイムアウト→「通信に失敗しました」。
-    //   setInputFiles の change が確実に waitImgeFile を埋めたか検証し、
-    //   埋まっていなければ input.files[0] から **直接** window.waitImgeFile に
-    //   セットして補償する (関数 addWaitImgeFile も呼ぶ)。
-    const waitFileSet = await page.waitForFunction(() => {
-      try { return !!window.waitImgeFile; } catch (_e) { return false; }
-    }, null, { timeout: 6_000 }).then(() => true).catch(() => false);
-    if (!waitFileSet) {
-      await page.evaluate(() => {
-        try {
-          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
-          const f = inp && inp.files && inp.files[0];
-          if (f) {
-            if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
-            else window.waitImgeFile = f;
-          }
-        } catch (_e) { /* noop */ }
-      }).catch(() => {});
-    }
   }
 
   const isDone = () => page.evaluate((prev) => {
@@ -5005,36 +4985,22 @@ async function uploadHairStyleFrontImage(page, file) {
     return !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(t);
   }).catch(() => false);
 
-  // プレビュー(サムネ img の src)か waitImgeFile セットを最大12秒待つ。
+  // プレビュー(サムネ img の src がセット = waitImgeFile も保持済み)を最大12秒待つ。
+  // (waitImgeFile は prepareFileInfo 内で addWaitImgeFile されている)
   await page.waitForFunction(() => {
     const t = document.querySelector('#imageUploaderModalBody img.jscImageUploaderModalThumbnail, img.jscImageUploaderModalThumbnail');
-    const thumb = !!(t && (t.getAttribute('src') || '').trim());
-    let wf = false; try { wf = !!window.waitImgeFile; } catch (_e) {}
-    return thumb || wf;
+    return !!(t && (t.getAttribute('src') || '').trim());
   }, null, { timeout: 12_000 }).catch(() => {});
 
-  // アップロード実行。「登録する」ボタンの click ハンドラは file_upload() を呼ぶだけ。
-  // ボタンが ACTIVE_CLASS でない/click が効かないケースに備え、
-  // waitImgeFile が入っていれば **file_upload() を直接呼ぶ** のが最も確実。
-  const calledDirect = await page.evaluate(() => {
-    try {
-      if (window.waitImgeFile && typeof window.file_upload === 'function') {
-        window.file_upload();
-        return true;
-      }
-    } catch (_e) { /* noop */ }
-    return false;
-  }).catch(() => false);
-
-  if (!calledDirect) {
-    // 直接呼べない場合は通常どおりボタンをクリック。
-    const submitBtn = page.locator('input.jscImageUploaderModalSubmitButton, #imageUploaderModalBody input[type="button"][value="登録する"], .imageUploaderModalSubmitButton').first();
-    if ((await submitBtn.count().catch(() => 0)) > 0) {
-      await submitBtn.click({ timeout: 8_000 }).catch(() => {});
-    } else {
-      await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_no_register', { diagnostics: { url: page.url() } }).catch(() => {});
-      return { ok: false, reason: 'modal_register_not_found' };
-    }
+  // 「登録する」(jscImageUploaderModalSubmitButton) を **1回だけ** クリック。
+  // 手動と同じ操作。直接 file_upload() 呼びや連打はしない(doUpload が ERR_ABORTED に
+  // なる原因になりうる)。
+  const submitBtn = page.locator('input.jscImageUploaderModalSubmitButton, #imageUploaderModalBody input[type="button"][value="登録する"], .imageUploaderModalSubmitButton').first();
+  if ((await submitBtn.count().catch(() => 0)) > 0) {
+    await submitBtn.click({ timeout: 8_000 }).catch(() => {});
+  } else {
+    await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_no_register', { diagnostics: { url: page.url() } }).catch(() => {});
+    return { ok: false, reason: 'modal_register_not_found' };
   }
 
   // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを最大40秒待つ。
