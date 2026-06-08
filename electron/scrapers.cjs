@@ -96,13 +96,22 @@ async function captureScrapeDebug(page, channel, label, opts = {}) {
       diagnostics: opts.diagnostics ?? null,
       text_excerpt: textExcerpt,
     };
+    // meta.json は最優先で書く (page.content()/screenshot がローディング中に
+    // ハングしても診断情報が必ず残るように、これらより先に書く)。
     fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2), { mode: 0o600 });
+    // page.content() はローディング中に固まることがあるので Promise.race でタイムアウト。
     try {
-      const html = await page.content();
-      fs.writeFileSync(path.join(dir, 'page.html'), scrubScrapeSecrets(html, secrets), { mode: 0o600 });
+      const html = await Promise.race([
+        page.content(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 6_000)),
+      ]);
+      if (html) fs.writeFileSync(path.join(dir, 'page.html'), scrubScrapeSecrets(html, secrets), { mode: 0o600 });
     } catch (_e) { /* noop */ }
     try {
-      await page.screenshot({ path: path.join(dir, 'screenshot.png'), fullPage: true });
+      await Promise.race([
+        page.screenshot({ path: path.join(dir, 'screenshot.png'), fullPage: false, timeout: 6_000 }),
+        new Promise((resolve) => setTimeout(resolve, 7_000)),
+      ]);
       try { fs.chmodSync(path.join(dir, 'screenshot.png'), 0o600); } catch (_e) { /* noop */ }
     } catch (_e) { /* noop */ }
     return dir;
@@ -4764,7 +4773,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     if (uploaded.reason === 'modal_register_not_found') {
       return fail(`画像アップロードモーダルの「登録する」を特定できませんでした (capture=${cap || '?'})。モーダルDOMの共有が必要です。`, 'UNKNOWN_ERROR', true);
     }
-    return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}) imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
   // 3) スタイリスト名 (必須): 選択されたスタッフ(author_external_id=T...)で投稿する。
