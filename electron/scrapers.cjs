@@ -5139,60 +5139,61 @@ async function uploadHairStyleFrontImage(page, file) {
           },
         });
         const html = await resp.text().catch(() => '');
-        // レスポンスHTMLを #imageUploaderModalBody に流し込み、ページのハンドラ相当で
-        // 親フォームへ反映する。userErrorFlg==0 で imageId 等が入っている。
+        // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT_IMG_ID)へ反映する。
         const applied = await page.evaluate((resHtml) => {
           try {
             const tmp = document.createElement('div');
             tmp.innerHTML = resHtml;
             const get = (id) => { const e = tmp.querySelector('#' + id); return e ? (e.value !== undefined ? e.value : e.textContent) : ''; };
-            const userErrorFlg = get('userErrorFlg');
-            if (String(userErrorFlg) !== '0') return { ok: false, userErrorFlg };
-            const imageId = get('imageId');
-            const elementName = get('elementName');
-            const meetStandardFlg = get('meetStandardFlg');
-            const imageFilePath = get('imageFilePath');
-            const lengthSizeOrg = get('lengthSizeOrg');
-            const sideSizeOrg = get('sideSizeOrg');
-            const resolutionOrg = get('resolutionOrg');
-            // ページの setUploadImage が styleEditForm 用シグネチャを持つので呼ぶ。
+            // 取れたフィールドを全部返す(診断用)。
+            const fields = {
+              userErrorFlg: get('userErrorFlg'), imageId: get('imageId'), elementName: get('elementName'),
+              meetStandardFlg: get('meetStandardFlg'), imageFilePath: get('imageFilePath'),
+              lengthSizeOrg: get('lengthSizeOrg'), sideSizeOrg: get('sideSizeOrg'), resolutionOrg: get('resolutionOrg'),
+            };
+            const imageId = fields.imageId;
+            const elementName = fields.elementName || 'FRONT_IMG_ID';
             if (typeof window.setUploadImage === 'function') {
               try {
                 if (window.ACTION_FORM_NAME === 'styleEditForm') {
-                  window.setUploadImage(imageId, elementName, meetStandardFlg, lengthSizeOrg, sideSizeOrg, resolutionOrg, imageFilePath);
+                  window.setUploadImage(imageId, elementName, fields.meetStandardFlg, fields.lengthSizeOrg, fields.sideSizeOrg, fields.resolutionOrg, fields.imageFilePath);
                 } else {
-                  window.setUploadImage(imageId, elementName, imageFilePath);
+                  window.setUploadImage(imageId, elementName, fields.imageFilePath);
                 }
               } catch (_e) { /* 直書きにフォールバック */ }
             }
-            // 保険: FRONT_IMG_ID 等が未反映なら直接セット。
-            const h = document.getElementById('FRONT_IMG_ID');
-            if (h && !h.value && imageId) h.value = imageId;
-            const span = document.getElementById('FRONT_IMG_ID_ID');
-            if (span && !span.textContent && imageId) span.textContent = imageId;
-            // モーダルを閉じる。
+            // ★保険(本命): imageId があれば FRONT_IMG_ID hidden / span / プレビュー img を直接セット。
+            //   setUploadImage の有無に依存せず確実に反映する。
+            if (imageId) {
+              const h = document.getElementById('FRONT_IMG_ID'); if (h) h.value = imageId;
+              const span = document.getElementById('FRONT_IMG_ID_ID'); if (span) span.textContent = imageId;
+              if (fields.imageFilePath) { const img = document.getElementById('FRONT_IMG_ID_IMG'); if (img) img.src = fields.imageFilePath; }
+            }
             if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
             try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
-            return { ok: true, imageId };
+            return { ok: !!imageId, imageId, fields };
           } catch (e) { return { ok: false, error: String(e) }; }
         }, html).catch(() => ({ ok: false }));
 
-        if (applied && applied.ok) {
-          // FRONT_IMG_ID 反映を確認。
-          const ok = await page.waitForFunction((prev) => {
+        // 直接POSTが HTTP 200 を返している＝サーバ側のアップロードは成功している。
+        // applied で imageId を反映できたら、それで確定(ブラウザXHRは絶対に走らせない)。
+        if (resp.status() === 200 && applied && applied.imageId) {
+          page.off('response', onResp); page.off('requestfailed', onReqFail);
+          // hidden 反映を確認(直書き済みなので即 true のはず)。
+          await page.waitForFunction((prev) => {
             const h = document.getElementById('FRONT_IMG_ID');
-            const hv = h ? (h.value || '') : '';
-            const s = document.getElementById('FRONT_IMG_ID_ID');
-            const sv = s ? (s.textContent || '').trim() : '';
-            return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
-          }, before, { timeout: 8_000 }).then(() => true).catch(() => false);
-          if (ok) {
-            page.off('response', onResp); page.off('requestfailed', onReqFail);
-            let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
-            return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
-          }
+            return !!(h && h.value && h.value !== prev);
+          }, before, { timeout: 4_000 }).catch(() => {});
+          let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
+          return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
         }
-        imgregLog.push({ url: absUrl, status: resp.status(), bodyHead: (html || '').slice(0, 300), via: 'direct_post' });
+        // HTTP 200 だが imageId が取れない → レスポンス構造を診断ログに出す(ブラウザXHRには落とさない)。
+        imgregLog.push({ via: 'direct_post', status: resp.status(), applied: applied?.fields || applied, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 400) });
+        if (resp.status() === 200) {
+          // 200 なのに反映できないだけ。ブラウザXHRで二重送信せず、ここで失敗を返す。
+          page.off('response', onResp); page.off('requestfailed', onReqFail);
+          return { ok: false, reason: 'direct_post_200_no_imageid', imgreg: imgregLog };
+        }
       } catch (e) {
         imgregLog.push({ url: params.url, failed: `direct_post_error: ${e?.message ?? e}` });
       }
