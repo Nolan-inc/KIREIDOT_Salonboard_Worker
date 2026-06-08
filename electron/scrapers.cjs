@@ -4697,13 +4697,12 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   // ============================================================
-  // 直接POST方式 (本命): エステのフォトギャラリーも美容室と同じ
-  // CN_CMN_imageUploaderModal(#imgUploadForm / doUpload) を使う。
-  // ブラウザXHR(file_upload)は ERR_ABORTED で中断するため、worker から
-  // page.context().request.post で doUpload へ直接 multipart POST する。
-  // レスポンスの画像ID等をページの setUploadImage(...) で当該枠に反映する。
+  // 送信方式: 既定はブラウザXHR(本来のアップロード)。Akamai はブラウザを信頼するため
+  // ステルス実Chrome下ではこれが通る。worker直接POSTは env SALONBOARD_DIRECT_POST=1 の時のみ
+  // (Playwright request は Akamai に弾かれやすいので切り分け用)。
   // ============================================================
-  if (!chooserDone) {
+  const PREFER_DIRECT_POST = /^(1|true|yes)$/i.test(process.env.SALONBOARD_DIRECT_POST ?? '');
+  if (!chooserDone && PREFER_DIRECT_POST) {
     const modalOpened = await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
       const t = f && f.querySelector('input[name="targetActionId"]');
@@ -5078,14 +5077,18 @@ async function uploadHairStyleFrontImage(page, file) {
   await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
 
   // ============================================================
-  // 直接POST方式 (本命): ブラウザの XHR(file_upload)は実Chromeでも doUpload が
-  // net::ERR_ABORTED で中断するため、ページのXHRに頼らず、worker から
-  // page.request.post で /imgreg/imgUpload/doUpload へ直接 multipart POST する。
-  // page.request はブラウザのCookie/セッションを共有しつつ、ページのライフサイクルに
-  // 縛られないので中断されない。レスポンスHTMLから画像ID等を取り出し、ページの
-  // setUploadImage(...) を呼んで親フォーム(FRONT_IMG_ID 等)に反映する。
+  // 画像アップロードの送信方式:
+  //  (A) ブラウザXHR (本来の file_upload(): 「登録する」クリックでページが doUpload) — 既定。
+  //      Akamai はブラウザコンテキストの通信を信頼するので、ステルス実Chrome下では
+  //      これが一番通る。以前の ERR_ABORTED は当方の二重送信/モーダル閉じが原因で、
+  //      Akamai ではなかった。
+  //  (B) worker 直接POST (page.context().request.post) — env SALONBOARD_DIRECT_POST=1 のときのみ。
+  //      Playwright の request はブラウザのTLS指紋/Akamaiセンサーを持たないため、
+  //      Akamai に弾かれて HTTP undefined/タイムアウト(direct_post_blocked)になりやすい。
+  //      切り分け用に残すだけ。既定では使わない。
   // ============================================================
-  if (!chooserDone) {
+  const PREFER_DIRECT_POST = /^(1|true|yes)$/i.test(process.env.SALONBOARD_DIRECT_POST ?? '');
+  if (!chooserDone && PREFER_DIRECT_POST) {
     // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ (AJAXで遅れて入るため十分待つ)。
     await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
