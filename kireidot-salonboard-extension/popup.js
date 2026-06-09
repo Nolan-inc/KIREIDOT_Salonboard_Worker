@@ -52,3 +52,23 @@ runBtn.addEventListener("click", async () => {
     runBtn.disabled = false;
   }
 });
+
+// SalonBoardからログアウト(テスト用): Cookieを削除し、ログイン画面へ移動。
+document.getElementById("logout").addEventListener("click", async () => {
+  log("SalonBoardからログアウト中…");
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "KD_LOGOUT" });
+    if (res?.ok) {
+      log(`✅ ログアウト完了 (Cookie ${res.removed} 件削除)`);
+      // 開いているSalonBoardタブをログイン画面へ。
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id && /salonboard\.com/.test(tab.url || "")) {
+        chrome.tabs.update(tab.id, { url: "https://salonboard.com/login/" });
+      }
+    } else {
+      log("ログアウト失敗: " + (res?.error || "unknown"));
+    }
+  } catch (e) {
+    log("ログアウト失敗: " + e.message);
+  }
+});

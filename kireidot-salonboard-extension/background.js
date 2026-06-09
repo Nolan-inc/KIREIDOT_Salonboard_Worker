@@ -35,6 +35,32 @@ function blobToDataUrl(blob) {
   });
 }
 
+// ---- ログアウト: salonboard.com の Cookie を全削除 ----
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "KD_LOGOUT") return;
+  (async () => {
+    try {
+      let removed = 0;
+      const domains = ["salonboard.com", ".salonboard.com", "beauty.hotpepper.jp"];
+      for (const domain of domains) {
+        const cookies = await chrome.cookies.getAll({ domain });
+        for (const c of cookies) {
+          const scheme = c.secure ? "https" : "http";
+          const cookieUrl = `${scheme}://${c.domain.replace(/^\./, "")}${c.path}`;
+          try {
+            await chrome.cookies.remove({ url: cookieUrl, name: c.name });
+            removed++;
+          } catch (_e) { /* skip */ }
+        }
+      }
+      sendResponse({ ok: true, removed });
+    } catch (e) {
+      sendResponse({ ok: false, error: e.message });
+    }
+  })();
+  return true;
+});
+
 // ---- (2) ジョブポーリング ----
 // service worker は不定期に止まるので、alarm で定期起床してポーリングする。
 chrome.runtime.onInstalled.addListener(() => setupAlarm());
