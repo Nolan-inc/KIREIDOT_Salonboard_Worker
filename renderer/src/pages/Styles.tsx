@@ -399,10 +399,15 @@ function StyleExtensionPanel() {
       else if (t === 'job_failed') {
         setState('failed');
         const msg = String(ev.error || '');
+        const d = ev.diag as { extVersion?: string; webdriver?: unknown } | null | undefined;
+        if (d?.extVersion) log('拡張バージョン: v' + d.extVersion + (d.extVersion < '0.0.6' ? ' ⚠️(最新v0.0.6に更新してください)' : ''), d.extVersion < '0.0.6' ? 'error' : 'info');
         log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
         if (/ログイン|認証/.test(msg)) {
           log('💡 普段使いの Chrome で SalonBoard にログインしてから、もう一度実行してください。', 'error');
+        }
+        if (/ボタンが見つかりません|styleEdit/.test(msg)) {
+          log('💡 拡張が最新でない可能性。chrome://extensions で拡張を「更新/再読み込み」してください。', 'error');
         }
       }
       else if (t === 'bridge_error') { log('ブリッジエラー: ' + (ev.error || ''), 'error'); }

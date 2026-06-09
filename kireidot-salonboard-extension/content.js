@@ -14,6 +14,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       // 環境の自動診断 (Playwright方式との違いを確認)。
       diag = {
+        extVersion: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "?",
         url: location.href,
         userAgent: navigator.userAgent,
         webdriver: navigator.webdriver,
@@ -224,10 +225,11 @@ async function ensureOnStyleEdit() {
     }
   }
 
-  // それでもダメなら、URLで直接 styleEdit に飛ぶ(同一オリジン)。
-  if (/\/styleList/i.test(location.href)) {
+  // FRONT画像枠が無い = styleEdit ではない → URLで直接 styleEdit に飛ぶ(同一オリジン)。
+  // styleList に限らず、styleEdit でない限り移動する。
+  if (!/\/styleEdit/i.test(location.href)) {
     const editUrl = location.origin + "/CNB/draft/styleEdit/";
-    console.log("[KireiDot] styleList → location 遷移", editUrl);
+    console.log("[KireiDot] styleEditでない → location 遷移", editUrl);
     // 遷移するとcontent scriptは再注入されるため、code=NAVIGATED を投げて
     // background にジョブを pending へ戻させ、styleEdit 上で再実行させる。
     const err = new Error("スタイル登録画面(styleEdit)へ移動します。数秒後に自動で再実行されます。");
@@ -236,10 +238,16 @@ async function ensureOnStyleEdit() {
     throw err;
   }
 
-  throw new Error(
-    "スタイル登録画面(styleEdit)を開けませんでした。手動で「スタイル新規追加」を押して登録画面を開いてからお試しください。URL=" +
-      location.href
-  );
+  // styleEdit のURLなのに FRONT画像枠が無い → 描画待ち。
+  try {
+    await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 8000);
+    return;
+  } catch (_e) {
+    throw new Error(
+      "スタイル登録画面(styleEdit)に画像枠が見つかりません。手動で「スタイル新規追加」を開いてからお試しください。URL=" +
+        location.href
+    );
+  }
 }
 
 // ----------------------------------------------------------------------
