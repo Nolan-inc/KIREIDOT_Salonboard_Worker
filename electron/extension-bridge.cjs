@@ -80,9 +80,12 @@ async function createJob(opts = {}) {
     salonboardUrl: opts.salonboardUrl || null,
     shopId: opts.shopId || null,
     meta: opts.meta || null,
-    // 未ログイン時の自動ログイン用認証情報(ローカルのみ。/jobs/next で拡張へ渡す)。
+    // ログイン/会社切替/サロン選択用(ローカルのみ。/jobs/next で拡張へ渡す)。
     loginId: opts.loginId || null,
     password: opts.password || null,
+    companyId: opts.companyId || null,
+    salonId: opts.salonId || null,
+    expectedSalonName: opts.expectedSalonName || null,
     sourceImageUrl: opts.imageUrl || null,
     // 拡張が叩く画像URL(ローカル)。
     imageUrl: `http://${HOST}:${PORT}/jobs/${id}/image`,
@@ -163,9 +166,12 @@ function handle(req, res) {
       target: job.target,
       imageUrl: job.imageUrl,
       salonboardUrl: job.salonboardUrl,
-      // 未ログイン時のみ拡張が使用(ローカル127.0.0.1経由)。
+      // ログイン/会社切替/サロン選択用(ローカル127.0.0.1経由)。
       loginId: job.loginId || null,
       password: job.password || null,
+      companyId: job.companyId || null,
+      salonId: job.salonId || null,
+      expectedSalonName: job.expectedSalonName || null,
     });
   }
 

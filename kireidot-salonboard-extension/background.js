@@ -122,9 +122,12 @@ async function runJob(job) {
       type: "KD_UPLOAD_IMAGE",
       mode: job.mode || "hair-style-front",
       imageUrl: job.imageUrl, // ローカルブリッジの画像URL
-      // 未ログイン時の自動ログイン用 (ローカルブリッジ由来)。
+      // ログイン/会社切替/サロン選択用 (ローカルブリッジ由来)。
       loginId: job.loginId || null,
       password: job.password || null,
+      companyId: job.companyId || null,
+      salonId: job.salonId || null,
+      expectedSalonName: job.expectedSalonName || null,
     });
     if (res?.ok) {
       await complete(job.jobId, {

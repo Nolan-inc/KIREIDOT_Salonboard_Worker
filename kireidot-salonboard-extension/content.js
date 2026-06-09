@@ -46,36 +46,76 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // 非同期 sendResponse
 });
 
-async function runUpload({ mode, imageUrl, loginId, password }) {
-  console.log("[KireiDot] start upload", { mode, imageUrl, hasCreds: !!(loginId && password) });
+// 各ステップで「現在のページ状態」を見て1ステップだけ進め、ページ遷移が要るときは
+// code=NAVIGATED を投げて bridge にジョブを pending へ戻させ、次のポーリングで続きを実行する
+// (login/logout/サロン選択は全てページ遷移を伴うため、状態機械として実装)。
+const NAV = (msg, action) => {
+  if (typeof action === "function") { try { setTimeout(action, 150); } catch (_e) {} }
+  const e = new Error(msg);
+  e.code = "NAVIGATED";
+  return e;
+};
+
+async function runUpload(job) {
+  const { mode, imageUrl, loginId, password, companyId, salonId, expectedSalonName } = job;
+  console.log("[KireiDot] step", { url: location.href, companyId, hasCreds: !!(loginId && password), salonId });
   if (mode !== "hair-style-front") {
     throw new Error("このMVPは美容室スタイルFRONTのみ対応です (mode=" + mode + ")");
   }
 
-  // 0) ログイン状態の確認。未ログインなら、認証情報があれば自動ログインする。
-  const loginIssue = detectLoginIssue();
-  if (loginIssue) {
-    if (loginId && password) {
-      const ok = await tryAutoLogin(loginId, password);
-      if (!ok) {
-        const err = new Error("自動ログインに失敗しました。普段使いChromeで手動ログインしてからお試しください。");
-        err.code = "NOT_LOGGED_IN";
-        throw err;
-      }
-      // ログイン後、目的のstyleEditへ移動して再実行(NAVIGATED)。
-      const err = new Error("自動ログインしました。スタイル画面へ移動して自動で再実行します。");
-      err.code = "NAVIGATED";
-      setTimeout(() => { location.href = location.origin + "/CNB/draft/styleEdit/"; }, 200);
-      throw err;
+  const url = location.href;
+
+  // --- (A) ログイン画面に居る → 対象会社のID/PWでログイン ---
+  if (isLoginPage()) {
+    if (!loginId || !password) {
+      const e = new Error("SalonBoardにログインしていません。認証情報がジョブにありません。");
+      e.code = "NOT_LOGGED_IN";
+      throw e;
     }
-    const err = new Error(loginIssue);
-    err.code = "NOT_LOGGED_IN";
-    throw err;
+    console.log("[KireiDot] login page → 自動ログイン");
+    const ok = await fillAndSubmitLogin(loginId, password);
+    if (!ok) {
+      const e = new Error("自動ログインに失敗しました(ID/PW不一致 or reCAPTCHA)。");
+      e.code = "LOGIN_FAILED";
+      throw e;
+    }
+    // ログイン後の遷移は fillAndSubmitLogin 内で待つ。ログインしたcompanyIdをStorageに記録。
+    await setLoggedCompany(companyId, loginId);
+    throw NAV("ログインしました。続けて処理します。");
   }
 
-  // 0.5) styleList(一覧)にいる場合は styleEdit(登録画面)へ自動遷移する。
+  // --- (B) 認証エラー表示 → ログイン画面へ ---
+  if (hasAuthError()) {
+    console.log("[KireiDot] 認証エラー → /login へ");
+    await clearLoggedCompany();
+    throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
+  }
+
+  // --- (C) ログイン済み: 対象会社かどうか判定 ---
+  // 拡張が最後にログインした companyId を Storage で記録している。
+  const logged = await getLoggedCompany();
+  if (companyId && logged.companyId && logged.companyId !== companyId) {
+    // 別会社にログイン中 → ログアウトして対象会社へ。
+    console.log("[KireiDot] 別会社ログイン中 → ログアウト", { now: logged.companyId, target: companyId });
+    await clearLoggedCompany();
+    const out = await doLogout();
+    throw NAV("別会社にログイン中のためログアウトします。", out);
+  }
+
+  // --- (D) グループ店舗選択(groupTop)に居る → 対象サロンを選択 ---
+  if (/\/(?:CNC|KLP)\/groupTop/i.test(url) || isGroupTopPage()) {
+    console.log("[KireiDot] groupTop → サロン選択", { salonId, expectedSalonName });
+    const sel = selectSalon(salonId, expectedSalonName);
+    if (!sel) {
+      throw new Error("グループ店舗の選択に失敗しました。サロンID/名称が一致しません (salonId=" + (salonId || "") + ")");
+    }
+    throw NAV("サロンを選択しました。スタイル画面へ進みます。");
+  }
+
+  // --- (E) styleEdit でない → styleEdit へ ---
   await ensureOnStyleEdit();
 
+  // --- (F) styleEdit で画像アップロード ---
   // 1) 画像を取得して File を作る。
   const image = await fetchImageAsFile(imageUrl);
   console.log("[KireiDot] image ready", { name: image.file.name, type: image.file.type, size: image.file.size });
@@ -108,40 +148,92 @@ async function runUpload({ mode, imageUrl, loginId, password }) {
 }
 
 // ----------------------------------------------------------------------
-// ログイン状態の検出: ログイン画面 or 認証エラーダイアログを検知
+// ページ状態の判定
 // ----------------------------------------------------------------------
-function detectLoginIssue() {
-  const url = location.href;
-  // ログイン関連URLに飛ばされている
-  if (/\/login|\/CNB\/top|\/auth|\/CNC\/groupTop/i.test(url) && !/styleEdit|styleList/i.test(url)) {
-    if (/\/login/i.test(url)) return "SalonBoardにログインしていません。普段使いのChromeでSalonBoardにログインしてから、もう一度お試しください。";
-  }
+function isLoginPage() {
+  if (/\/login/i.test(location.href)) return true;
+  const hasPw = !!document.querySelector("input[type='password'], input[name='password']");
+  const hasApp = !!document.querySelector("#FRONT_IMG_ID_IMG, a.jscUploadImg, a[id^='H']");
+  return hasPw && !hasApp;
+}
+
+function hasAuthError() {
   const text = document.body?.innerText || "";
-  if (/認証エラー|ログインしなおして|ログインし直して|セッション.*切れ|再度ログイン/i.test(text)) {
-    return "SalonBoardの認証が切れています(認証エラー)。普段使いのChromeでSalonBoardにログインし直してから、もう一度お試しください。";
-  }
-  // ログインフォームがそのまま出ている
-  if (document.querySelector("input[name='userId'], input#userId, input[name='password']") && !document.querySelector("#FRONT_IMG_ID_IMG, a.jscUploadImg")) {
-    return "SalonBoardのログイン画面が表示されています。ログインしてから、もう一度お試しください。";
-  }
-  return null;
+  return /認証エラー|ログインしなおして|ログインし直して|セッション.*切れ|再度ログイン/i.test(text);
+}
+
+function isGroupTopPage() {
+  return !!document.querySelector("#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^='H']");
 }
 
 // ----------------------------------------------------------------------
-// 自動ログイン: ログイン画面で ID/PW を入力して「ログイン」を押す。
+// ログイン中の会社を Storage で追跡 (会社切替判定の主軸)
+// ----------------------------------------------------------------------
+function getLoggedCompany() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(["kdLoggedCompanyId", "kdLoggedLoginId"], (v) => {
+        resolve({ companyId: v?.kdLoggedCompanyId || null, loginId: v?.kdLoggedLoginId || null });
+      });
+    } catch (_e) { resolve({ companyId: null, loginId: null }); }
+  });
+}
+function setLoggedCompany(companyId, loginId) {
+  return new Promise((resolve) => {
+    try { chrome.storage.local.set({ kdLoggedCompanyId: companyId || null, kdLoggedLoginId: loginId || null }, resolve); }
+    catch (_e) { resolve(); }
+  });
+}
+function clearLoggedCompany() {
+  return new Promise((resolve) => {
+    try { chrome.storage.local.remove(["kdLoggedCompanyId", "kdLoggedLoginId"], resolve); }
+    catch (_e) { resolve(); }
+  });
+}
+
+// ----------------------------------------------------------------------
+// ログアウト: ヘッダのログアウトリンクを押す。無ければ既知URLへ。
+// 返り値: NAV に渡す遷移アクション関数。
+// ----------------------------------------------------------------------
+function doLogout() {
+  const link = findFirst([
+    "a[href*='logout']",
+    "a[onclick*='logout']",
+    "a[onclick*='Logout']",
+  ]);
+  if (link && link.href && /logout/i.test(link.href)) {
+    const href = link.href;
+    return () => { location.href = href; };
+  }
+  if (link) {
+    return () => realClick(link);
+  }
+  return () => { location.href = location.origin + "/CNC/common/logout/"; };
+}
+
+// ----------------------------------------------------------------------
+// groupTop で対象サロンを選択 (salonId 優先、無ければ名称一致、単一なら自動)
+// ----------------------------------------------------------------------
+function selectSalon(salonId, expectedSalonName) {
+  const norm = (s) => (s || "").replace(/\s+/g, "").trim();
+  const links = Array.from(document.querySelectorAll("a[id^='H']")).filter((a) => /^H\d+/i.test(a.id));
+  if (links.length === 0) return false;
+  let target = null;
+  if (salonId) target = links.find((a) => a.id.toUpperCase() === String(salonId).toUpperCase()) || null;
+  if (!target && expectedSalonName) {
+    const want = norm(expectedSalonName);
+    target = links.find((a) => norm(a.textContent).includes(want) || want.includes(norm(a.textContent))) || null;
+  }
+  if (!target && links.length === 1) target = links[0];
+  if (!target) return false;
+  realClick(target);
+  return true;
+}
+
+// ----------------------------------------------------------------------
+// ログインフォームに ID/PW を入れて「ログイン」を押す。
 // SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn" onclick="dologin(event)">。
 // ----------------------------------------------------------------------
-async function tryAutoLogin(loginId, password) {
-  console.log("[KireiDot] auto-login 開始");
-  // ログインフォームが現在ページに出るのを少し待つ(認証エラー→ログイン画面リダイレクトの直後など)。
-  try {
-    await waitForSelector("input[type='password'], input[name='password']", 8000);
-  } catch (_e) {
-    return false; // フォームが無い = ここでは自動ログインできない
-  }
-  return await fillAndSubmitLogin(loginId, password);
-}
-
 async function fillAndSubmitLogin(loginId, password) {
   const idInput = findFirst([
     "input[name='userId']",
