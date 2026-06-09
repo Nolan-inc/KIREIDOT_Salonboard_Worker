@@ -2846,6 +2846,25 @@ async function runTestStyleImage(payload) {
     }
     const page = ctx.pages()[0] || await ctx.newPage();
 
+    // ★doUpload(画像本体送信)の実ステータス/失敗理由を自動で捕捉してログに出す。
+    //   手動で DevTools を開かなくても、Akamai に弾かれているのか/応答が何かが分かる。
+    page.on('response', async (resp) => {
+      try {
+        const u = resp.url();
+        if (/\/imgreg\/.*doUpload/i.test(u)) {
+          step('net', { msg: `📡 doUpload → HTTP ${resp.status()} ${resp.statusText() || ''}` });
+        }
+      } catch (_e) {}
+    });
+    page.on('requestfailed', (req) => {
+      try {
+        const u = req.url();
+        if (/\/imgreg\/.*doUpload/i.test(u)) {
+          step('net', { msg: `📡 doUpload → 失敗 ${req.failure()?.errorText || 'unknown'}` });
+        }
+      } catch (_e) {}
+    });
+
     // kind: 'style'(美容室) / 'photo_gallery'(エステ等)。
     const kind = p.kind === 'photo_gallery' ? 'photo_gallery' : 'style';
     const isEsthetic = kind === 'photo_gallery';
@@ -2872,6 +2891,23 @@ async function runTestStyleImage(payload) {
       if (sel.selected) step('store', { msg: `サロン選択: ${sel.salonId ?? ''}` });
       if (!sel.ok) { step('done', { ok: false, error: `サロン選択に失敗: ${sel.reason ?? 'unknown'} (サロンID登録が必要かも)` }); await closeAll(); return; }
     } catch (_e) { /* 単一店舗は no-op */ }
+
+    // ★ブラウザ指紋の自動診断 (DevToolsを手動で開かなくても分かるように)。
+    try {
+      const fp = await page.evaluate(() => ({
+        webdriver: navigator.webdriver,
+        ua: navigator.userAgent,
+        cookieNames: (document.cookie || '').split(';').map((c) => c.trim().split('=')[0]).filter(Boolean),
+        hasChrome: !!window.chrome,
+        plugins: (navigator.plugins && navigator.plugins.length) || 0,
+        languages: (navigator.languages || []).join(','),
+      })).catch(() => null);
+      if (fp) {
+        const akamai = fp.cookieNames.filter((n) => ['_abck', 'bm_sz', 'ak_bmsc', 'bm_mi', 'bm_sv'].includes(n));
+        const uaVer = (fp.ua.match(/Chrome\/(\d+)/) || [])[1] || '?';
+        step('diag', { msg: `🔎 webdriver=${fp.webdriver} / UA=Chrome${uaVer} / Akamai-cookie=[${akamai.join(',') || 'なし⚠️'}] / plugins=${fp.plugins}` });
+      }
+    } catch (_e) { /* noop */ }
 
     step('upload', { msg: `${isEsthetic ? 'photoGalleryEdit' : 'styleEdit'} を開いて画像をアップロードします…` });
     const result = await postPhotoGalleryViaForm(page, {
