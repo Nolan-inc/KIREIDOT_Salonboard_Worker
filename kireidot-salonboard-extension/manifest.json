@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "KireiDot SalonBoard Helper",
+  "version": "0.0.1",
+  "description": "KireiDotからSalonBoardの画像アップロードを補助する拡張機能(まずは美容室スタイルFRONTのMVP)",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.salonboard.com/*",
+    "https://salonboard.com/*",
+    "https://imgbp.salonboard.com/*",
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "KireiDot Upload",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.salonboard.com/*",
+        "https://salonboard.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
