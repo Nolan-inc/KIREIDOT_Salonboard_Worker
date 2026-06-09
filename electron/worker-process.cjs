@@ -95,20 +95,59 @@ async function launchPushBrowser(base = {}) {
 // - addInitScript で navigator.webdriver を undefined に偽装。
 // 返り値: { context, browser, usedChrome, persistent:true }
 // =====================================================================
+// ユーザーの普段使い Chrome プロファイル(SalonBoardログイン済み・Akamai信頼cookieあり)を
+// 予約同期くん専用の user-data-dir に **コピーしてシード** する。同一Mac・同一ユーザーなら
+// Keychain の "Chrome Safe Storage" 鍵で cookie を復号できるため、手動と同じ信頼状態で起動できる。
+// 既に専用dirがあれば(=育っているので)再シードしない。
+function seedUserChromeProfile(userDataDir) {
+  // 既にシード済みなら何もしない(.seeded マーカーで判定)。
+  const markerExists = (() => { try { return fs.existsSync(path.join(userDataDir, '.seeded')); } catch (_e) { return false; } })();
+  if (markerExists) return { seeded: false, reason: 'already' };
+
+  const srcRoot = process.env.SALONBOARD_CHROME_SOURCE_DIR
+    || path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
+  const srcProfile = process.env.SALONBOARD_CHROME_SOURCE_PROFILE || 'Default';
+  if (!fs.existsSync(path.join(srcRoot, srcProfile))) return { seeded: false, reason: 'source_not_found', srcRoot, srcProfile };
+
+  try {
+    fs.mkdirSync(path.join(userDataDir, srcProfile), { recursive: true, mode: 0o700 });
+    // Cookie 復号に必要な Local State(暗号鍵) は必須。
+    try { fs.copyFileSync(path.join(srcRoot, 'Local State'), path.join(userDataDir, 'Local State')); } catch (_e) {}
+    // ログイン/Akamai cookie 等、必要最小限のファイルだけコピー(プロファイル全体は重い)。
+    const files = ['Cookies', 'Cookies-journal', 'Network/Cookies', 'Network/Cookies-journal', 'Login Data', 'Web Data', 'Preferences', 'Local Storage'];
+    for (const rel of files) {
+      const s = path.join(srcRoot, srcProfile, rel);
+      const d = path.join(userDataDir, srcProfile, rel);
+      try {
+        if (!fs.existsSync(s)) continue;
+        const st = fs.statSync(s);
+        fs.mkdirSync(path.dirname(d), { recursive: true });
+        if (st.isDirectory()) fs.cpSync(s, d, { recursive: true });
+        else fs.copyFileSync(s, d);
+      } catch (_e) { /* 個別失敗は無視 */ }
+    }
+    try { fs.writeFileSync(path.join(userDataDir, '.seeded'), new Date().toISOString()); } catch (_e) {}
+    return { seeded: true, srcRoot, srcProfile };
+  } catch (e) {
+    return { seeded: false, reason: `copy_error: ${e?.message ?? e}` };
+  }
+}
+
 async function launchStealthPersistentContext(opts = {}) {
   const headless = opts.headless !== undefined ? opts.headless : false;
   const slowMo = opts.slowMo || 0;
-  // 専用プロファイル(予約同期くん専用)。worker(utilityProcess)では electron の app は
-  // 使えないため、他の永続データと同じ ~/.kireidot 配下に置く。
   const userDataDir = path.join(os.homedir(), '.kireidot', 'salonboard-chrome-profile');
   try { fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 }); } catch (_e) { /* noop */ }
-  // 自動化検知につながる既定フラグを除去 (--enable-automation 等)。
+  // ★ユーザーの普段使い Chrome プロファイルをシード(初回のみ)。Akamai信頼cookieを引き継ぐ。
+  let seedInfo = { seeded: false, reason: 'disabled' };
+  const useUserProfile = !/^(0|false|no)$/i.test(process.env.SALONBOARD_USE_USER_PROFILE ?? '1'); // 既定ON
+  if (useUserProfile) {
+    seedInfo = seedUserChromeProfile(userDataDir);
+    emit('log', { level: 'info', msg: `Chromeプロファイルseed: ${JSON.stringify(seedInfo)}`, at: new Date().toISOString() });
+  }
+  // 自動化検知につながる既定フラグを除去。
   const ignoreDefaultArgs = ['--enable-automation', '--disable-blink-features=AutomationControlled'];
-  const args = [
-    '--no-sandbox',
-    '--disable-features=IsolateOrigins,site-per-process',
-    '--disable-blink-features=AutomationControlled', // ←Playwrightが付ける別の検知系。あえて自前で付けず除去側に回す
-  ].filter((a) => a !== '--disable-blink-features=AutomationControlled');
+  const args = ['--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
   const contextOpts = {
     headless,
     slowMo,
@@ -118,10 +157,9 @@ async function launchStealthPersistentContext(opts = {}) {
     viewport: { width: 1366, height: 900 },
     locale: 'ja-JP',
     timezoneId: 'Asia/Tokyo',
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+    // ★userAgent は上書きしない(実Chrome147の本物UAを使う。Chrome127偽装はUA不一致でAkamaiに怪しまれる)。
   };
   const ctx = await chromium.launchPersistentContext(userDataDir, contextOpts);
-  // navigator.webdriver を隠す + 軽いステルス。
   await ctx.addInitScript(() => {
     try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (_e) {}
     try { window.chrome = window.chrome || { runtime: {} }; } catch (_e) {}
@@ -130,7 +168,7 @@ async function launchStealthPersistentContext(opts = {}) {
       if (orig) navigator.permissions.query = (p) => (p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : orig(p));
     } catch (_e) {}
   }).catch(() => {});
-  return { context: ctx, browser: ctx.browser(), usedChrome: true, persistent: true, userDataDir };
+  return { context: ctx, browser: ctx.browser(), usedChrome: true, persistent: true, userDataDir, seeded: seedInfo.seeded };
 }
 
 // プロセス全体のクラッシュ防止:
@@ -2785,7 +2823,7 @@ async function runTestStyleImage(payload) {
     browser = launched.browser;
     let ver = '';
     try { ver = browser.version(); } catch (_e) {}
-    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '⚠️ 同梱Chromium'} (v${ver})${launched.persistent ? ' / 専用プロファイル・自動化フラグ除去' : ''}` });
+    step('launch', { msg: `ブラウザ: ${launched.usedChrome ? '実Google Chrome ✅' : '⚠️ 同梱Chromium'} (v${ver})${launched.persistent ? ' / 自動化フラグ除去' : ''}${launched.seeded ? ' / あなたのChromeプロファイルをシード✅' : ''}` });
 
     const ssPath = storageStatePathFor(p.shopId);
     // 永続コンテキストはそのまま使う。非永続時のみ newContext で作る。
