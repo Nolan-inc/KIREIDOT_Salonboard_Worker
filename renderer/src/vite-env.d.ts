@@ -221,6 +221,9 @@ interface Window {
       salonboardUrl?: string;
       shopId?: string | null;
       shopName?: string | null;
+      /** 未ログイン時の自動ログイン用(ローカル127.0.0.1経由のみ)。 */
+      loginId?: string;
+      password?: string;
     }) => Promise<{ ok: boolean; jobId?: string; salonboardUrl?: string; error?: string }>;
     /** 拡張ジョブの状態を取得。 */
     extensionJobStatus: (jobId: string) => Promise<{ ok: boolean; status?: string; error?: string | null; result?: unknown }>;

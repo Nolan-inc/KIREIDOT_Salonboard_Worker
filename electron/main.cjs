@@ -521,6 +521,9 @@ ipcMain.handle('extension:create-style-job', async (_event, payload) => {
       salonboardUrl,
       shopId: p.shopId || null,
       meta: { shopName: p.shopName || null },
+      // 未ログイン時の自動ログイン用 (ローカル127.0.0.1経由でのみ拡張へ渡す)。
+      loginId: p.loginId || null,
+      password: p.password || null,
     });
     if (job.status === 'failed') {
       return { ok: false, error: job.error, jobId: job.jobId };

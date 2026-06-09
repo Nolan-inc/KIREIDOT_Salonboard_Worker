@@ -45,15 +45,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // 非同期 sendResponse
 });
 
-async function runUpload({ mode, imageUrl }) {
-  console.log("[KireiDot] start upload", { mode, imageUrl });
+async function runUpload({ mode, imageUrl, loginId, password }) {
+  console.log("[KireiDot] start upload", { mode, imageUrl, hasCreds: !!(loginId && password) });
   if (mode !== "hair-style-front") {
     throw new Error("このMVPは美容室スタイルFRONTのみ対応です (mode=" + mode + ")");
   }
 
-  // 0) ログイン状態の確認。未ログイン(ログイン画面/認証エラー)なら明確に返す。
+  // 0) ログイン状態の確認。未ログインなら、認証情報があれば自動ログインする。
   const loginIssue = detectLoginIssue();
   if (loginIssue) {
+    if (loginId && password) {
+      const ok = await tryAutoLogin(loginId, password);
+      if (!ok) {
+        const err = new Error("自動ログインに失敗しました。普段使いChromeで手動ログインしてからお試しください。");
+        err.code = "NOT_LOGGED_IN";
+        throw err;
+      }
+      // ログイン後、目的のstyleEditへ移動して再実行(NAVIGATED)。
+      const err = new Error("自動ログインしました。スタイル画面へ移動して自動で再実行します。");
+      err.code = "NAVIGATED";
+      setTimeout(() => { location.href = location.origin + "/CNB/draft/styleEdit/"; }, 200);
+      throw err;
+    }
     const err = new Error(loginIssue);
     err.code = "NOT_LOGGED_IN";
     throw err;
@@ -111,6 +124,76 @@ function detectLoginIssue() {
     return "SalonBoardのログイン画面が表示されています。ログインしてから、もう一度お試しください。";
   }
   return null;
+}
+
+// ----------------------------------------------------------------------
+// 自動ログイン: ログイン画面で ID/PW を入力して「ログイン」を押す。
+// SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn" onclick="dologin(event)">。
+// ----------------------------------------------------------------------
+async function tryAutoLogin(loginId, password) {
+  console.log("[KireiDot] auto-login 開始");
+  // ログインフォームが現在ページに出るのを少し待つ(認証エラー→ログイン画面リダイレクトの直後など)。
+  try {
+    await waitForSelector("input[type='password'], input[name='password']", 8000);
+  } catch (_e) {
+    return false; // フォームが無い = ここでは自動ログインできない
+  }
+  return await fillAndSubmitLogin(loginId, password);
+}
+
+async function fillAndSubmitLogin(loginId, password) {
+  const idInput = findFirst([
+    "input[name='userId']",
+    "input[name='loginId']",
+    "input[name='loginCd']",
+    "input[id*='login' i]",
+    "input[type='email']",
+    "input[type='text']",
+  ]);
+  const pwInput = document.querySelector("input[name='password'], input[type='password']");
+  if (!idInput || !pwInput) return false;
+
+  setNativeValue(idInput, loginId);
+  setNativeValue(pwInput, password);
+  await sleep(300);
+
+  // ログインボタン。
+  const btn = findFirst([
+    "a.common-CNCcommon__primaryBtn",
+    "a[onclick*='dologin']",
+    "button[type='submit']",
+    "input[type='submit']",
+    "a:has(img[alt*='ログイン'])",
+  ]);
+  if (btn) {
+    realClick(btn);
+  } else {
+    // 最後の手段: password で Enter。
+    pwInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  }
+
+  // ログイン後の遷移を待つ(パスワード欄が消える or styleEdit系へ)。
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 20000) {
+    await sleep(500);
+    const stillLogin = document.querySelector("input[type='password']");
+    const errText = document.body?.innerText || "";
+    if (/ID.*パスワード.*正しく|ログインできません|認証に失敗/.test(errText)) return false;
+    if (!stillLogin) return true; // ログイン成功(フォームが消えた)
+  }
+  return !document.querySelector("input[type='password']");
+}
+
+// React/jQuery どちらでも値変更を拾わせるための値セット。
+function setNativeValue(el, value) {
+  try {
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+  } catch (_e) { el.value = value; }
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 // ----------------------------------------------------------------------

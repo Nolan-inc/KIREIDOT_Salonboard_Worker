@@ -11,6 +11,7 @@ import {
   type PhotoGalleryRow,
   type StaffRow,
 } from '../lib/data';
+import { revealSalonboardCredentials } from '../lib/salonboard';
 import { useSyncController } from '../lib/sync-controller';
 
 type GalleryItem = {
@@ -431,11 +432,22 @@ function StyleExtensionPanel() {
     setLines([]);
     setState('creating');
     log('ジョブ作成中…');
+    // 未ログイン時の自動ログイン用に、店舗のSalonBoard認証情報を取得して渡す
+    // (ローカル 127.0.0.1 経由のみ。すでにログイン済みなら使われない)。
+    let creds: { loginId: string; password: string } | undefined;
+    if (scope?.shopId) {
+      try {
+        const c = await revealSalonboardCredentials(scope.shopId);
+        if (c.ok) creds = { loginId: c.loginId, password: c.password };
+      } catch (_e) { /* 認証情報なしでも続行(ログイン済み前提) */ }
+    }
     const r = await bridge.extensionCreateStyleJob({
       imageUrl: imageUrl.trim(),
       salonboardUrl: salonboardUrl.trim(),
       shopId: scope?.shopId || null,
       shopName: scope?.shopName || null,
+      loginId: creds?.loginId,
+      password: creds?.password,
     });
     if (!r?.ok) {
       setState('failed');
