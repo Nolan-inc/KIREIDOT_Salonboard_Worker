@@ -2919,17 +2919,50 @@ async function runTestStyleImage(payload) {
       author_external_id: p.stylistExternalId || null,
     }, { baseUrl, enablePost: !!p.enablePost, salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
 
+    let failed = false;
     if (result.status === 'ok') {
       step('done', { ok: true, msg: `✅ 成功 (画像ID=${result.externalId || '?'})${p.enablePost ? ` ${target}登録まで完了` : ' 画像アップロードOK(登録は未実行)'}` });
     } else if (result.status === 'confirm_only') {
       step('done', { ok: true, msg: '✅ 画像アップロードOK (実登録OFFのため登録は未実行)' });
     } else {
+      failed = true;
       step('done', { ok: false, errorCode: result.errorCode, error: `🔴 失敗: [${result.errorCode || '?'}] ${result.reason}` });
     }
-    await page.waitForTimeout(4000).catch(() => {});
-    await closeAll();
+
+    if (failed) {
+      // ★失敗時はブラウザを閉じない。エラー画面/Network を確認できるよう、
+      //   ブラウザのウィンドウが手動で閉じられるまで(最大10分)開いたままにする。
+      step('hold', { msg: '🖐 失敗したのでブラウザは開いたままにします。画面/エラーを確認したら、ブラウザのウィンドウを手動で閉じてください(最大10分で自動クローズ)。' });
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (done) return; done = true; resolve(); };
+        try {
+          const b = persistentCtx ? persistentCtx.browser() : browser;
+          if (persistentCtx) persistentCtx.on('close', finish);
+          if (b) b.on('disconnected', finish);
+          // ページが全部閉じられたら終了。
+          if (persistentCtx) persistentCtx.on('page', () => {});
+        } catch (_e) {}
+        setTimeout(finish, 10 * 60 * 1000); // 10分でフェイルセーフ
+      });
+      try { if (persistentCtx) await persistentCtx.close(); else await browser?.close(); } catch (_e) {}
+    } else {
+      await page.waitForTimeout(4000).catch(() => {});
+      await closeAll();
+    }
   } catch (e) {
     step('done', { ok: false, error: `例外: ${e?.message ?? e}` });
+    // 例外時もしばらく開いたままにして確認できるように(最大10分)。
+    step('hold', { msg: '🖐 例外で停止。ブラウザは開いたままです。確認後、ウィンドウを手動で閉じてください(最大10分で自動クローズ)。' });
+    await new Promise((resolve) => {
+      let done = false; const finish = () => { if (done) return; done = true; resolve(); };
+      try {
+        const b = persistentCtx ? persistentCtx.browser() : browser;
+        if (persistentCtx) persistentCtx.on('close', finish);
+        if (b) b.on('disconnected', finish);
+      } catch (_e) {}
+      setTimeout(finish, 10 * 60 * 1000);
+    });
     try { if (persistentCtx) await persistentCtx.close(); else await browser?.close(); } catch (_e) {}
   }
 }
