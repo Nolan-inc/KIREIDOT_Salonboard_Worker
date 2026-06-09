@@ -18,6 +18,7 @@ import {
   KeyRound,
   Pencil,
   ShieldOff,
+  Chrome,
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Card, CardBody, CardHeader } from '../components/Card';
@@ -250,6 +251,37 @@ function UpdateSection() {
                 <RefreshCcw className="h-3.5 w-3.5" />
               )}
               {checking ? '確認中…' : '今すぐ確認'}
+            </button>
+          ) : (
+            <span className="text-[10px] text-ink-soft">Web版では無効</span>
+          )}
+        </div>
+
+        {/* Chrome拡張のダウンロード */}
+        <div className="flex items-center justify-between rounded-[12px] border border-sky-200 bg-sky-50/50 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-100 text-sky-600">
+              <Chrome className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="text-[12px] font-semibold text-ink">Chrome拡張（スタイル画像アップロード）</div>
+              <div className="text-[10.5px] text-ink-soft mt-0.5">
+                普段使いの Chrome に入れると、スタイル画像を自動アップロードできます。
+              </div>
+            </div>
+          </div>
+          {inElectron ? (
+            <button
+              type="button"
+              onClick={() =>
+                window.kireidotApp?.openExternal(
+                  'https://github.com/Nolan-inc/KIREIDOT_Salonboard_Worker/releases/tag/ext-v0.0.2',
+                )
+              }
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-[10px] bg-sky-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-700"
+            >
+              <Download className="h-3.5 w-3.5" />
+              ダウンロード
             </button>
           ) : (
             <span className="text-[10px] text-ink-soft">Web版では無効</span>
