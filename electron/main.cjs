@@ -8,9 +8,11 @@
 const { app, BrowserWindow, shell, ipcMain, utilityProcess } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { execFile } = require('node:child_process');
 const { initAutoUpdater, quitAndInstall, manualCheck } = require('./updater.cjs');
 const deviceConfig = require('./device-config.cjs');
 const authStorage = require('./auth-storage.cjs');
+const extensionBridge = require('./extension-bridge.cjs');
 
 // ---------------------------------------------------------------------
 // Playwright Chromium のパス設定 (v0.2.7)
@@ -503,6 +505,59 @@ ipcMain.handle('worker:test-style-image', async (_event, payload) => {
   const ok = postToWorker({ type: 'test-style-image', payload });
   return { ok };
 });
+
+// --- Chrome拡張連携: スタイルFRONT画像アップロードのジョブを作って普段使いChromeを開く ---
+// payload: { imageUrl(公開URL), salonboardUrl(styleEdit URL), shopId?, shopName? }
+ipcMain.handle('extension:create-style-job', async (_event, payload) => {
+  try {
+    const p = payload || {};
+    if (!p.imageUrl) return { ok: false, error: '画像URLがありません' };
+    const salonboardUrl = p.salonboardUrl || 'https://salonboard.com/CNB/draft/styleList/';
+    const job = await extensionBridge.createJob({
+      type: 'hair_style_front',
+      target: 'FRONT_IMG_ID',
+      imageUrl: p.imageUrl,
+      salonboardUrl,
+      shopId: p.shopId || null,
+      meta: { shopName: p.shopName || null },
+    });
+    if (job.status === 'failed') {
+      return { ok: false, error: job.error, jobId: job.jobId };
+    }
+    // 普段使いの Google Chrome で styleEdit を開く (Playwright は使わない)。
+    if (process.platform === 'darwin') {
+      execFile('open', ['-a', 'Google Chrome', salonboardUrl], (err) => {
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('extension:event', {
+              type: err ? 'chrome_open_failed' : 'chrome_opened',
+              at: new Date().toISOString(),
+              jobId: job.jobId,
+              url: salonboardUrl,
+              error: err ? String(err.message ?? err) : undefined,
+            });
+          }
+        } catch (_e) {}
+      });
+    } else {
+      // 他OSは shell.openExternal で既定ブラウザ。
+      try { await shell.openExternal(salonboardUrl); } catch (_e) {}
+    }
+    return { ok: true, jobId: job.jobId, salonboardUrl };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+});
+
+ipcMain.handle('extension:job-status', async (_event, jobId) => {
+  const job = extensionBridge.getJob(jobId);
+  if (!job) return { ok: false, error: 'job not found' };
+  return { ok: true, status: job.status, error: job.error, result: job.result };
+});
+
+ipcMain.handle('extension:bridge-health', async () => {
+  return { ok: true, port: extensionBridge.PORT, pending: extensionBridge.pendingCount() };
+});
 ipcMain.handle('worker:cancel-booking', async (_event, payload) => {
   // 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。
   const ok = postToWorker({ type: 'cancel-booking', payload });
@@ -528,6 +583,20 @@ app.whenReady().then(async () => {
 
   // 自動アップデート (dev / SKIP_AUTO_UPDATE=1 では何もしない)
   initAutoUpdater(mainWindow);
+
+  // 拡張ブリッジ起動: Chrome拡張(普段使いChrome)との 127.0.0.1:32178 連携。
+  try {
+    extensionBridge.setEventHandler((ev) => {
+      // ジョブの状態変化を renderer に転送(状態表示・ログ用)。
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('extension:event', ev);
+      } catch (_e) { /* noop */ }
+    });
+    extensionBridge.start();
+    console.log('[main] extension bridge started on 127.0.0.1:' + extensionBridge.PORT);
+  } catch (e) {
+    console.warn('[main] extension bridge failed to start:', e?.message ?? e);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

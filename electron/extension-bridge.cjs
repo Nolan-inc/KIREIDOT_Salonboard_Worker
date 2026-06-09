@@ -1,0 +1,242 @@
+// =====================================================================
+// 拡張ブリッジ: 予約同期くん(main process) ⇔ Chrome拡張 のローカルHTTP連携。
+//
+// 127.0.0.1:32178 で HTTP を立て、Chrome拡張がポーリングしてジョブを取り、
+// 画像をローカル経由で受け取り、結果を返す。Playwright は使わない。
+//
+//   GET  /health                    → { ok, version, pending, ... }
+//   GET  /jobs/next                  → 次の pending ジョブ(無ければ 204)
+//   GET  /jobs/:jobId/image          → 画像バイト(拡張がfetchしてFile化)
+//   POST /jobs/:jobId/complete       → { status:'success'|'failed', imageId?, error?, diag? }
+//
+// ジョブはメモリ保持(第一段階)。状態変化は onJobEvent コールバックで
+// renderer/worker に通知する(状態表示・ログ用)。
+// =====================================================================
+
+const http = require('node:http');
+const https = require('node:https');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const PORT = 32178;
+const HOST = '127.0.0.1';
+
+const jobs = new Map(); // jobId -> job
+let server = null;
+let onEvent = () => {};
+
+function now() { return new Date().toISOString(); }
+function genId() { return 'job_' + crypto.randomBytes(8).toString('hex'); }
+
+function emit(type, payload) {
+  try { onEvent({ type, at: now(), ...payload }); } catch (_e) { /* noop */ }
+}
+
+// 画像URLをローカル一時ファイルに落としておく(拡張へはローカル経由で渡す)。
+function downloadToTmp(url) {
+  return new Promise((resolve, reject) => {
+    try {
+      const mod = url.startsWith('http://') ? http : https;
+      const req = mod.get(url, (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // リダイレクト追従(1段)
+          downloadToTmp(res.headers.location).then(resolve, reject);
+          res.resume();
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error('image download HTTP ' + res.statusCode));
+          res.resume();
+          return;
+        }
+        const ct = (res.headers['content-type'] || '').toLowerCase();
+        let ext = 'jpg';
+        if (ct.includes('png')) ext = 'png';
+        else if (ct.includes('webp')) ext = 'webp';
+        else if (ct.includes('gif')) ext = 'gif';
+        const file = path.join(os.tmpdir(), `kd_ext_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`);
+        const ws = fs.createWriteStream(file);
+        res.pipe(ws);
+        ws.on('finish', () => resolve({ file, mime: ct || 'image/jpeg' }));
+        ws.on('error', reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(20000, () => req.destroy(new Error('image download timeout')));
+    } catch (e) { reject(e); }
+  });
+}
+
+// 新規ジョブを作成 (renderer/main から呼ぶ)。
+// opts: { type, target, salonboardUrl, imageUrl(公開URL), shopId?, meta? }
+async function createJob(opts = {}) {
+  const id = genId();
+  const job = {
+    jobId: id,
+    type: opts.type || 'hair_style_front',
+    target: opts.target || 'FRONT_IMG_ID',
+    mode: 'hair-style-front',
+    salonboardUrl: opts.salonboardUrl || null,
+    shopId: opts.shopId || null,
+    meta: opts.meta || null,
+    sourceImageUrl: opts.imageUrl || null,
+    // 拡張が叩く画像URL(ローカル)。
+    imageUrl: `http://${HOST}:${PORT}/jobs/${id}/image`,
+    status: 'pending', // pending → picked → uploading → done | failed
+    error: null,
+    result: null,
+    createdAt: now(),
+    updatedAt: now(),
+    localImage: null,
+  };
+  jobs.set(id, job);
+  emit('job_created', { jobId: id, type: job.type, salonboardUrl: job.salonboardUrl });
+
+  // 画像を先に手元へ落としておく(失敗を早期検知)。
+  if (job.sourceImageUrl) {
+    try {
+      const dl = await downloadToTmp(job.sourceImageUrl);
+      job.localImage = dl;
+    } catch (e) {
+      job.status = 'failed';
+      job.error = '画像のダウンロードに失敗: ' + (e?.message ?? e);
+      job.updatedAt = now();
+      emit('job_failed', { jobId: id, error: job.error });
+    }
+  }
+  return job;
+}
+
+function getJob(id) { return jobs.get(id) || null; }
+function listJobs() { return Array.from(jobs.values()); }
+function pendingCount() { return listJobs().filter((j) => j.status === 'pending').length; }
+
+function setEventHandler(fn) { if (typeof fn === 'function') onEvent = fn; }
+
+// ---- HTTP server ----
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+function handle(req, res) {
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    });
+    return res.end();
+  }
+
+  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  const parts = url.pathname.split('/').filter(Boolean); // ['jobs','job_xx','image']
+
+  // GET /health
+  if (req.method === 'GET' && url.pathname === '/health') {
+    return sendJson(res, 200, { ok: true, app: 'kireidot-yoyaku-douki', pending: pendingCount(), jobs: listJobs().length });
+  }
+
+  // GET /jobs/next
+  if (req.method === 'GET' && url.pathname === '/jobs/next') {
+    const job = listJobs().find((j) => j.status === 'pending');
+    if (!job) return sendJson(res, 204, {});
+    job.status = 'picked';
+    job.updatedAt = now();
+    emit('job_picked', { jobId: job.jobId });
+    return sendJson(res, 200, {
+      jobId: job.jobId,
+      type: job.type,
+      mode: job.mode,
+      target: job.target,
+      imageUrl: job.imageUrl,
+      salonboardUrl: job.salonboardUrl,
+    });
+  }
+
+  // GET /jobs/:jobId/image
+  if (req.method === 'GET' && parts[0] === 'jobs' && parts[2] === 'image') {
+    const job = getJob(parts[1]);
+    if (!job) return sendJson(res, 404, { error: 'job not found' });
+    if (!job.localImage || !fs.existsSync(job.localImage.file)) {
+      return sendJson(res, 404, { error: 'image not ready' });
+    }
+    try {
+      const buf = fs.readFileSync(job.localImage.file);
+      res.writeHead(200, {
+        'Content-Type': job.localImage.mime || 'image/jpeg',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      });
+      job.status = (job.status === 'picked') ? 'uploading' : job.status;
+      job.updatedAt = now();
+      emit('job_uploading', { jobId: job.jobId });
+      return res.end(buf);
+    } catch (e) {
+      return sendJson(res, 500, { error: String(e) });
+    }
+  }
+
+  // POST /jobs/:jobId/complete
+  if (req.method === 'POST' && parts[0] === 'jobs' && parts[2] === 'complete') {
+    const job = getJob(parts[1]);
+    if (!job) return sendJson(res, 404, { error: 'job not found' });
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
+    req.on('end', () => {
+      let payload = {};
+      try { payload = JSON.parse(body || '{}'); } catch (_e) {}
+      if (payload.status === 'success') {
+        job.status = 'done';
+        job.result = { imageId: payload.imageId || null, diag: payload.diag || null };
+        job.updatedAt = now();
+        emit('job_completed', { jobId: job.jobId, imageId: payload.imageId || null, diag: payload.diag || null });
+      } else {
+        job.status = 'failed';
+        job.error = payload.error || 'unknown';
+        job.result = { diag: payload.diag || null, sbError: payload.sbError || null };
+        job.updatedAt = now();
+        emit('job_failed', { jobId: job.jobId, error: job.error, diag: payload.diag || null, sbError: payload.sbError || null });
+      }
+      // 画像一時ファイルを掃除。
+      try { if (job.localImage?.file) fs.unlinkSync(job.localImage.file); } catch (_e) {}
+      return sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  return sendJson(res, 404, { error: 'not found' });
+}
+
+function start() {
+  if (server) return { ok: true, already: true };
+  server = http.createServer(handle);
+  server.on('error', (e) => {
+    emit('bridge_error', { error: String(e?.message ?? e) });
+    // EADDRINUSE: 既に別インスタンスが立っている可能性。
+  });
+  try {
+    server.listen(PORT, HOST, () => {
+      emit('bridge_started', { url: `http://${HOST}:${PORT}` });
+    });
+  } catch (e) {
+    emit('bridge_error', { error: String(e?.message ?? e) });
+  }
+  return { ok: true };
+}
+
+function stop() {
+  try { if (server) server.close(); } catch (_e) {}
+  server = null;
+}
+
+module.exports = { start, stop, createJob, getJob, listJobs, pendingCount, setEventHandler, PORT, HOST };

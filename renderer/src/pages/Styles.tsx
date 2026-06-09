@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Loader2, RefreshCcw, Scissors, Image as ImageIcon, ImageOff, FlaskConical, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Loader2, RefreshCcw, Scissors, Image as ImageIcon, ImageOff, FlaskConical, CheckCircle2, AlertTriangle, Chrome } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
 import {
@@ -108,6 +108,9 @@ export function Styles() {
           サロンボードから取得
         </button>
       </div>
+
+      {/* Chrome拡張連携: 普段使いChromeでスタイルFRONT画像を自動アップロード (美容室のみ) */}
+      {isHair && <StyleExtensionPanel />}
 
       {/* 画像アップロードのテスト投稿パネル (美容室=スタイル / エステ等=フォトギャラリー) */}
       {genre && <StyleTestPanel isHair={isHair} />}
@@ -316,6 +319,191 @@ function StyleTestPanel({ isHair }: { isHair: boolean }) {
             )}
           </div>
         )}
+      </div>
+    </Card>
+  );
+}
+
+// =====================================================================
+// Chrome拡張連携パネル (美容室スタイル FRONT 画像)
+// 「スタイル投稿(Chrome拡張)」ボタン → ローカルブリッジにジョブ作成 →
+// 普段使いChromeで styleEdit を開く → 拡張が検知して FRONT 画像を自動アップロード。
+// 状態は extension:event でリアルタイム表示。
+// =====================================================================
+type ExtState =
+  | 'idle'
+  | 'creating'
+  | 'chrome_opened'
+  | 'picked'
+  | 'uploading'
+  | 'done'
+  | 'failed';
+
+const STATE_LABEL: Record<ExtState, string> = {
+  idle: '待機中',
+  creating: 'ジョブ作成中…',
+  chrome_opened: 'Chromeでスタイル画面を開いています（拡張の検知待ち）',
+  picked: '拡張がジョブを受け取りました',
+  uploading: '画像アップロード中…',
+  done: '✅ FRONT_IMG_ID 反映成功',
+  failed: '🔴 失敗',
+};
+
+function StyleExtensionPanel() {
+  const scope = useEffectiveScope();
+  const [imageUrl, setImageUrl] = useState('');
+  const [salonboardUrl, setSalonboardUrl] = useState('https://salonboard.com/CNB/draft/styleList/');
+  const [state, setState] = useState<ExtState>('idle');
+  const [lines, setLines] = useState<TestLine[]>([]);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
+  const jobIdRef = useRef<string | null>(null);
+
+  const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+
+  const log = (text: string, kind: TestLine['kind'] = 'info') =>
+    setLines((c) => [...c, { at: new Date().toLocaleTimeString('ja-JP'), text, kind }]);
+
+  // ローカルブリッジの稼働確認。
+  useEffect(() => {
+    if (!bridge?.extensionBridgeHealth) return;
+    bridge.extensionBridgeHealth().then((r) => setBridgeOk(!!r?.ok)).catch(() => setBridgeOk(false));
+  }, [bridge]);
+
+  // デフォルト画像: 取得済みスタイルの先頭画像。
+  useEffect(() => {
+    if (!scope?.shopId || imageUrl) return;
+    let cancelled = false;
+    fetchStyleList(scope).then((rows) => {
+      const first = rows.find((x) => x.image_url)?.image_url;
+      if (first && !cancelled) setImageUrl(first);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
+
+  // 拡張イベント購読。
+  useEffect(() => {
+    if (!bridge?.onExtensionEvent) return;
+    return bridge.onExtensionEvent((ev) => {
+      // 自分のジョブのイベントだけ反映 (jobId 一致、または job無しのbridgeイベント)。
+      if (ev.jobId && jobIdRef.current && ev.jobId !== jobIdRef.current) return;
+      const t = ev.type;
+      if (t === 'chrome_opened') { setState('chrome_opened'); log('🌐 Chromeでスタイル画面を開きました'); }
+      else if (t === 'chrome_open_failed') { setState('failed'); log('Chromeを開けませんでした: ' + (ev.error || ''), 'error'); }
+      else if (t === 'job_picked') { setState('picked'); log('🤝 拡張がジョブを受け取りました'); }
+      else if (t === 'job_uploading') { setState('uploading'); log('⬆️ 画像アップロード中…'); }
+      else if (t === 'job_completed') { setState('done'); log('✅ FRONT_IMG_ID 反映成功 (画像ID=' + (ev.imageId || '?') + ')', 'ok'); }
+      else if (t === 'job_failed') {
+        setState('failed');
+        log('🔴 失敗: ' + (ev.error || ''), 'error');
+        if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
+      }
+      else if (t === 'bridge_error') { log('ブリッジエラー: ' + (ev.error || ''), 'error'); }
+    });
+  }, [bridge]);
+
+  // 拡張の検知待ちタイムアウト(60秒で「未インストールかも」案内)。
+  useEffect(() => {
+    if (state !== 'chrome_opened') return;
+    const id = setTimeout(() => {
+      setState((s) => {
+        if (s === 'chrome_opened') {
+          log('⚠️ 60秒たっても拡張がジョブを取りに来ません。Chrome拡張が未インストール/未読込の可能性があります。', 'error');
+          log('→ 普段使いChromeに「KireiDot SalonBoard Helper」拡張が入っているか確認してください。', 'error');
+        }
+        return s;
+      });
+    }, 60000);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
+  const canRun = !!imageUrl.trim() && state !== 'creating' && state !== 'uploading' && state !== 'picked';
+
+  const run = async () => {
+    if (!bridge?.extensionCreateStyleJob) return;
+    setLines([]);
+    setState('creating');
+    log('ジョブ作成中…');
+    const r = await bridge.extensionCreateStyleJob({
+      imageUrl: imageUrl.trim(),
+      salonboardUrl: salonboardUrl.trim(),
+      shopId: scope?.shopId || null,
+      shopName: scope?.shopName || null,
+    });
+    if (!r?.ok) {
+      setState('failed');
+      log('ジョブ作成に失敗: ' + (r?.error || 'unknown'), 'error');
+      return;
+    }
+    jobIdRef.current = r.jobId || null;
+    setJobId(r.jobId || null);
+    log('🆕 ジョブ作成: ' + (r.jobId || '?'));
+    log('普段使いChromeでスタイル画面を開きます…');
+  };
+
+  if (!bridge?.extensionCreateStyleJob) return null; // ブラウザ版では非表示
+
+  const ic = 'h-10 w-full rounded-[10px] border border-hairline bg-white px-3 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20';
+  const busy = state === 'creating' || state === 'chrome_opened' || state === 'picked' || state === 'uploading';
+
+  return (
+    <Card className="border-sky-200">
+      <div className="border-b border-hairline/70 bg-sky-50/60 px-5 py-3">
+        <div className="flex items-center gap-2 text-[14px] font-bold text-ink">
+          <Chrome className="h-4 w-4 text-sky-600" /> スタイル投稿（Chrome拡張・自動アップロード）
+        </div>
+        <p className="mt-0.5 text-[11px] text-ink-soft">
+          「スタイル投稿」を押すと、普段使いの Chrome でスタイル登録画面を開き、Chrome拡張が
+          FRONT 画像を自動でアップロードします（Playwright不使用・Akamai回避）。
+        </p>
+        <p className="mt-1 text-[10px]">
+          ローカル連携: {bridgeOk === null ? '確認中…' : bridgeOk ? <span className="text-emerald-600">稼働中 ✅</span> : <span className="text-red-600">停止中 ⚠️（アプリ再起動を試してください）</span>}
+        </p>
+      </div>
+      <div className="px-5 py-4">
+        <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-muted">画像URL（公開URL）</span>
+            <input type="text" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…/image.jpg" className={ic} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-muted">開くSalonBoard URL（スタイル画面）</span>
+            <input type="text" value={salonboardUrl} onChange={(e) => setSalonboardUrl(e.target.value)} className={ic} />
+          </label>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={run}
+              disabled={!canRun}
+              className="inline-flex h-10 items-center gap-1.5 rounded-[12px] bg-brand-gradient px-5 text-[13px] font-semibold text-white shadow-brand-sm disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Chrome className="h-4 w-4" />}
+              {busy ? '実行中…' : 'スタイル投稿（Chrome拡張）'}
+            </button>
+            <span className={`text-[12px] font-semibold ${state === 'done' ? 'text-emerald-700' : state === 'failed' ? 'text-red-600' : 'text-ink-soft'}`}>
+              {STATE_LABEL[state]}
+            </span>
+          </div>
+
+          {lines.length > 0 && (
+            <div className="mt-1 rounded-[10px] border border-hairline bg-surface-soft/60 p-3">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">実行ログ {jobId ? `(${jobId})` : ''}</div>
+              <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                {lines.map((l, i) => (
+                  <div key={i} className={l.kind === 'ok' ? 'text-emerald-700' : l.kind === 'error' ? 'text-red-600' : 'text-ink-soft'}>
+                    <span className="text-muted-faint">{l.at}</span>{' '}
+                    {l.kind === 'error' && <AlertTriangle className="mr-0.5 inline h-3 w-3" />}
+                    {l.kind === 'ok' && <CheckCircle2 className="mr-0.5 inline h-3 w-3" />}
+                    {l.text}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </Card>
   );

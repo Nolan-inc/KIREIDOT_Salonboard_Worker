@@ -10,9 +10,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type !== "KD_UPLOAD_IMAGE") return;
 
   (async () => {
+    let diag = null;
     try {
       // 環境の自動診断 (Playwright方式との違いを確認)。
-      const diag = {
+      diag = {
         url: location.href,
         userAgent: navigator.userAgent,
         webdriver: navigator.webdriver,
@@ -30,7 +31,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true, diag, result });
     } catch (e) {
       console.error("[KireiDot] upload failed", e);
-      sendResponse({ ok: false, error: e.message, stack: e.stack });
+      // SalonBoard 側のエラーダイアログ文言を拾って返す(原因切り分け用)。
+      let sbError = null;
+      try {
+        const t = document.body.innerText || "";
+        const m = t.match(/(通信に失敗しました[^\n]*|アップロードに失敗[^\n]*|ファイルサイズが大きすぎます[^\n]*|形式が正しくありません[^\n]*)/);
+        if (m) sbError = m[1];
+      } catch (_e) {}
+      sendResponse({ ok: false, error: e.message, stack: e.stack, sbError, diag });
     }
   })();
 

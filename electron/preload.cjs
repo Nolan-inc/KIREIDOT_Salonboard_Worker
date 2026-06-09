@@ -47,6 +47,15 @@ contextBridge.exposeInMainWorld('kireidotApp', {
   workerSync: (payload) => ipcRenderer.invoke('worker:sync', payload),
   workerTestPush: (payload) => ipcRenderer.invoke('worker:test-push', payload),
   workerTestStyleImage: (payload) => ipcRenderer.invoke('worker:test-style-image', payload),
+  // Chrome拡張連携: スタイルFRONT画像のジョブを作って普段使いChromeを開く。
+  extensionCreateStyleJob: (payload) => ipcRenderer.invoke('extension:create-style-job', payload),
+  extensionJobStatus: (jobId) => ipcRenderer.invoke('extension:job-status', jobId),
+  extensionBridgeHealth: () => ipcRenderer.invoke('extension:bridge-health'),
+  onExtensionEvent: (handler) => {
+    const listener = (_event, ev) => handler(ev);
+    ipcRenderer.on('extension:event', listener);
+    return () => ipcRenderer.removeListener('extension:event', listener);
+  },
   workerCancelBooking: (payload) => ipcRenderer.invoke('worker:cancel-booking', payload),
   workerChangeBooking: (payload) => ipcRenderer.invoke('worker:change-booking', payload),
   workerAbort: () => ipcRenderer.invoke('worker:abort'),

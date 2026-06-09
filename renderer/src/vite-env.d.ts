@@ -19,6 +19,21 @@ type UpdaterStatus =
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string };
 
+// Chrome拡張連携(extension-bridge.cjs)からのイベント。
+type ExtensionEvent = {
+  type:
+    | 'bridge_started' | 'bridge_error'
+    | 'job_created' | 'chrome_opened' | 'chrome_open_failed'
+    | 'job_picked' | 'job_uploading' | 'job_completed' | 'job_failed';
+  at: string;
+  jobId?: string;
+  url?: string;
+  error?: string;
+  imageId?: string | null;
+  diag?: unknown;
+  sbError?: string | null;
+};
+
 // utilityProcess (electron/worker-process.cjs) からのイベント。
 type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'customers';
 type WorkerEvent =
@@ -200,6 +215,19 @@ interface Window {
       shopName?: string | null;
       enablePost?: boolean;
     }) => Promise<{ ok: boolean }>;
+    /** Chrome拡張連携: スタイルFRONT画像のジョブを作り、普段使いChromeでstyleEditを開く。 */
+    extensionCreateStyleJob: (payload: {
+      imageUrl: string;
+      salonboardUrl?: string;
+      shopId?: string | null;
+      shopName?: string | null;
+    }) => Promise<{ ok: boolean; jobId?: string; salonboardUrl?: string; error?: string }>;
+    /** 拡張ジョブの状態を取得。 */
+    extensionJobStatus: (jobId: string) => Promise<{ ok: boolean; status?: string; error?: string | null; result?: unknown }>;
+    /** ローカルブリッジの稼働確認。 */
+    extensionBridgeHealth: () => Promise<{ ok: boolean; port?: number; pending?: number }>;
+    /** 拡張ジョブの状態変化イベントを購読。 */
+    onExtensionEvent: (handler: (ev: ExtensionEvent) => void) => () => void;
     /** 単発の予約キャンセル (reserveId で SalonBoard 上の予約をキャンセル)。結果は cancel:test イベントで届く。 */
     workerCancelBooking: (payload: {
       shopId: string;
