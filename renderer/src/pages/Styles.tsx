@@ -400,7 +400,11 @@ function StyleExtensionPanel() {
         setState('failed');
         const msg = String(ev.error || '');
         const d = ev.diag as { extVersion?: string; webdriver?: unknown } | null | undefined;
-        if (d?.extVersion) log('拡張バージョン: v' + d.extVersion + (d.extVersion < '0.0.6' ? ' ⚠️(最新v0.0.6に更新してください)' : ''), d.extVersion < '0.0.6' ? 'error' : 'info');
+        if (d?.extVersion) {
+          const cmp = (a: string, b: string) => { const pa = a.split('.').map(Number), pb = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; };
+          const stale = cmp(d.extVersion, '0.0.10') < 0;
+          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.10に更新してください)' : ''), stale ? 'error' : 'info');
+        }
         log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
         if (/ログイン|認証/.test(msg)) {

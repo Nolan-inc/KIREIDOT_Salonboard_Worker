@@ -275,7 +275,7 @@ function UpdateSection() {
               type="button"
               onClick={() =>
                 window.kireidotApp?.openExternal(
-                  'https://github.com/Nolan-inc/KIREIDOT_Salonboard_Worker/releases/tag/ext-v0.0.9',
+                  'https://github.com/Nolan-inc/KIREIDOT_Salonboard_Worker/releases/tag/ext-v0.0.10',
                 )
               }
               className="inline-flex shrink-0 items-center gap-1.5 rounded-[10px] bg-sky-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-sky-700"

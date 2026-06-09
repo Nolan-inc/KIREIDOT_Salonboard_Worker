@@ -64,38 +64,50 @@ async function runUpload(job) {
   }
 
   const url = location.href;
-
-  // --- (A) ログイン画面に居る → 対象会社のID/PWでログイン ---
-  if (isLoginPage()) {
-    if (!loginId || !password) {
-      const e = new Error("SalonBoardにログインしていません。認証情報がジョブにありません。");
-      e.code = "NOT_LOGGED_IN";
-      throw e;
-    }
-    console.log("[KireiDot] login page → 自動ログイン");
-    const ok = await fillAndSubmitLogin(loginId, password);
-    if (!ok) {
-      const e = new Error("自動ログインに失敗しました(ID/PW不一致 or reCAPTCHA)。");
-      e.code = "LOGIN_FAILED";
-      throw e;
-    }
-    // ログイン後の遷移は fillAndSubmitLogin 内で待つ。ログインしたcompanyIdをStorageに記録。
-    await setLoggedCompany(companyId, loginId);
-    throw NAV("ログインしました。続けて処理します。");
-  }
+  const hasLoginForm = !!document.querySelector("input[type='password'], input[name='password']");
+  const onStyleEdit = !!document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']");
+  const onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(url) || isGroupTopPage();
+  const loggedInApp = onStyleEdit || onGroupTop || !!document.querySelector("a.jscUploadImg, a[href*='logout'], #biyouStoreInfoArea, #kireiStoreInfoArea");
 
   // --- (B) 認証エラー表示 → ログイン画面へ ---
-  if (hasAuthError()) {
+  if (hasAuthError() && !hasLoginForm) {
     console.log("[KireiDot] 認証エラー → /login へ");
     await clearLoggedCompany();
     throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
   }
 
+  // --- (A) ログインフォームが見えている → 対象会社のID/PWでログイン ---
+  //     (URLが/loginでなくても、フォームが出ていればログイン画面とみなす)
+  if (hasLoginForm && !loggedInApp) {
+    if (!loginId || !password) {
+      const e = new Error("SalonBoardにログインしていません。認証情報がジョブにありません(店舗のSalonBoard ID/PWを登録してください)。");
+      e.code = "NOT_LOGGED_IN";
+      throw e;
+    }
+    console.log("[KireiDot] ログインフォーム検出 → 自動ログイン", { loginId: String(loginId).slice(0, 3) + "***" });
+    const r = await fillAndSubmitLogin(loginId, password);
+    if (r === "captcha") {
+      const e = new Error("reCAPTCHA が表示されました。手動でログインしてからお試しください。");
+      e.code = "LOGIN_FAILED"; throw e;
+    }
+    if (!r) {
+      const e = new Error("自動ログインに失敗しました(ID/PW不一致の可能性)。");
+      e.code = "LOGIN_FAILED"; throw e;
+    }
+    await setLoggedCompany(companyId, loginId);
+    throw NAV("ログインしました。続けて処理します。");
+  }
+
+  // --- (A') ログインしていない & フォームも無い(=未ログインで別ページにいる/直接styleEditを開いて弾かれた) ---
+  //     → /login/ へ移動してログインフォームを出す。
+  if (!loggedInApp && !hasLoginForm && loginId && password) {
+    console.log("[KireiDot] 未ログイン & フォーム無し → /login へ");
+    throw NAV("ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
+  }
+
   // --- (C) ログイン済み: 対象会社かどうか判定 ---
-  // 拡張が最後にログインした companyId を Storage で記録している。
   const logged = await getLoggedCompany();
   if (companyId && logged.companyId && logged.companyId !== companyId) {
-    // 別会社にログイン中 → ログアウトして対象会社へ。
     console.log("[KireiDot] 別会社ログイン中 → ログアウト", { now: logged.companyId, target: companyId });
     await clearLoggedCompany();
     const out = await doLogout();
@@ -103,7 +115,7 @@ async function runUpload(job) {
   }
 
   // --- (D) グループ店舗選択(groupTop)に居る → 対象サロンを選択 ---
-  if (/\/(?:CNC|KLP)\/groupTop/i.test(url) || isGroupTopPage()) {
+  if (onGroupTop) {
     console.log("[KireiDot] groupTop → サロン選択", { salonId, expectedSalonName });
     const sel = selectSalon(salonId, expectedSalonName);
     if (!sel) {
@@ -235,44 +247,64 @@ function selectSalon(salonId, expectedSalonName) {
 // SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn" onclick="dologin(event)">。
 // ----------------------------------------------------------------------
 async function fillAndSubmitLogin(loginId, password) {
-  const idInput = findFirst([
-    "input[name='userId']",
-    "input[name='loginId']",
-    "input[name='loginCd']",
-    "input[id*='login' i]",
-    "input[type='email']",
-    "input[type='text']",
-  ]);
+  // worker(tryLogin)と同じ流れ。reCAPTCHAが出ていたら手動誘導。
+  if (document.querySelector("iframe[src*='recaptcha']")) return "captcha";
+
+  // 入力欄の出現を待つ(描画が遅いことがある)。
+  try { await waitForSelector("input[type='password'], input[name='password']", 12000); } catch (_e) { return false; }
+
+  // ID欄: worker と同じ優先順。:visible は querySelector で無効なのでJSで可視判定。
+  const idInput =
+    document.querySelector("input[name='userId'], input[name='loginId'], input[name='loginCd'], input[id*='login' i], input[type='email']") ||
+    Array.from(document.querySelectorAll("input[type='text']")).find((el) => el.offsetParent !== null);
   const pwInput = document.querySelector("input[name='password'], input[type='password']");
   if (!idInput || !pwInput) return false;
 
+  // クリックしてフォーカス → 値セット(input/change発火)。
+  try { idInput.click(); } catch (_e) {}
   setNativeValue(idInput, loginId);
-  setNativeValue(pwInput, password);
   await sleep(300);
+  try { pwInput.click(); } catch (_e) {}
+  setNativeValue(pwInput, password);
+  await sleep(500);
 
-  // ログインボタン。
+  // 値が入ったか確認(空ならログインしても弾かれる)。
+  if (!idInput.value || !pwInput.value) {
+    // フォールバック: もう一度直接代入。
+    idInput.value = loginId; pwInput.value = password;
+    idInput.dispatchEvent(new Event("change", { bubbles: true }));
+    pwInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  console.log("[KireiDot] login fields filled", { idLen: idInput.value.length, pwLen: pwInput.value.length });
+
+  // ログインボタン (worker と同じ候補)。
   const btn = findFirst([
     "a.common-CNCcommon__primaryBtn",
+    "a.loginBtnSize",
     "a[onclick*='dologin']",
+    "a[onclick*='Login']",
     "button[type='submit']",
     "input[type='submit']",
-    "a:has(img[alt*='ログイン'])",
   ]);
   if (btn) {
+    console.log("[KireiDot] ログインボタンclick", btn.className || btn.tagName);
     realClick(btn);
   } else {
-    // 最後の手段: password で Enter。
-    pwInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    // 最後の手段: password 欄で Enter (onkeypress=enterActionLogin)。
+    pwInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, which: 13, bubbles: true }));
+    pwInput.dispatchEvent(new KeyboardEvent("keypress", { key: "Enter", keyCode: 13, which: 13, bubbles: true }));
+    pwInput.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", keyCode: 13, which: 13, bubbles: true }));
   }
 
-  // ログイン後の遷移を待つ(パスワード欄が消える or styleEdit系へ)。
+  // ログイン後の遷移を待つ(パスワード欄が消える=成功 / エラー文言=失敗)。
   const startedAt = Date.now();
   while (Date.now() - startedAt < 20000) {
     await sleep(500);
+    if (document.querySelector("iframe[src*='recaptcha']")) return "captcha";
     const stillLogin = document.querySelector("input[type='password']");
-    const errText = document.body?.innerText || "";
-    if (/ID.*パスワード.*正しく|ログインできません|認証に失敗/.test(errText)) return false;
-    if (!stillLogin) return true; // ログイン成功(フォームが消えた)
+    const errText = (document.body?.innerText || "").replace(/\s+/g, "");
+    if (/IDまたはパスワード|正しく入力|ログインできません|認証に失敗|ご登録の/.test(errText)) return false;
+    if (!stillLogin) return true; // フォームが消えた=ログイン成功(遷移した)
   }
   return !document.querySelector("input[type='password']");
 }
