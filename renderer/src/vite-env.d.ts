@@ -24,7 +24,7 @@ type ExtensionEvent = {
   type:
     | 'bridge_started' | 'bridge_error'
     | 'job_created' | 'chrome_opened' | 'chrome_open_failed'
-    | 'job_picked' | 'job_uploading' | 'job_completed' | 'job_failed';
+    | 'job_picked' | 'job_uploading' | 'job_retry' | 'job_completed' | 'job_failed';
   at: string;
   jobId?: string;
   url?: string;

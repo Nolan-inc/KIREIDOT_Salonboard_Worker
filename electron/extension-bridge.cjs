@@ -195,6 +195,22 @@ function handle(req, res) {
     req.on('end', () => {
       let payload = {};
       try { payload = JSON.parse(body || '{}'); } catch (_e) {}
+      if (payload.status === 'retry') {
+        // 画面遷移(styleList→styleEdit)等で再実行が必要 → pending に戻す。
+        // 何度も遷移ループしないよう retry 回数を制限。
+        job.retryCount = (job.retryCount || 0) + 1;
+        if (job.retryCount > 3) {
+          job.status = 'failed';
+          job.error = payload.error || 'styleEditへ遷移できませんでした(リトライ上限)';
+          job.updatedAt = now();
+          emit('job_failed', { jobId: job.jobId, error: job.error });
+        } else {
+          job.status = 'pending';
+          job.updatedAt = now();
+          emit('job_retry', { jobId: job.jobId, retryCount: job.retryCount, reason: payload.error || 'navigation' });
+        }
+        return sendJson(res, 200, { ok: true, requeued: job.status === 'pending' });
+      }
       if (payload.status === 'success') {
         job.status = 'done';
         job.result = { imageId: payload.imageId || null, diag: payload.diag || null };

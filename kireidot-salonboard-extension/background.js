@@ -103,6 +103,10 @@ async function runJob(job) {
         imageId: res.result?.value || null,
         diag: res.diag || null,
       });
+    } else if (res?.code === "NAVIGATED") {
+      // styleList→styleEdit へ遷移中。ジョブを pending に戻して、遷移完了後に再実行。
+      await complete(job.jobId, { status: "retry", error: res?.error || "navigating to styleEdit" });
+      await sleep(3500); // 遷移＋content script 再注入を待つ
     } else {
       await complete(job.jobId, {
         status: "failed",
@@ -127,6 +131,10 @@ async function complete(jobId, payload) {
   } catch (e) {
     console.warn("[KireiDot/bg] complete failed", e);
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // 起動直後にもポーリングを仕掛ける。

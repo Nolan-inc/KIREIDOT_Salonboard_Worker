@@ -38,7 +38,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const m = t.match(/(通信に失敗しました[^\n]*|アップロードに失敗[^\n]*|ファイルサイズが大きすぎます[^\n]*|形式が正しくありません[^\n]*)/);
         if (m) sbError = m[1];
       } catch (_e) {}
-      sendResponse({ ok: false, error: e.message, stack: e.stack, sbError, diag });
+      sendResponse({ ok: false, error: e.message, code: e.code || null, stack: e.stack, sbError, diag });
     }
   })();
 
@@ -50,6 +50,17 @@ async function runUpload({ mode, imageUrl }) {
   if (mode !== "hair-style-front") {
     throw new Error("このMVPは美容室スタイルFRONTのみ対応です (mode=" + mode + ")");
   }
+
+  // 0) ログイン状態の確認。未ログイン(ログイン画面/認証エラー)なら明確に返す。
+  const loginIssue = detectLoginIssue();
+  if (loginIssue) {
+    const err = new Error(loginIssue);
+    err.code = "NOT_LOGGED_IN";
+    throw err;
+  }
+
+  // 0.5) styleList(一覧)にいる場合は styleEdit(登録画面)へ自動遷移する。
+  await ensureOnStyleEdit();
 
   // 1) 画像を取得して File を作る。
   const image = await fetchImageAsFile(imageUrl);
@@ -80,6 +91,72 @@ async function runUpload({ mode, imageUrl }) {
   // 6) 結果を待つ (FRONT_IMG_ID 反映 or 失敗ダイアログ)。
   const uploadResult = await waitForUploadResult(45000);
   return uploadResult;
+}
+
+// ----------------------------------------------------------------------
+// ログイン状態の検出: ログイン画面 or 認証エラーダイアログを検知
+// ----------------------------------------------------------------------
+function detectLoginIssue() {
+  const url = location.href;
+  // ログイン関連URLに飛ばされている
+  if (/\/login|\/CNB\/top|\/auth|\/CNC\/groupTop/i.test(url) && !/styleEdit|styleList/i.test(url)) {
+    if (/\/login/i.test(url)) return "SalonBoardにログインしていません。普段使いのChromeでSalonBoardにログインしてから、もう一度お試しください。";
+  }
+  const text = document.body?.innerText || "";
+  if (/認証エラー|ログインしなおして|ログインし直して|セッション.*切れ|再度ログイン/i.test(text)) {
+    return "SalonBoardの認証が切れています(認証エラー)。普段使いのChromeでSalonBoardにログインし直してから、もう一度お試しください。";
+  }
+  // ログインフォームがそのまま出ている
+  if (document.querySelector("input[name='userId'], input#userId, input[name='password']") && !document.querySelector("#FRONT_IMG_ID_IMG, a.jscUploadImg")) {
+    return "SalonBoardのログイン画面が表示されています。ログインしてから、もう一度お試しください。";
+  }
+  return null;
+}
+
+// ----------------------------------------------------------------------
+// styleList(一覧)にいる場合は styleEdit(登録画面)へ遷移する
+// ----------------------------------------------------------------------
+async function ensureOnStyleEdit() {
+  // 既に styleEdit (FRONT画像枠がある) ならOK。
+  if (document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']")) return;
+
+  // styleList の「スタイル新規追加」ボタンを探して押す。
+  const addBtn = findFirst([
+    "a.jscAddStyle",
+    "a[onclick*='addStyle']",
+    "a[href*='styleEdit']",
+    "input[value*='新規追加']",
+    "img[alt*='新規追加']",
+    "a:has(img[alt*='新規追加'])",
+  ]);
+  if (addBtn) {
+    console.log("[KireiDot] styleList → 新規追加クリックで styleEdit へ");
+    realClick(addBtn);
+    // styleEdit のFRONT画像枠が出るまで待つ(遷移 or AJAX)。
+    try {
+      await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 12000);
+      return;
+    } catch (_e) {
+      /* 遷移しなかった場合は下のエラーへ */
+    }
+  }
+
+  // それでもダメなら、URLで直接 styleEdit に飛ぶ(同一オリジン)。
+  if (/\/styleList/i.test(location.href)) {
+    const editUrl = location.origin + "/CNB/draft/styleEdit/";
+    console.log("[KireiDot] styleList → location 遷移", editUrl);
+    // 遷移するとcontent scriptは再注入されるため、code=NAVIGATED を投げて
+    // background にジョブを pending へ戻させ、styleEdit 上で再実行させる。
+    const err = new Error("スタイル登録画面(styleEdit)へ移動します。数秒後に自動で再実行されます。");
+    err.code = "NAVIGATED";
+    setTimeout(() => { location.href = editUrl; }, 100);
+    throw err;
+  }
+
+  throw new Error(
+    "スタイル登録画面(styleEdit)を開けませんでした。手動で「スタイル新規追加」を押して登録画面を開いてからお試しください。URL=" +
+      location.href
+  );
 }
 
 // ----------------------------------------------------------------------

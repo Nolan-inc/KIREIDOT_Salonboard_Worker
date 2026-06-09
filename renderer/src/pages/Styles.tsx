@@ -352,7 +352,7 @@ const STATE_LABEL: Record<ExtState, string> = {
 function StyleExtensionPanel() {
   const scope = useEffectiveScope();
   const [imageUrl, setImageUrl] = useState('');
-  const [salonboardUrl, setSalonboardUrl] = useState('https://salonboard.com/CNB/draft/styleList/');
+  const [salonboardUrl, setSalonboardUrl] = useState('https://salonboard.com/CNB/draft/styleEdit/');
   const [state, setState] = useState<ExtState>('idle');
   const [lines, setLines] = useState<TestLine[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -393,11 +393,16 @@ function StyleExtensionPanel() {
       else if (t === 'chrome_open_failed') { setState('failed'); log('Chromeを開けませんでした: ' + (ev.error || ''), 'error'); }
       else if (t === 'job_picked') { setState('picked'); log('🤝 拡張がジョブを受け取りました'); }
       else if (t === 'job_uploading') { setState('uploading'); log('⬆️ 画像アップロード中…'); }
+      else if (t === 'job_retry') { setState('chrome_opened'); log('↪️ スタイル登録画面へ移動中…自動で再実行します'); }
       else if (t === 'job_completed') { setState('done'); log('✅ FRONT_IMG_ID 反映成功 (画像ID=' + (ev.imageId || '?') + ')', 'ok'); }
       else if (t === 'job_failed') {
         setState('failed');
-        log('🔴 失敗: ' + (ev.error || ''), 'error');
+        const msg = String(ev.error || '');
+        log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
+        if (/ログイン|認証/.test(msg)) {
+          log('💡 普段使いの Chrome で SalonBoard にログインしてから、もう一度実行してください。', 'error');
+        }
       }
       else if (t === 'bridge_error') { log('ブリッジエラー: ' + (ev.error || ''), 'error'); }
     });
