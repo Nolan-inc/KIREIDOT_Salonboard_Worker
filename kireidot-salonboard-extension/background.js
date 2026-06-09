@@ -117,18 +117,20 @@ async function runJob(job) {
   // タブをアクティブに(content scriptが確実に動くように)。
   try { await chrome.tabs.update(sbTab.id, { active: true }); } catch (_e) {}
 
+  const message = {
+    type: "KD_UPLOAD_IMAGE",
+    mode: job.mode || "hair-style-front",
+    imageUrl: job.imageUrl, // ローカルブリッジの画像URL
+    // ログイン/会社切替/サロン選択用 (ローカルブリッジ由来)。
+    loginId: job.loginId || null,
+    password: job.password || null,
+    companyId: job.companyId || null,
+    salonId: job.salonId || null,
+    expectedSalonName: job.expectedSalonName || null,
+  };
+
   try {
-    const res = await chrome.tabs.sendMessage(sbTab.id, {
-      type: "KD_UPLOAD_IMAGE",
-      mode: job.mode || "hair-style-front",
-      imageUrl: job.imageUrl, // ローカルブリッジの画像URL
-      // ログイン/会社切替/サロン選択用 (ローカルブリッジ由来)。
-      loginId: job.loginId || null,
-      password: job.password || null,
-      companyId: job.companyId || null,
-      salonId: job.salonId || null,
-      expectedSalonName: job.expectedSalonName || null,
-    });
+    const res = await sendToTabWithInjection(sbTab.id, message);
     if (res?.ok) {
       await complete(job.jobId, {
         status: "success",
@@ -148,9 +150,35 @@ async function runJob(job) {
       });
     }
   } catch (e) {
-    // content script 未注入など(ページ読み込み前)。少し待って次のポーリングで拾う。
-    await complete(job.jobId, { status: "failed", error: "content scriptへの送信失敗: " + e.message });
+    // content script 未注入(ページ読み込み中/遷移直後)。失敗扱いにせず retry に戻して
+    // 次のポーリングで content.js が居る状態で拾わせる。
+    console.warn("[KireiDot/bg] send failed, retry", e?.message);
+    await complete(job.jobId, { status: "retry", error: "content script待ち: " + (e?.message || "") });
+    await sleep(2500);
   }
+}
+
+// content.js にメッセージ送信。未注入なら chrome.scripting.executeScript で注入してから再送。
+// それでもダメなら少し待ってリトライ(最大3回)。
+async function sendToTabWithInjection(tabId, message) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (e) {
+      lastErr = e;
+      // content.js を動的注入してから再送を試す。
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+        await sleep(500);
+        return await chrome.tabs.sendMessage(tabId, message);
+      } catch (e2) {
+        lastErr = e2;
+        await sleep(800);
+      }
+    }
+  }
+  throw lastErr || new Error("content scriptへ送信できません");
 }
 
 async function complete(jobId, payload) {
