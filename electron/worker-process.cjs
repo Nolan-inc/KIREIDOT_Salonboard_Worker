@@ -146,8 +146,10 @@ async function launchStealthPersistentContext(opts = {}) {
     emit('log', { level: 'info', msg: `Chromeプロファイルseed: ${JSON.stringify(seedInfo)}`, at: new Date().toISOString() });
   }
   // 自動化検知につながる既定フラグを除去。
-  const ignoreDefaultArgs = ['--enable-automation', '--disable-blink-features=AutomationControlled'];
-  const args = ['--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
+  // ★--no-sandbox は付けない: Chromeが「サポートされていないフラグ」警告を出し、
+  //   Akamai に自動化ブラウザと検知される手がかりになる。実Chromeはsandboxありで起動できる。
+  const ignoreDefaultArgs = ['--enable-automation', '--disable-blink-features=AutomationControlled', '--no-sandbox'];
+  const args = ['--disable-features=IsolateOrigins,site-per-process'];
   const contextOpts = {
     headless,
     slowMo,
