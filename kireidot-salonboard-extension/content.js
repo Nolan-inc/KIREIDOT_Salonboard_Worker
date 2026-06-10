@@ -159,7 +159,98 @@ async function runUpload(job) {
 
   // 6) 結果を待つ (FRONT_IMG_ID 反映 or 失敗ダイアログ)。
   const uploadResult = await waitForUploadResult(45000);
+
+  // --- (G) 必須項目を入力してスタイル登録 (style payload があれば) ---
+  const sp = job.style || null;
+  if (sp) {
+    console.log("[KireiDot] スタイル必須項目を入力", sp);
+    fillStyleForm(sp);
+    await sleep(600);
+    if (job.enablePost) {
+      // doRegister(event) を呼ぶ「登録」リンクをクリック。
+      const reg = findFirst([
+        "a[onclick*='doRegister']",
+        "img[alt='登録']",
+        "a:has(img[alt='登録'])",
+      ]);
+      if (reg) {
+        console.log("[KireiDot] 登録(doRegister)クリック");
+        realClick(reg.closest("a") || reg);
+        // 登録後: styleList へ戻る or エラー文言を待つ。
+        const ok = await waitForRegisterResult(30000);
+        if (ok === "error") {
+          return { status: "uploaded_not_registered", reason: getValidationError(), value: uploadResult.value };
+        }
+        return { status: "registered", value: uploadResult.value };
+      }
+      return { status: "uploaded_no_register_btn", value: uploadResult.value };
+    }
+    // enablePost=false: 入力だけして登録はしない(確認用)。
+    return { status: "filled_not_registered", value: uploadResult.value };
+  }
+
   return uploadResult;
+}
+
+// styleEdit フォームの必須項目を入力する。
+function fillStyleForm(sp) {
+  const setVal = (el, v) => { if (!el) return; el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); };
+  // スタイリスト (select#stylistCheckCd, value=T...)
+  if (sp.stylistExternalId) {
+    const sel = document.querySelector("#stylistCheckCd, select[name='frmStyleEditStylistCommentDto.stylistId']");
+    if (sel) {
+      const opt = Array.from(sel.options).find((o) => o.value === sp.stylistExternalId);
+      if (opt) setVal(sel, sp.stylistExternalId);
+    }
+  }
+  // コメント (120字)
+  if (sp.comment) setVal(document.querySelector("#stylistCommentTxt, textarea[name='frmStyleEditStylistCommentDto.stylistComment']"), sp.comment.slice(0, 120));
+  // スタイル名 (30字)
+  if (sp.styleName) setVal(document.querySelector("#styleNameTxt, input[name='frmStyleEditStyleDto.styleName']"), sp.styleName.slice(0, 30));
+  // カテゴリ (SG01=レディース / SG02=メンズ)
+  const cat = sp.category || "SG01";
+  const catRadio = document.querySelector(`input[name='frmStyleEditStyleDto.styleCategoryCd'][value='${cat}']`);
+  if (catRadio) { catRadio.checked = true; catRadio.dispatchEvent(new Event("change", { bubbles: true })); catRadio.click(); }
+  // 長さ (レディース=#ladiesHairLengthCd / メンズ=#mensHairLengthCd)
+  const lenCd = sp.length || "HL03"; // 既定ミディアム
+  if (cat === "SG02") setVal(document.querySelector("#mensHairLengthCd, select[name='frmStyleEditStyleDto.mensHairLengthCd']"), lenCd);
+  else setVal(document.querySelector("#ladiesHairLengthCd, select[name='frmStyleEditStyleDto.ladiesHairLengthCd']"), lenCd);
+  // メニュー内容 (チェックボックス, MC01..)。複数可。必須なので最低1つ確実にチェックする。
+  const menus = Array.isArray(sp.menus) && sp.menus.length ? sp.menus : [];
+  let checkedAny = false;
+  for (const mc of menus) {
+    const cb = document.querySelector(`input[name='frmStyleEditStyleDto.menuContentsCdList'][value='${mc}']`);
+    if (cb) { if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change", { bubbles: true })); cb.click(); } checkedAny = true; }
+  }
+  // 指定メニューが1つも存在しなかった → 先頭のメニューを必須対策でチェック。
+  if (!checkedAny) {
+    const first = document.querySelector("input[name='frmStyleEditStyleDto.menuContentsCdList']");
+    if (first && !first.checked) { first.checked = true; first.dispatchEvent(new Event("change", { bubbles: true })); first.click(); }
+  }
+}
+
+// 登録(doRegister)後の結果待ち。styleList へ戻れば成功、バリデーションエラー文言なら error。
+async function waitForRegisterResult(timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await sleep(500);
+    // styleList へ戻った = 登録成功。
+    if (/\/styleList/i.test(location.href)) return "ok";
+    // styleEdit 上にバリデーションエラーが出ている。
+    if (getValidationError()) return "error";
+    // FRONT画像枠が無くなった(別ページへ遷移) = 成功とみなす。
+    if (!document.querySelector("#FRONT_IMG_ID")) return "ok";
+  }
+  return "ok";
+}
+
+function getValidationError() {
+  // 必須未入力等のエラー表示を拾う。
+  const errEl = document.querySelector(".common-CNBcommon__errorText, .errorTxt, .error_message, .div_err_message, .style_edit-editCommon__text--error");
+  if (errEl && (errEl.textContent || "").trim()) return errEl.textContent.trim().slice(0, 200);
+  const body = document.body?.innerText || "";
+  const m = body.match(/(必須項目[^\n]*入力[^\n]*|入力してください[^\n]*|選択してください[^\n]*)/);
+  return m ? m[1] : null;
 }
 
 // ----------------------------------------------------------------------

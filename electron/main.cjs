@@ -527,6 +527,8 @@ ipcMain.handle('extension:create-style-job', async (_event, payload) => {
       companyId: p.companyId || null,
       salonId: p.salonId || null,
       expectedSalonName: p.expectedSalonName || null,
+      style: p.style || null,
+      enablePost: !!p.enablePost,
     });
     if (job.status === 'failed') {
       return { ok: false, error: job.error, jobId: job.jobId };

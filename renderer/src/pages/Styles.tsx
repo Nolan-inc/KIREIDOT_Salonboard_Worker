@@ -350,6 +350,17 @@ const STATE_LABEL: Record<ExtState, string> = {
   failed: '🔴 失敗',
 };
 
+const HAIR_LENGTHS = [
+  { cd: 'HL05', label: 'ベリーショート' }, { cd: 'HL04', label: 'ショート' },
+  { cd: 'HL03', label: 'ミディアム' }, { cd: 'HL02', label: 'セミロング' },
+  { cd: 'HL01', label: 'ロング' }, { cd: 'HL08', label: 'ヘアセット' }, { cd: 'HL07', label: 'ミセス' },
+];
+const HAIR_MENUS = [
+  { cd: 'MC01', label: 'パーマ' }, { cd: 'MC02', label: 'ストレートパーマ・縮毛矯正' },
+  { cd: 'MC03', label: 'エクステ' }, { cd: 'MC04', label: 'ブリーチ' }, { cd: 'MC05', label: 'カラー' },
+  { cd: 'MC06', label: 'トリートメント' }, { cd: 'MC07', label: 'カット' },
+];
+
 function StyleExtensionPanel() {
   const scope = useEffectiveScope();
   const [imageUrl, setImageUrl] = useState('');
@@ -359,6 +370,15 @@ function StyleExtensionPanel() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
   const jobIdRef = useRef<string | null>(null);
+  // スタイル投稿の必須項目
+  const [stylists, setStylists] = useState<StaffRow[]>([]);
+  const [stylistExt, setStylistExt] = useState('');
+  const [styleName, setStyleName] = useState('');
+  const [comment, setComment] = useState('');
+  const [category, setCategory] = useState<'SG01' | 'SG02'>('SG01');
+  const [length, setLength] = useState('HL03');
+  const [menus, setMenus] = useState<string[]>(['MC07']);
+  const [enablePost, setEnablePost] = useState(false);
 
   const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
 
@@ -370,6 +390,20 @@ function StyleExtensionPanel() {
     if (!bridge?.extensionBridgeHealth) return;
     bridge.extensionBridgeHealth().then((r) => setBridgeOk(!!r?.ok)).catch(() => setBridgeOk(false));
   }, [bridge]);
+
+  // スタイリスト(T...)を取得。
+  useEffect(() => {
+    if (!scope?.shopId) return;
+    let cancelled = false;
+    fetchStaffList(scope).then((rows) => {
+      if (cancelled) return;
+      const t = rows.filter((s) => (s.external_id || '').toUpperCase().startsWith('T'));
+      setStylists(t);
+      if (t[0]?.external_id) setStylistExt(t[0].external_id);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope?.shopId]);
 
   // デフォルト画像: 取得済みスタイルの先頭画像。
   useEffect(() => {
@@ -395,15 +429,22 @@ function StyleExtensionPanel() {
       else if (t === 'job_picked') { setState('picked'); log('🤝 拡張がジョブを受け取りました'); }
       else if (t === 'job_uploading') { setState('uploading'); log('⬆️ 画像アップロード中…'); }
       else if (t === 'job_retry') { setState('chrome_opened'); log('↪️ スタイル登録画面へ移動中…自動で再実行します'); }
-      else if (t === 'job_completed') { setState('done'); log('✅ FRONT_IMG_ID 反映成功 (画像ID=' + (ev.imageId || '?') + ')', 'ok'); }
+      else if (t === 'job_completed') {
+        setState('done');
+        const rs = ev.resultStatus || '';
+        if (rs === 'registered') log('🎉 スタイル投稿が完了しました！ (画像ID=' + (ev.imageId || '?') + ')', 'ok');
+        else if (rs === 'filled_not_registered') log('✅ 画像アップ+必須項目入力OK (実登録OFFのため登録は未実行・画像ID=' + (ev.imageId || '?') + ')', 'ok');
+        else if (rs === 'uploaded_not_registered') log('⚠️ 画像はアップされましたが登録でエラー: ' + (ev.reason || '必須項目を確認') + ' (画像ID=' + (ev.imageId || '?') + ')', 'error');
+        else log('✅ FRONT_IMG_ID 反映成功 (画像ID=' + (ev.imageId || '?') + ')', 'ok');
+      }
       else if (t === 'job_failed') {
         setState('failed');
         const msg = String(ev.error || '');
         const d = ev.diag as { extVersion?: string; webdriver?: unknown } | null | undefined;
         if (d?.extVersion) {
           const cmp = (a: string, b: string) => { const pa = a.split('.').map(Number), pb = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; };
-          const stale = cmp(d.extVersion, '0.0.11') < 0;
-          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.11に更新してください)' : ''), stale ? 'error' : 'info');
+          const stale = cmp(d.extVersion, '0.0.12') < 0;
+          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.12に更新してください)' : ''), stale ? 'error' : 'info');
         }
         log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
@@ -462,6 +503,16 @@ function StyleExtensionPanel() {
       companyId: creds?.loginId || scope?.organizationId || null,
       salonId: creds?.salonId || null,
       expectedSalonName: scope?.shopName || null,
+      // スタイル投稿の必須項目 + 実登録フラグ。
+      style: {
+        stylistExternalId: stylistExt || null,
+        styleName: styleName.trim() || 'スタイル',
+        comment: comment.trim() || 'おすすめスタイルです。',
+        category,
+        length,
+        menus,
+      },
+      enablePost,
     });
     if (!r?.ok) {
       setState('failed');
@@ -499,10 +550,62 @@ function StyleExtensionPanel() {
             <span className="text-[10px] uppercase tracking-wide text-muted">画像URL（公開URL）</span>
             <input type="text" value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://…/image.jpg" className={ic} />
           </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">担当スタイリスト（必須）</span>
+              {stylists.length === 0 ? (
+                <span className="text-[11px] text-amber-700">スタイリスト(T…)未取得。先に同期してください。</span>
+              ) : (
+                <select value={stylistExt} onChange={(e) => setStylistExt(e.target.value)} className={ic}>
+                  {stylists.map((s) => (<option key={s.id} value={s.external_id ?? ''}>{s.full_name}</option>))}
+                </select>
+              )}
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">スタイル名（必須・30字）</span>
+              <input type="text" value={styleName} maxLength={30} onChange={(e) => setStyleName(e.target.value)} placeholder="例: 大人ナチュラルボブ" className={ic} />
+            </label>
+          </div>
           <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-wide text-muted">開くSalonBoard URL（スタイル画面）</span>
-            <input type="text" value={salonboardUrl} onChange={(e) => setSalonboardUrl(e.target.value)} className={ic} />
+            <span className="text-[10px] uppercase tracking-wide text-muted">コメント（必須・120字）</span>
+            <textarea value={comment} maxLength={120} onChange={(e) => setComment(e.target.value)} placeholder="スタイリストコメント" className="min-h-[60px] w-full rounded-[10px] border border-hairline bg-white px-3 py-2 text-[13px] focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand/20" />
           </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">カテゴリ</span>
+              <select value={category} onChange={(e) => setCategory(e.target.value as 'SG01' | 'SG02')} className={ic}>
+                <option value="SG01">レディース</option>
+                <option value="SG02">メンズ</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-muted">長さ（必須）</span>
+              <select value={length} onChange={(e) => setLength(e.target.value)} className={ic}>
+                {HAIR_LENGTHS.map((l) => (<option key={l.cd} value={l.cd}>{l.label}</option>))}
+              </select>
+            </label>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-muted">メニュー内容（必須・複数可）</span>
+            <div className="flex flex-wrap gap-2">
+              {HAIR_MENUS.map((m) => (
+                <label key={m.cd} className="flex items-center gap-1 rounded-[8px] border border-hairline px-2 py-1 text-[11px]">
+                  <input type="checkbox" checked={menus.includes(m.cd)} onChange={(e) => setMenus((cur) => e.target.checked ? [...cur, m.cd] : cur.filter((x) => x !== m.cd))} className="h-3.5 w-3.5 accent-brand" />
+                  {m.label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <label className="flex items-center gap-2 text-[12px]">
+            <input type="checkbox" checked={enablePost} onChange={(e) => setEnablePost(e.target.checked)} className="h-4 w-4 accent-brand" />
+            <span className={enablePost ? 'font-semibold text-amber-700' : 'text-ink-soft'}>
+              実投稿する（ON: スタイル登録まで実行 / OFF: 画像＋入力のみ・登録しない）
+            </span>
+          </label>
+          <details className="text-[11px] text-ink-soft">
+            <summary className="cursor-pointer">詳細設定（開くURL）</summary>
+            <input type="text" value={salonboardUrl} onChange={(e) => setSalonboardUrl(e.target.value)} className={`${ic} mt-1`} />
+          </details>
 
           <div className="flex items-center gap-3">
             <button

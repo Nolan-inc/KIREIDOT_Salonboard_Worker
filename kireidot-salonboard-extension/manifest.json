@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KireiDot SalonBoard Helper",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "description": "予約同期くんと連携し、普段使いChromeでSalonBoardのスタイルFRONT画像を自動アップロード",
   "permissions": [
     "activeTab",

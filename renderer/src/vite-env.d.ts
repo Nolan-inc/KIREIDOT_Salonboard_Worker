@@ -30,6 +30,8 @@ type ExtensionEvent = {
   url?: string;
   error?: string;
   imageId?: string | null;
+  resultStatus?: string | null;
+  reason?: string | null;
   diag?: unknown;
   sbError?: string | null;
 };
@@ -227,6 +229,17 @@ interface Window {
       companyId?: string | null;
       salonId?: string | null;
       expectedSalonName?: string | null;
+      /** スタイル投稿の必須項目。 */
+      style?: {
+        stylistExternalId?: string | null;
+        styleName?: string;
+        comment?: string;
+        category?: 'SG01' | 'SG02';
+        length?: string;
+        menus?: string[];
+      } | null;
+      /** true=スタイル登録まで実行 / false=画像+入力のみ(登録しない)。 */
+      enablePost?: boolean;
     }) => Promise<{ ok: boolean; jobId?: string; salonboardUrl?: string; error?: string }>;
     /** 拡張ジョブの状態を取得。 */
     extensionJobStatus: (jobId: string) => Promise<{ ok: boolean; status?: string; error?: string | null; result?: unknown }>;

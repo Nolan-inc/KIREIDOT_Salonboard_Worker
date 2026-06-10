@@ -127,6 +127,9 @@ async function runJob(job) {
     companyId: job.companyId || null,
     salonId: job.salonId || null,
     expectedSalonName: job.expectedSalonName || null,
+    // スタイル投稿の必須項目 + 実登録フラグ。
+    style: job.style || null,
+    enablePost: !!job.enablePost,
   };
 
   try {
@@ -135,6 +138,8 @@ async function runJob(job) {
       await complete(job.jobId, {
         status: "success",
         imageId: res.result?.value || null,
+        resultStatus: res.result?.status || null,
+        reason: res.result?.reason || null,
         diag: res.diag || null,
       });
     } else if (res?.code === "NAVIGATED") {

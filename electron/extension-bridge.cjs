@@ -86,6 +86,8 @@ async function createJob(opts = {}) {
     companyId: opts.companyId || null,
     salonId: opts.salonId || null,
     expectedSalonName: opts.expectedSalonName || null,
+    style: opts.style || null,
+    enablePost: !!opts.enablePost,
     sourceImageUrl: opts.imageUrl || null,
     // 拡張が叩く画像URL(ローカル)。
     imageUrl: `http://${HOST}:${PORT}/jobs/${id}/image`,
@@ -172,6 +174,8 @@ function handle(req, res) {
       companyId: job.companyId || null,
       salonId: job.salonId || null,
       expectedSalonName: job.expectedSalonName || null,
+      style: job.style || null,
+      enablePost: !!job.enablePost,
     });
   }
 
@@ -227,9 +231,9 @@ function handle(req, res) {
       }
       if (payload.status === 'success') {
         job.status = 'done';
-        job.result = { imageId: payload.imageId || null, diag: payload.diag || null };
+        job.result = { imageId: payload.imageId || null, resultStatus: payload.resultStatus || null, reason: payload.reason || null, diag: payload.diag || null };
         job.updatedAt = now();
-        emit('job_completed', { jobId: job.jobId, imageId: payload.imageId || null, diag: payload.diag || null });
+        emit('job_completed', { jobId: job.jobId, imageId: payload.imageId || null, resultStatus: payload.resultStatus || null, reason: payload.reason || null, diag: payload.diag || null });
       } else {
         job.status = 'failed';
         job.error = payload.error || 'unknown';
