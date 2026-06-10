@@ -130,10 +130,31 @@ function pendingCount() { return listJobs().filter((j) => j.status === 'pending'
 function setEventHandler(fn) { if (typeof fn === 'function') onEvent = fn; }
 
 // 普段使いの Google Chrome で URL を開く (Playwright は使わない)。
-// main.cjs の extension:create-style-job と同じ方式。
+// main.cjs の extension:create-style-job もこの関数を使う。
+//
+// ⚠️ `open -a "Google Chrome" url` はプロファイルを指定できず、Chrome が
+// 最後に使ったプロファイルで開く。マシンによっては拡張/SalonBoardログインの
+// 無い別プロファイルが開いてしまうため、Chrome 実行ファイルを直接
+// `--profile-directory` 付きで起動する (起動済みでも process singleton が
+// 指定プロファイルで URL を開く)。プロファイル名は環境変数
+// SALONBOARD_CHROME_PROFILE で上書き可 (既定 "Default")。
+const CHROME_BIN = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CHROME_PROFILE = process.env.SALONBOARD_CHROME_PROFILE || 'Default';
+
 function openChromeWithUrl(url) {
   try {
     if (process.platform === 'darwin') {
+      if (fs.existsSync(CHROME_BIN)) {
+        const { spawn } = require('node:child_process');
+        const child = spawn(CHROME_BIN, [`--profile-directory=${CHROME_PROFILE}`, url], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.on('error', (err) => emit('chrome_open_failed', { url, error: String(err?.message ?? err) }));
+        child.unref();
+        emit('chrome_opened', { url, profile: CHROME_PROFILE });
+        return;
+      }
       execFile('open', ['-a', 'Google Chrome', url], (err) => {
         emit(err ? 'chrome_open_failed' : 'chrome_opened', { url, error: err ? String(err.message ?? err) : undefined });
       });
@@ -364,4 +385,4 @@ function stop() {
   server = null;
 }
 
-module.exports = { start, stop, createJob, getJob, listJobs, pendingCount, setEventHandler, PORT, HOST };
+module.exports = { start, stop, createJob, getJob, listJobs, pendingCount, setEventHandler, openChromeWithUrl, PORT, HOST };

@@ -534,20 +534,11 @@ ipcMain.handle('extension:create-style-job', async (_event, payload) => {
       return { ok: false, error: job.error, jobId: job.jobId };
     }
     // 普段使いの Google Chrome で styleEdit を開く (Playwright は使わない)。
+    // プロファイル指定込みの共通ヘルパー (extension-bridge.openChromeWithUrl) を使う。
+    // 結果イベント(chrome_opened / chrome_open_failed)は bridge の
+    // setEventHandler 経由で renderer に届く。
     if (process.platform === 'darwin') {
-      execFile('open', ['-a', 'Google Chrome', salonboardUrl], (err) => {
-        try {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('extension:event', {
-              type: err ? 'chrome_open_failed' : 'chrome_opened',
-              at: new Date().toISOString(),
-              jobId: job.jobId,
-              url: salonboardUrl,
-              error: err ? String(err.message ?? err) : undefined,
-            });
-          }
-        } catch (_e) {}
-      });
+      extensionBridge.openChromeWithUrl(salonboardUrl);
     } else {
       // 他OSは shell.openExternal で既定ブラウザ。
       try { await shell.openExternal(salonboardUrl); } catch (_e) {}
