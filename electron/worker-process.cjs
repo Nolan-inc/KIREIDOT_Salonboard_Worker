@@ -552,6 +552,59 @@ async function initSupabase({
   // (= 予約作成→即SB反映)。Worker が落ちている間のジョブはキューに残り、起動時の
   // 自動同期/この購読の初回トリガーでまとめて処理される。
   subscribeToPushJobs();
+
+  // どの Mac がどのバージョン/拡張状態で動いているかを Admin から把握できるよう、
+  // 起動時+5分ごとにハートビートを送る (失敗は非致命)。
+  startHeartbeat();
+}
+
+// ---- Worker ハートビート (どのPCがどのバージョンで動いているかの可視化) ----
+let heartbeatTimer = null;
+const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+
+/** extension-bridge の /health を読む (main process が同一マシンで立てている)。 */
+function fetchBridgeHealth() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:32178/health', (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(buf)); } catch (_e) { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+async function sendHeartbeat() {
+  const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
+  if (!headers) return;
+  try {
+    const bridge = await fetchBridgeHealth();
+    const body = {
+      machine_id: `${os.userInfo().username}@${os.hostname()}`,
+      machine_name: os.hostname(),
+      enable_push: !!deviceAuth.enablePush,
+      extension_bridge_up: !!bridge?.ok,
+      extension_last_poll_at: bridge?.extensionLastPollAt ?? null,
+      extension_pending: bridge?.pending ?? null,
+    };
+    await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/device/heartbeat`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (_e) {
+    // 非致命: ネットワーク断やAdmin未デプロイ時は黙ってスキップ。
+  }
+}
+
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  void sendHeartbeat();
+  heartbeatTimer = setInterval(() => { void sendHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
+  if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 }
 
 // ---- push_booking ジョブの Realtime 購読 (即時 push トリガー) ----

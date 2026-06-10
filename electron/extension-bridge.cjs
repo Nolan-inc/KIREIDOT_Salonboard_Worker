@@ -30,6 +30,9 @@ const HOST = '127.0.0.1';
 const jobs = new Map(); // jobId -> job
 let server = null;
 let onEvent = () => {};
+// Chrome拡張が最後に /jobs/next をポーリングした時刻 (ISO)。
+// null = 一度もポーリングされていない (= 拡張未導入/Chrome未起動の可能性)。
+let lastExtensionPollAt = null;
 
 function now() { return new Date().toISOString(); }
 function genId() { return 'job_' + crypto.randomBytes(8).toString('hex'); }
@@ -180,7 +183,13 @@ function handle(req, res) {
 
   // GET /health
   if (req.method === 'GET' && url.pathname === '/health') {
-    return sendJson(res, 200, { ok: true, app: 'kireidot-yoyaku-douki', pending: pendingCount(), jobs: listJobs().length });
+    return sendJson(res, 200, {
+      ok: true,
+      app: 'kireidot-yoyaku-douki',
+      pending: pendingCount(),
+      jobs: listJobs().length,
+      extensionLastPollAt: lastExtensionPollAt,
+    });
   }
 
   // POST /jobs — ジョブ作成 (worker process から呼ぶ。127.0.0.1のみ)。
@@ -207,6 +216,7 @@ function handle(req, res) {
 
   // GET /jobs/next
   if (req.method === 'GET' && url.pathname === '/jobs/next') {
+    lastExtensionPollAt = now();
     const job = listJobs().find((j) => j.status === 'pending');
     if (!job) return sendJson(res, 204, {});
     job.status = 'picked';
