@@ -562,6 +562,22 @@ async function initSupabase({
 let heartbeatTimer = null;
 const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
 
+// ---- アクティブ/待機 (フェイルオーバー切替, v0.2.153) ----
+// 複数台で予約同期くんを起動しても、Admin (連携デバイス画面) でアクティブ指定
+// された 1 台だけがジョブ処理/自動同期を行う。指定が無ければ全台アクティブ
+// (従来挙動)。状態はハートビートのレスポンス {active} で5分ごとに更新され、
+// push ジョブの claim は Admin 側 (X-Machine-Id 照合) でも弾かれる (即時切替)。
+let workerActive = true;
+
+/** このマシンの識別子 (ハートビート/X-Machine-Id 共通)。 */
+function machineId() {
+  try {
+    return `${os.userInfo().username}@${os.hostname()}`;
+  } catch (_e) {
+    return os.hostname();
+  }
+}
+
 /** extension-bridge の /health を読む (main process が同一マシンで立てている)。 */
 function fetchBridgeHealth() {
   return new Promise((resolve) => {
@@ -583,18 +599,31 @@ async function sendHeartbeat() {
   try {
     const bridge = await fetchBridgeHealth();
     const body = {
-      machine_id: `${os.userInfo().username}@${os.hostname()}`,
+      machine_id: machineId(),
       machine_name: os.hostname(),
       enable_push: !!deviceAuth.enablePush,
       extension_bridge_up: !!bridge?.ok,
       extension_last_poll_at: bridge?.extensionLastPollAt ?? null,
       extension_pending: bridge?.pending ?? null,
     };
-    await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/device/heartbeat`, {
+    const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/device/heartbeat`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
     });
+    // Admin がアクティブ端末を返す (active=false なら待機モード)。
+    // 旧Admin (active 無し) は undefined → アクティブ扱い (従来挙動)。
+    let json = null;
+    try { json = await res.json(); } catch (_e) { /* ignore */ }
+    if (json && typeof json.active === 'boolean' && json.active !== workerActive) {
+      workerActive = json.active;
+      log(
+        workerActive
+          ? '🟢 この端末がアクティブになりました。ジョブ処理/自動同期を再開します。'
+          : '⏸️ 待機モードになりました (別の端末がアクティブ)。ジョブ処理/自動同期を停止します。切替は Admin の連携デバイス画面から。',
+        'info',
+      );
+    }
   } catch (_e) {
     // 非致命: ネットワーク断やAdmin未デプロイ時は黙ってスキップ。
   }
@@ -712,6 +741,8 @@ function buildDeviceHeaders(extra) {
     'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
     ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
     'X-Platform': deviceAuth.platform ?? process.platform,
+    // アクティブ/待機切替の照合用 (Admin jobs API が待機端末の claim を弾く)。
+    'X-Machine-Id': machineId(),
     ...(extra ?? {}),
   };
 }
@@ -2391,6 +2422,11 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
  * @param showBrowser ブラウザ画面を表示するか
  */
 async function runPushJobs({ showBrowser } = {}) {
+  // 待機モード (別の端末がアクティブ): ジョブ処理しない。
+  if (!workerActive) {
+    log('予約書き込み: 待機モードのためスキップ (アクティブ端末が処理します)', 'info');
+    return;
+  }
   // 二重起動防止 (Realtime トリガーと自動同期が重なってもブラウザを二重に立てない)
   if (pushJobsRunning) {
     log('予約書き込み: 既に処理中のためスキップ', 'info');
@@ -2826,6 +2862,14 @@ async function postCallback(body) {
 }
 
 async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
+  // 待機モード (別の端末がアクティブ): 自動/手動とも同期しない。
+  // 手動で動かしたい場合は Admin の連携デバイス画面でこの端末をアクティブにする。
+  if (!workerActive) {
+    emit('error', {
+      msg: 'この端末は待機モードです (別の端末がアクティブ)。同期するには Admin の連携デバイス画面でこの端末をアクティブに切り替えてください。',
+    });
+    return;
+  }
   if (running) {
     const elapsed = Date.now() - runStartedAt;
     if (elapsed < RUN_STALE_MS) {
