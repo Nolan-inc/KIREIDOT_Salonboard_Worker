@@ -19,6 +19,7 @@ const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const http = require('node:http');
 // Electron utilityProcess は Node 20 で動作するが、組み込み WebSocket が無いため
 // Supabase の createClient が RealtimeClient を生成する際に
 // "Node.js 20 detected without native WebSocket support" 例外を投げる。
@@ -82,6 +83,170 @@ async function launchPushBrowser(base = {}) {
     const b = await chromium.launch({ headless: true, args });
     return { browser: b, usedChrome: false };
   }
+}
+
+// =====================================================================
+// Chrome拡張ブリッジ経由のスタイル投稿 (美容室 push_photo_gallery kind=style)。
+// Playwright起動のChromeだとAkamaiに画像アップロード(/imgreg/doUpload)を
+// 弾かれるため、拡張機能を入れた「普段使いChrome」で実行する (chrome拡張.md)。
+// main process が 127.0.0.1:32178 に立てる extension-bridge にジョブを積み、
+// 拡張(background.js)がポーリングして content.js が SalonBoard 公式JSの流れで
+// ログイン→サロン選択→styleEdit→画像アップロード→フォーム入力→登録まで行う。
+// ブリッジ未起動/拡張未導入(ジョブが拾われない)ときは従来の Playwright 方式へ
+// フォールバックする。SALONBOARD_EXT_STYLE=0 で常に Playwright 方式に戻せる。
+// =====================================================================
+const EXT_BRIDGE = 'http://127.0.0.1:32178';
+const EXT_STYLE_DISABLED = /^(0|false|no)$/i.test(process.env.SALONBOARD_EXT_STYLE ?? '');
+
+function extBridgeRequest(method, pathName, body) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request(
+      `${EXT_BRIDGE}${pathName}`,
+      {
+        method,
+        headers: data
+          ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+          : {},
+      },
+      (res) => {
+        let buf = '';
+        res.on('data', (c) => { buf += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, json: buf ? JSON.parse(buf) : {} }); }
+          catch (_e) { resolve({ status: res.statusCode, json: {} }); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(8000, () => req.destroy(new Error('bridge timeout')));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * 美容室スタイル投稿を Chrome拡張(普段使いChrome)で実行する。
+ * 返り値:
+ *   { handled:false }                                  → 拡張が使えない。Playwright方式へフォールバック。
+ *   { handled:true, status:'ok', externalId }          → 登録完了。
+ *   { handled:true, status:'confirm_only' }            → 入力のみ (実登録OFF)。
+ *   { handled:true, status:'failed', errorCode, reason, manualRequired }
+ */
+async function runStyleJobViaExtension({ payload, creds, shopName, enablePost, tag }) {
+  const p = payload || {};
+  const imageUrl = (p.image_url && String(p.image_url)) ||
+    (Array.isArray(p.images) && p.images.length ? String(p.images[0]) : '');
+  if (!imageUrl) return { handled: false };
+
+  // postHairStyleViaForm (Playwright方式) と同じ補完ルール/ガード。
+  const style = p.style && typeof p.style === 'object' ? p.style : {};
+  const title = (p.title && String(p.title).trim()) || '';
+  const caption = (p.caption && String(p.caption).trim()) || '';
+  const styleName = (String(style.style_name || '').trim() || title || caption || 'スタイル').slice(0, 30);
+  const comment = (String(style.stylist_comment || '').trim() || caption || title || 'よろしくお願いいたします。').slice(0, 120);
+  const stylistExt = p.author_external_id ? String(p.author_external_id).trim() : '';
+  if (!stylistExt) {
+    return {
+      handled: true, status: 'failed', errorCode: 'STYLIST_REQUIRED', manualRequired: true,
+      reason: 'スタイリストが選択されていません。フォトギャラリー投稿時にスタッフ(スタイリスト)を選択してください。',
+    };
+  }
+
+  // 1) ジョブ作成。ブリッジに繋がらない = main 未起動など → フォールバック。
+  let created;
+  try {
+    created = await extBridgeRequest('POST', '/jobs', {
+      type: 'hair_style_front',
+      target: 'FRONT_IMG_ID',
+      imageUrl,
+      salonboardUrl: 'https://salonboard.com/CNB/draft/styleList/',
+      loginId: creds.login_id || null,
+      password: creds.password || null,
+      // 会社切替の判定軸: ログインIDが一意なので companyId = loginId。
+      companyId: creds.login_id || null,
+      salonId: creds.salon_id || null,
+      expectedSalonName: shopName || null,
+      style: {
+        stylistExternalId: stylistExt,
+        styleName,
+        comment,
+        category: String(style.category_cd || '').trim() === 'SG02' ? 'SG02' : 'SG01',
+        length: String(style.length_cd || '').trim() || null,
+        menus: Array.isArray(style.menu_cds) ? style.menu_cds : [],
+        menuDetail: (String(style.menu_text || '').trim() || styleName).slice(0, 50),
+      },
+      enablePost: !!enablePost,
+      openChrome: true,
+    });
+  } catch (e) {
+    emit('log', { level: 'info', msg: `[${tag}] 拡張ブリッジに接続できません(${e?.message ?? e}) → Playwright方式で実行`, at: new Date().toISOString() });
+    return { handled: false };
+  }
+  if (!created?.json?.ok || !created.json.jobId) {
+    return {
+      handled: true, status: 'failed', errorCode: 'EXT_JOB_FAILED', manualRequired: true,
+      reason: created?.json?.error || '拡張ジョブの作成に失敗しました',
+    };
+  }
+  const extJobId = created.json.jobId;
+  emit('log', { level: 'info', msg: `[${tag}] 🧩 Chrome拡張でスタイル投稿を実行 (job=${extJobId})。普段使いChromeでSalonBoardを開きます…`, at: new Date().toISOString() });
+
+  // 2) ポーリング: 拾われるまで90秒 (未導入/Chrome未起動の検知) / 全体8分。
+  //    content.js は login→サロン選択→styleEdit と多段遷移し、その都度 pending に
+  //    戻る(retry)ため、一度でも拾われたら pickup タイムアウトは適用しない。
+  const PICKUP_TIMEOUT_MS = 90_000;
+  const TOTAL_TIMEOUT_MS = 8 * 60_000;
+  const startedAt = Date.now();
+  let everPicked = false;
+  while (Date.now() - startedAt < TOTAL_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let st;
+    try { st = await extBridgeRequest('GET', `/jobs/${extJobId}`); } catch (_e) { continue; }
+    const j = st?.json || {};
+    if (j.status === 'picked' || j.status === 'uploading' || (j.retryCount || 0) > 0) everPicked = true;
+
+    if (j.status === 'done') {
+      const r = j.result || {};
+      const rs = r.resultStatus || 'uploaded';
+      if (rs === 'registered') return { handled: true, status: 'ok', externalId: r.imageId || null };
+      if (rs === 'filled_not_registered') return { handled: true, status: 'confirm_only' };
+      // uploaded_not_registered(バリデーションエラー) / uploaded_no_register_btn 等。
+      return {
+        handled: true, status: 'failed', errorCode: 'VALIDATION_ERROR', manualRequired: true,
+        reason: `スタイル登録が完了しませんでした (${rs}${r.reason ? `: ${r.reason}` : ''})`,
+      };
+    }
+    if (j.status === 'failed') {
+      const msg = String(j.error || 'アップロード失敗');
+      const errorCode = /reCAPTCHA/i.test(msg) ? 'RECAPTCHA_REQUIRED'
+        : /ログイン/.test(msg) ? 'LOGIN_FAILED'
+        : 'EXT_UPLOAD_FAILED';
+      return {
+        handled: true, status: 'failed', errorCode,
+        manualRequired: errorCode !== 'EXT_UPLOAD_FAILED',
+        reason: `Chrome拡張: ${msg}`,
+      };
+    }
+    if (j.status === 'cancelled') return { handled: false };
+
+    // まだ一度も拾われていない → 拡張未導入/Chrome未起動とみなしてキャンセル→フォールバック。
+    if (!everPicked && Date.now() - startedAt > PICKUP_TIMEOUT_MS) {
+      try {
+        const c = await extBridgeRequest('POST', `/jobs/${extJobId}/cancel`);
+        if (c?.json?.cancelled) {
+          emit('log', { level: 'warn', msg: `[${tag}] Chrome拡張がジョブを拾いませんでした(拡張未導入/Chrome未起動?) → Playwright方式にフォールバック`, at: new Date().toISOString() });
+          return { handled: false };
+        }
+        // キャンセルできなかった = ちょうど拾われた → 続行。
+        everPicked = true;
+      } catch (_e) { /* 続行 */ }
+    }
+  }
+  return {
+    handled: true, status: 'failed', errorCode: 'EXT_TIMEOUT', manualRequired: false,
+    reason: 'Chrome拡張でのスタイル投稿がタイムアウトしました(8分)。普段使いChromeでSalonBoardが開けているか確認してください。',
+  };
 }
 
 // =====================================================================
@@ -2203,6 +2368,46 @@ async function runPushJobs({ showBrowser } = {}) {
     const baseUrl = creds.base_url || 'https://salonboard.com/';
     const tag = `push ${String(job.id).slice(0, 8)} booking=${String(payload.booking_id || '').slice(0, 8)}`;
     emit('log', { level: 'info', msg: `[${tag}] 開始 (enablePush=${enablePush})`, at: new Date().toISOString() });
+
+    // ---- 美容室スタイル投稿(kind=style)は Chrome拡張(普段使いChrome)を優先 ----
+    // 予約同期くんが起動するPlaywright ChromeだとAkamaiに画像アップロードを
+    // 弾かれるため。拡張が使えないときだけ従来のPlaywright方式に落ちる。
+    if (job.job_type === 'push_photo_gallery' && payload.kind === 'style' && !EXT_STYLE_DISABLED) {
+      const ext = await runStyleJobViaExtension({
+        payload, creds, shopName: job.shop_name ?? null, enablePost: enablePush, tag,
+      });
+      if (ext.handled) {
+        const cap = job.max_attempts || 3;
+        const exhausted = (job.attempts || 0) + 1 >= cap;
+        if (ext.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',
+            content_post_id: null,
+            external_id: ext.externalId ?? null,
+            summary: 'push_photo_gallery 投稿完了 (Chrome拡張)',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ スタイル投稿完了 — Chrome拡張(普段使いChrome)${ext.externalId ? ` (id=${ext.externalId})` : ''}`, at: new Date().toISOString() });
+        } else if (ext.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery', status: 'manual_required',
+            error_code: 'PUSH_DISABLED',
+            error: '入力まで成功しましたが、実登録(実書込)が無効のため投稿していません。設定で有効化してください。',
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 スタイル入力のみ (実登録OFF, Chrome拡張)`, at: new Date().toISOString() });
+        } else {
+          const toManual = ext.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_photo_gallery',
+            status: ext.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            error_code: ext.errorCode, error: ext.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 スタイル投稿失敗 (Chrome拡張): [${ext.errorCode}] ${ext.reason}`, at: new Date().toISOString() });
+        }
+        return;
+      }
+      // handled=false → 従来の Playwright 方式へフォールバック (以下続行)。
+    }
 
     let browser = null;
     try {

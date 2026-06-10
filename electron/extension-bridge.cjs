@@ -6,7 +6,10 @@
 //
 //   GET  /health                    → { ok, version, pending, ... }
 //   GET  /jobs/next                  → 次の pending ジョブ(無ければ 204)
+//   GET  /jobs/:jobId                → ジョブ状態 (worker process のポーリング用・秘匿情報なし)
 //   GET  /jobs/:jobId/image          → 画像バイト(拡張がfetchしてFile化)
+//   POST /jobs                       → ジョブ作成 (worker process から。openChrome=true で普段使いChromeを開く)
+//   POST /jobs/:jobId/cancel         → pending のジョブを取り消す (拡張が拾う前のみ)
 //   POST /jobs/:jobId/complete       → { status:'success'|'failed', imageId?, error?, diag? }
 //
 // ジョブはメモリ保持(第一段階)。状態変化は onJobEvent コールバックで
@@ -19,6 +22,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFile } = require('node:child_process');
 
 const PORT = 32178;
 const HOST = '127.0.0.1';
@@ -122,6 +126,31 @@ function pendingCount() { return listJobs().filter((j) => j.status === 'pending'
 
 function setEventHandler(fn) { if (typeof fn === 'function') onEvent = fn; }
 
+// 普段使いの Google Chrome で URL を開く (Playwright は使わない)。
+// main.cjs の extension:create-style-job と同じ方式。
+function openChromeWithUrl(url) {
+  try {
+    if (process.platform === 'darwin') {
+      execFile('open', ['-a', 'Google Chrome', url], (err) => {
+        emit(err ? 'chrome_open_failed' : 'chrome_opened', { url, error: err ? String(err.message ?? err) : undefined });
+      });
+      return;
+    }
+    // 他OSは既定ブラウザ (electron 外でも落ちないよう lazy require)。
+    try {
+      const { shell } = require('electron');
+      shell.openExternal(url).then(
+        () => emit('chrome_opened', { url }),
+        (err) => emit('chrome_open_failed', { url, error: String(err?.message ?? err) }),
+      );
+    } catch (_e) {
+      execFile(process.platform === 'win32' ? 'cmd' : 'xdg-open', process.platform === 'win32' ? ['/c', 'start', '', url] : [url], () => {});
+    }
+  } catch (e) {
+    emit('chrome_open_failed', { url, error: String(e?.message ?? e) });
+  }
+}
+
 // ---- HTTP server ----
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -152,6 +181,28 @@ function handle(req, res) {
   // GET /health
   if (req.method === 'GET' && url.pathname === '/health') {
     return sendJson(res, 200, { ok: true, app: 'kireidot-yoyaku-douki', pending: pendingCount(), jobs: listJobs().length });
+  }
+
+  // POST /jobs — ジョブ作成 (worker process から呼ぶ。127.0.0.1のみ)。
+  // body: createJob と同じ opts + { openChrome?: boolean }
+  if (req.method === 'POST' && url.pathname === '/jobs') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
+    req.on('end', async () => {
+      let opts = {};
+      try { opts = JSON.parse(body || '{}'); } catch (_e) {}
+      if (!opts.imageUrl) return sendJson(res, 400, { error: '画像URL(imageUrl)がありません' });
+      try {
+        const job = await createJob(opts);
+        if (job.status !== 'failed' && opts.openChrome) {
+          openChromeWithUrl(job.salonboardUrl || 'https://salonboard.com/CNB/draft/styleList/');
+        }
+        return sendJson(res, 200, { ok: job.status !== 'failed', jobId: job.jobId, status: job.status, error: job.error });
+      } catch (e) {
+        return sendJson(res, 500, { error: String(e?.message ?? e) });
+      }
+    });
+    return;
   }
 
   // GET /jobs/next
@@ -200,6 +251,36 @@ function handle(req, res) {
     } catch (e) {
       return sendJson(res, 500, { error: String(e) });
     }
+  }
+
+  // POST /jobs/:jobId/cancel — 拡張が拾う前(pending)のジョブだけ取り消す。
+  // 既に picked/uploading なら取り消さない (二重実行・取りこぼし防止)。
+  if (req.method === 'POST' && parts[0] === 'jobs' && parts[2] === 'cancel') {
+    const job = getJob(parts[1]);
+    if (!job) return sendJson(res, 404, { error: 'job not found' });
+    if (job.status === 'pending') {
+      job.status = 'cancelled';
+      job.updatedAt = now();
+      try { if (job.localImage?.file) fs.unlinkSync(job.localImage.file); } catch (_e) {}
+      emit('job_cancelled', { jobId: job.jobId });
+      return sendJson(res, 200, { ok: true, cancelled: true });
+    }
+    return sendJson(res, 200, { ok: true, cancelled: false, status: job.status });
+  }
+
+  // GET /jobs/:jobId — ジョブ状態 (worker のポーリング用)。認証情報は返さない。
+  if (req.method === 'GET' && parts[0] === 'jobs' && parts[1] && !parts[2]) {
+    const job = getJob(parts[1]);
+    if (!job) return sendJson(res, 404, { error: 'job not found' });
+    return sendJson(res, 200, {
+      jobId: job.jobId,
+      status: job.status,
+      error: job.error,
+      result: job.result,
+      retryCount: job.retryCount || 0,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+    });
   }
 
   // POST /jobs/:jobId/complete
