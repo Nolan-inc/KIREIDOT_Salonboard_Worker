@@ -3328,8 +3328,10 @@ async function selectBlogCoupon(page, target) {
   const wantName = (target.couponName || '').replace(/\s+/g, '').trim();
 
   // 1) モーダルを開く
+  //    ブログ: a:has-text("クーポン選択") / スタイル(styleEdit): a.jsc_SB_modal_single_coupon
+  //    (img[alt="クーポン選択"] のボタンでテキストを持たない)
   const trigger = page
-    .locator('.jsc_SB_modal_coupon_wrapper a:has-text("クーポン選択"), a[modal-url*="coupon" i]:has-text("クーポン選択"), a:has-text("クーポン選択")')
+    .locator('.jsc_SB_modal_coupon_wrapper a:has-text("クーポン選択"), a[modal-url*="coupon" i]:has-text("クーポン選択"), a:has-text("クーポン選択"), a.jsc_SB_modal_single_coupon, .jsc_SB_modal_coupon_wrapper a.jsc_SB_modal_triger')
     .first();
   if ((await trigger.count().catch(() => 0)) === 0) {
     return { ok: false, reason: 'coupon_trigger_not_found' };
@@ -4380,7 +4382,18 @@ async function ensureSalonSelected(page, opts = {}) {
 //   gallery_id, kind, genre,
 //   image_url,            // 先頭画像(カバー)の公開URL ← これを1枚アップロードする
 //   images: string[],     // 全画像URL (将来複数枠対応用)
-//   title?, caption?, author_external_id?
+//   title?, caption?, author_external_id?,
+//   tags?: string[],      // ハッシュタグ (美容室 styleEdit のハッシュタグ欄, 各≤20字, 最大5)
+//   style?: {             // スタイル掲載情報 (美容室のみ。photo_galleries.salonboard_style 由来)
+//     style_name?,        //   スタイル名 ≤30 (空なら title/caption 補完)
+//     stylist_comment?,   //   スタイリストコメント ≤120
+//     category_cd?,       //   SG01=レディース(既定) / SG02=メンズ
+//     length_cd?,         //   長さ (レディース HL01-05/07/08, メンズ HL06/09-13)
+//     menu_cds?: string[],//   メニュー内容チェック (MC01-MC04)
+//     menu_text?,         //   メニュー内容テキスト ≤50 (必須項目, 空なら styleName)
+//     coupon_external_id?,//   クーポン(CP...) 紐付け (任意)
+//     coupon_name?,       //   クーポン名 (external_id が一覧に無い時の補助一致)
+//   }
 // }
 // opts: { baseUrl, enablePost }  enablePost=false なら確認まで(登録確定しない)。
 // 戻り値: { status:'ok', externalId? } | { status:'confirm_only' } | { status:'failed', reason, errorCode, manualRequired }
@@ -4829,9 +4842,14 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   if (!imageUrl) return fail('スタイルの画像URLが空です', 'UNKNOWN_ERROR', true);
   const title = (p.title && String(p.title).trim()) || '';
   const caption = (p.caption && String(p.caption).trim()) || '';
-  // スタイル名(必須, ≤30) / コメント(必須, ≤120)。空なら相互補完し、最後は既定文。
-  const styleName = (title || caption || 'スタイル').slice(0, 30);
-  const comment = (caption || title || 'よろしくお願いいたします。').slice(0, 120);
+  // スタイル掲載情報 (Admin/AI入力, payload.style)。
+  //   { style_name, stylist_comment, category_cd(SG01/SG02), length_cd(HL...),
+  //     menu_cds([MC01..MC04]), menu_text, coupon_external_id, coupon_name }
+  // 未指定の項目は従来どおりデフォルト補完する (必須未入力はサーバエラーになるため)。
+  const style = p.style && typeof p.style === 'object' ? p.style : {};
+  // スタイル名(必須, ≤30) / コメント(必須, ≤120)。指定 > title/caption 相互補完 > 既定文。
+  const styleName = (String(style.style_name || '').trim() || title || caption || 'スタイル').slice(0, 30);
+  const comment = (String(style.stylist_comment || '').trim() || caption || title || 'よろしくお願いいたします。').slice(0, 120);
 
   // 1) スタイル一覧 → 「スタイル新規追加」で styleEdit を開く。
   try {
@@ -4936,39 +4954,109 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   await page.locator('input[name="frmStyleEditStyleDto.styleName"], input#styleNameTxt').first()
     .fill(styleName, { timeout: 6_000 }).catch(() => {});
 
-  // 5) カテゴリ=レディース(SG01) 既定 → 長さ(ladiesHairLengthCd) を選択 (空なら先頭の非空)。
-  await page.locator('input[name="frmStyleEditStyleDto.styleCategoryCd"][value="SG01"]').first()
+  // 5) カテゴリ (payload.style.category_cd: SG01=レディース / SG02=メンズ, 既定 SG01)
+  //    → カテゴリに応じた長さ select (ladies/mensHairLengthCd) を選択。
+  const categoryCd = String(style.category_cd || '').trim() === 'SG02' ? 'SG02' : 'SG01';
+  await page.locator(`input[name="frmStyleEditStyleDto.styleCategoryCd"][value="${categoryCd}"]`).first()
     .check({ timeout: 4_000 }).catch(() => {});
+  await page.waitForTimeout(300); // レディース/メンズの長さ欄の表示切替を待つ
   {
-    const lenSel = page.locator('select[name="frmStyleEditStyleDto.ladiesHairLengthCd"], select#ladiesHairLengthCd').first();
+    const lenName = categoryCd === 'SG02' ? 'mensHairLengthCd' : 'ladiesHairLengthCd';
+    const lenSel = page.locator(`select[name="frmStyleEditStyleDto.${lenName}"], select#${lenName}`).first();
     if ((await lenSel.count().catch(() => 0)) > 0) {
-      const cur = await lenSel.inputValue().catch(() => '');
-      if (!cur || !cur.trim()) {
-        // 既定で「ミディアム(HL03)」、無ければ先頭の非空。
-        const ok = await lenSel.selectOption({ value: 'HL03' }).then(() => true).catch(() => false);
-        if (!ok) {
-          await lenSel.evaluate((el) => {
-            const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
-            if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
-          }).catch(() => {});
+      const wantLen = String(style.length_cd || '').trim();
+      let picked = false;
+      if (wantLen) {
+        picked = await lenSel.selectOption({ value: wantLen }).then(() => true).catch(() => false);
+      }
+      if (!picked) {
+        const cur = await lenSel.inputValue().catch(() => '');
+        if (!cur || !cur.trim()) {
+          // 既定で「ミディアム」(レディース=HL03 / メンズ=HL12)、無ければ先頭の非空。
+          const def = categoryCd === 'SG02' ? 'HL12' : 'HL03';
+          const ok = await lenSel.selectOption({ value: def }).then(() => true).catch(() => false);
+          if (!ok) {
+            await lenSel.evaluate((el) => {
+              const opt = Array.from(el.options).find((o) => o.value && o.value.trim());
+              if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+            }).catch(() => {});
+          }
         }
       }
     }
   }
 
-  // 6) メニュー内容 (必須): チェックが1つも無ければ先頭(パーマ=MC01)を入れて必須を満たす。
+  // 6) メニュー内容 (必須): payload.style.menu_cds の指定があればチェックし、
+  //    最終的に1つも無ければ先頭(パーマ=MC01)を入れて必須を満たす。
   //    ※ メニュー内容コードは MC01=パーマ / MC02=ストパー・縮毛 / MC03=エクステ / MC04=ブリーチ。
   {
+    const wantMenus = (Array.isArray(style.menu_cds) ? style.menu_cds : [])
+      .map((c) => String(c).trim()).filter(Boolean);
+    for (const cd of wantMenus) {
+      await page.locator(`input[name="frmStyleEditStyleDto.menuContentsCdList"][value="${cd}"]`).first()
+        .check({ timeout: 3_000 }).catch(() => {});
+    }
     const anyChecked = await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]:checked').count().catch(() => 0);
     if (!anyChecked) {
       await page.locator('input[name="frmStyleEditStyleDto.menuContentsCdList"]').first().check({ timeout: 4_000 }).catch(() => {});
     }
     const detail = page.locator('textarea[name="frmStyleEditStyleDto.menuContents"], textarea#menuDetailTxt').first();
     if ((await detail.count().catch(() => 0)) > 0) {
-      const cur = await detail.inputValue().catch(() => '');
-      if (!cur || !cur.trim()) {
-        await detail.fill(styleName.slice(0, 50), { timeout: 4_000 }).catch(() => {});
+      const wantMenuText = String(style.menu_text || '').trim().slice(0, 50);
+      if (wantMenuText) {
+        await detail.fill(wantMenuText, { timeout: 4_000 }).catch(() => {});
+      } else {
+        const cur = await detail.inputValue().catch(() => '');
+        if (!cur || !cur.trim()) {
+          await detail.fill(styleName.slice(0, 50), { timeout: 4_000 }).catch(() => {});
+        }
       }
+    }
+  }
+
+  // 6.5) ハッシュタグ (任意, payload.tags)。#hashTagTxt に入れて「ハッシュタグを追加」。
+  //      失敗してもスタイル登録は継続する (非必須)。
+  try {
+    const tags = (Array.isArray(p.tags) ? p.tags : [])
+      .map((t) => String(t).replace(/^#/, '').trim()).filter(Boolean).slice(0, 5);
+    const tagInput = page.locator('#hashTagTxt, input.jsc_style_edit-editCommon__tag--input').first();
+    const addBtn = page.locator('.jsc_style_edit-editCommon__tag--addBtn').first();
+    if (tags.length && (await tagInput.count().catch(() => 0)) > 0 && (await addBtn.count().catch(() => 0)) > 0) {
+      for (const t of tags) {
+        await tagInput.fill(t.slice(0, 20), { timeout: 3_000 }).catch(() => {});
+        await tagInput.dispatchEvent('input').catch(() => {});
+        await page.waitForTimeout(150);
+        await addBtn.click({ timeout: 3_000 }).catch(() => {});
+        await page.waitForTimeout(250);
+      }
+      // 追加できたタグ数を診断ログ用に確認 (失敗しても続行)。
+      const added = await page.locator('ul.jsc_style_edit-editCommon__tagList li').count().catch(() => 0);
+      if (added === 0) {
+        await captureScrapeDebug(page, 'photo_gallery', 'hair_hashtag_not_added', {
+          diagnostics: { url: page.url(), tags },
+        }).catch(() => {});
+      }
+    }
+  } catch (_e) { /* noop */ }
+
+  // 6.6) クーポン紐付け (任意, payload.style.coupon_external_id / coupon_name)。
+  //      ブログと同じ共有モーダル(jsc_SB_modal)なので selectBlogCoupon を流用する。
+  //      見つからない/失敗しても警告キャプチャのみでスタイル登録は継続する。
+  if (style.coupon_external_id || style.coupon_name) {
+    try {
+      const selC = await selectBlogCoupon(page, {
+        externalId: style.coupon_external_id ? String(style.coupon_external_id) : null,
+        couponName: style.coupon_name ? String(style.coupon_name) : null,
+      });
+      if (!selC.ok) {
+        await captureScrapeDebug(page, 'photo_gallery', 'hair_coupon_not_selected', {
+          diagnostics: { url: page.url(), reason: selC.reason, externalId: style.coupon_external_id ?? null },
+        }).catch(() => {});
+      }
+    } catch (e) {
+      await captureScrapeDebug(page, 'photo_gallery', 'hair_coupon_select_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e), externalId: style.coupon_external_id ?? null },
+      }).catch(() => {});
     }
   }
 
