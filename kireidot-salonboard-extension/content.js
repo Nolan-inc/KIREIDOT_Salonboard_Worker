@@ -215,6 +215,9 @@ function fillStyleForm(sp) {
   const lenCd = sp.length || "HL03"; // 既定ミディアム
   if (cat === "SG02") setVal(document.querySelector("#mensHairLengthCd, select[name='frmStyleEditStyleDto.mensHairLengthCd']"), lenCd);
   else setVal(document.querySelector("#ladiesHairLengthCd, select[name='frmStyleEditStyleDto.ladiesHairLengthCd']"), lenCd);
+  // メニュー内容(テキスト, 必須・50字) #menuDetailTxt。
+  if (sp.menuDetail) setVal(document.querySelector("#menuDetailTxt, textarea[name='frmStyleEditStyleDto.menuContents']"), sp.menuDetail.slice(0, 50));
+
   // メニュー内容 (チェックボックス, MC01..)。複数可。必須なので最低1つ確実にチェックする。
   const menus = Array.isArray(sp.menus) && sp.menus.length ? sp.menus : [];
   let checkedAny = false;

@@ -237,6 +237,7 @@ interface Window {
         category?: 'SG01' | 'SG02';
         length?: string;
         menus?: string[];
+        menuDetail?: string;
       } | null;
       /** true=スタイル登録まで実行 / false=画像+入力のみ(登録しない)。 */
       enablePost?: boolean;

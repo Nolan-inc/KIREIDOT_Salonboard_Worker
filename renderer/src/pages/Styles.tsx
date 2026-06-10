@@ -378,6 +378,7 @@ function StyleExtensionPanel() {
   const [category, setCategory] = useState<'SG01' | 'SG02'>('SG01');
   const [length, setLength] = useState('HL03');
   const [menus, setMenus] = useState<string[]>(['MC07']);
+  const [menuDetail, setMenuDetail] = useState('');
   const [enablePost, setEnablePost] = useState(false);
 
   const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
@@ -443,8 +444,8 @@ function StyleExtensionPanel() {
         const d = ev.diag as { extVersion?: string; webdriver?: unknown } | null | undefined;
         if (d?.extVersion) {
           const cmp = (a: string, b: string) => { const pa = a.split('.').map(Number), pb = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; };
-          const stale = cmp(d.extVersion, '0.0.12') < 0;
-          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.12に更新してください)' : ''), stale ? 'error' : 'info');
+          const stale = cmp(d.extVersion, '0.0.13') < 0;
+          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.13に更新してください)' : ''), stale ? 'error' : 'info');
         }
         log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');
@@ -511,6 +512,7 @@ function StyleExtensionPanel() {
         category,
         length,
         menus,
+        menuDetail: menuDetail.trim() || 'カット',
       },
       enablePost,
     });
@@ -596,6 +598,10 @@ function StyleExtensionPanel() {
               ))}
             </div>
           </div>
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-muted">メニュー内容（テキスト・必須・50字）</span>
+            <input type="text" value={menuDetail} maxLength={50} onChange={(e) => setMenuDetail(e.target.value)} placeholder="例: カット＋カラー＋トリートメント" className={ic} />
+          </label>
           <label className="flex items-center gap-2 text-[12px]">
             <input type="checkbox" checked={enablePost} onChange={(e) => setEnablePost(e.target.checked)} className="h-4 w-4 accent-brand" />
             <span className={enablePost ? 'font-semibold text-amber-700' : 'text-ink-soft'}>
