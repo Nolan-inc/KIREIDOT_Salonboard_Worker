@@ -353,7 +353,7 @@ const STATE_LABEL: Record<ExtState, string> = {
 function StyleExtensionPanel() {
   const scope = useEffectiveScope();
   const [imageUrl, setImageUrl] = useState('');
-  const [salonboardUrl, setSalonboardUrl] = useState('https://salonboard.com/CNB/draft/styleEdit/');
+  const [salonboardUrl, setSalonboardUrl] = useState('https://salonboard.com/CNB/draft/styleList/');
   const [state, setState] = useState<ExtState>('idle');
   const [lines, setLines] = useState<TestLine[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -402,8 +402,8 @@ function StyleExtensionPanel() {
         const d = ev.diag as { extVersion?: string; webdriver?: unknown } | null | undefined;
         if (d?.extVersion) {
           const cmp = (a: string, b: string) => { const pa = a.split('.').map(Number), pb = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0); } return 0; };
-          const stale = cmp(d.extVersion, '0.0.10') < 0;
-          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.10に更新してください)' : ''), stale ? 'error' : 'info');
+          const stale = cmp(d.extVersion, '0.0.11') < 0;
+          log('拡張バージョン: v' + d.extVersion + (stale ? ' ⚠️(最新v0.0.11に更新してください)' : ''), stale ? 'error' : 'info');
         }
         log('🔴 失敗: ' + msg, 'error');
         if (ev.sbError) log('SalonBoardエラー: ' + ev.sbError, 'error');

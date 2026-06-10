@@ -211,7 +211,9 @@ function handle(req, res) {
         // 画面遷移(styleList→styleEdit)等で再実行が必要 → pending に戻す。
         // 何度も遷移ループしないよう retry 回数を制限。
         job.retryCount = (job.retryCount || 0) + 1;
-        if (job.retryCount > 3) {
+        // login→groupTop→サロン選択→styleList→新規追加→styleEdit と多段遷移するため
+        // リトライ上限は多めに(各遷移ごとに1回 retry を消費する)。
+        if (job.retryCount > 12) {
           job.status = 'failed';
           job.error = payload.error || 'styleEditへ遷移できませんでした(リトライ上限)';
           job.updatedAt = now();

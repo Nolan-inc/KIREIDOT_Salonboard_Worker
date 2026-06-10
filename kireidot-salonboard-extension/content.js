@@ -121,7 +121,10 @@ async function runUpload(job) {
     if (!sel) {
       throw new Error("グループ店舗の選択に失敗しました。サロンID/名称が一致しません (salonId=" + (salonId || "") + ")");
     }
-    throw NAV("サロンを選択しました。スタイル画面へ進みます。");
+    // サロン選択(javascript:void(0)のクリック)でサロン文脈が確立する。文脈確立を待ってから
+    // styleList へ進む。ここで待たずに styleEdit を直接開くと groupTop に弾き戻されてループする。
+    await sleep(1500);
+    throw NAV("サロンを選択しました。スタイル一覧へ進みます。", () => { location.href = location.origin + "/CNB/draft/styleList/"; });
   }
 
   // --- (E) styleEdit でない → styleEdit へ ---
@@ -328,38 +331,37 @@ async function ensureOnStyleEdit() {
   // 既に styleEdit (FRONT画像枠がある) ならOK。
   if (document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']")) return;
 
-  // styleList の「スタイル新規追加」ボタンを探して押す。
-  const addBtn = findFirst([
-    "a.jscAddStyle",
-    "a[onclick*='addStyle']",
-    "a[href*='styleEdit']",
-    "input[value*='新規追加']",
-    "img[alt*='新規追加']",
-    "a:has(img[alt*='新規追加'])",
-  ]);
-  if (addBtn) {
-    console.log("[KireiDot] styleList → 新規追加クリックで styleEdit へ");
-    realClick(addBtn);
-    // styleEdit のFRONT画像枠が出るまで待つ(遷移 or AJAX)。
-    try {
-      await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 12000);
-      return;
-    } catch (_e) {
-      /* 遷移しなかった場合は下のエラーへ */
+  // ★重要: styleEdit へは「styleList(一覧) → スタイル新規追加」の順で入るのが正規ルート。
+  //   /CNB/draft/styleEdit/ を直接開くとサロン文脈が無く groupTop に弾き戻される
+  //   (= サロン選択↔styleEdit のループになる)。なので styleList を経由する。
+
+  // styleList に居る → 「スタイル新規追加」ボタンを押して styleEdit へ。
+  if (/\/styleList/i.test(location.href) || document.querySelector("a.jscAddStyle, a[onclick*='addStyle']")) {
+    const addBtn = findFirst([
+      "a.jscAddStyle",
+      "a[onclick*='addStyle']",
+      "a[href*='styleEdit']",
+      "input[value*='新規追加']",
+      "img[alt*='新規追加']",
+    ]);
+    if (addBtn) {
+      console.log("[KireiDot] styleList → 新規追加クリックで styleEdit へ");
+      realClick(addBtn);
+      try {
+        await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 12000);
+        return;
+      } catch (_e) {
+        // クリックで遷移しなかった → NAVIGATEDで再ポーリング(styleEdit描画待ち)。
+        throw NAV("スタイル新規追加へ進みます。");
+      }
     }
   }
 
-  // FRONT画像枠が無い = styleEdit ではない → URLで直接 styleEdit に飛ぶ(同一オリジン)。
-  // styleList に限らず、styleEdit でない限り移動する。
-  if (!/\/styleEdit/i.test(location.href)) {
-    const editUrl = location.origin + "/CNB/draft/styleEdit/";
-    console.log("[KireiDot] styleEditでない → location 遷移", editUrl);
-    // 遷移するとcontent scriptは再注入されるため、code=NAVIGATED を投げて
-    // background にジョブを pending へ戻させ、styleEdit 上で再実行させる。
-    const err = new Error("スタイル登録画面(styleEdit)へ移動します。数秒後に自動で再実行されます。");
-    err.code = "NAVIGATED";
-    setTimeout(() => { location.href = editUrl; }, 100);
-    throw err;
+  // styleList でも styleEdit でもない → styleList へ移動 (styleEdit直開きはしない)。
+  if (!/\/styleList|\/styleEdit/i.test(location.href)) {
+    const listUrl = location.origin + "/CNB/draft/styleList/";
+    console.log("[KireiDot] styleList へ移動", listUrl);
+    throw NAV("スタイル一覧へ移動します。", () => { location.href = listUrl; });
   }
 
   // styleEdit のURLなのに FRONT画像枠が無い → 描画待ち。

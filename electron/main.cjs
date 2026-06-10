@@ -513,7 +513,7 @@ ipcMain.handle('extension:create-style-job', async (_event, payload) => {
     const p = payload || {};
     if (!p.imageUrl) return { ok: false, error: '画像URLがありません' };
     // アップロードボタンがあるのは styleEdit(登録画面)。styleList(一覧)には無いので直接 styleEdit を開く。
-    const salonboardUrl = p.salonboardUrl || 'https://salonboard.com/CNB/draft/styleEdit/';
+    const salonboardUrl = p.salonboardUrl || 'https://salonboard.com/CNB/draft/styleList/';
     const job = await extensionBridge.createJob({
       type: 'hair_style_front',
       target: 'FRONT_IMG_ID',
