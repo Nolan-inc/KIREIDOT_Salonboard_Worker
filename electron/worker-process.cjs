@@ -36,6 +36,7 @@ const {
   scrapeShifts,
   scrapeCustomerDetails,
   pushBookingViaForm,
+  pushScheduleViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
@@ -2919,7 +2920,12 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else {
         // ---- 新規登録 ----
-        const result = await pushBookingViaForm(page, payload, { baseUrl, enablePush });
+        // 休憩・業務(booking_type='block')は SalonBoard の「予約」ではなく「予定」
+        // (scheduleRegist)として登録する。設備(ベッド)を埋めず受付だけ停止する枠。
+        const isBlockSchedule = payload.booking_type === 'block';
+        const result = isBlockSchedule
+          ? await pushScheduleViaForm(page, payload, { baseUrl, enablePush })
+          : await pushBookingViaForm(page, payload, { baseUrl, enablePush });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_booking', status: 'succeeded',

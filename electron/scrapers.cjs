@@ -1897,6 +1897,137 @@ async function findReserveIdForBooking(page, target, opts = {}) {
   }
 }
 
+// =====================================================================
+// 予定登録 (KIREIDOT のブロック予約=休憩/業務 → SalonBoard の「予定」)
+//   予約(extReserveRegist)ではなく予定(scheduleRegist)として登録する。
+//   予定は設備(ベッド)を埋めず、HOT PEPPER の予約受付だけ停止する枠。
+//   実DOM: フォーム #jsiScheduleRegist (action=/KLP/set/scheduleRegist/)
+//     - スタッフ:   select[name=staffId] (value=external_id)
+//     - 日付(hidden): input[name=date] (#jsiSchDate, value=YYYYMMDD)
+//     - 開始時/分:  #jsiRsvHour / #jsiRsvMinute
+//     - 終了時/分:  #jsiSchEndHour / #jsiSchEndMinute
+//     - タイトル:   input[name=schTitle] (最大30)
+//     - メモ:       input[name=schMemo]  (最大100)
+//     - 登録:       a#regist
+// =====================================================================
+async function pushScheduleViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  if (!p.scheduled_at) return fail('予定の日時(scheduled_at)がありません', 'UNKNOWN_ERROR', true);
+  const when = parseJstPartsForPush(p.scheduled_at);
+  if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  if (!p.salonboard_staff_external_id) {
+    return fail('SalonBoard スタッフ external_id が未指定です(予定はスタッフ単位)', 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+
+  // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
+  const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min))) ? Number(p.duration_min) : 60;
+  const startTotal = when.hour * 60 + when.minute;
+  const endTotal = startTotal + durMin;
+  const endHour = Math.floor(endTotal / 60);
+  const endMin = endTotal % 60;
+  const startHH = String(when.hour).padStart(2, '0');
+  const startMM = String(when.minute).padStart(2, '0');
+  const endHH = String(endHour).padStart(2, '0');
+  const endMM = String(endMin).padStart(2, '0');
+
+  // タイトル = 理由(休憩/業務等)。メモにも理由を残す。
+  const title = (String(p.block_reason || '').trim() || '予定').slice(0, 30);
+  const memo = (String(p.block_reason || '').trim()).slice(0, 100);
+
+  // 予定登録画面を開く (日付クエリ付き)。
+  const u = new URL('/KLP/set/scheduleRegist/', baseUrl);
+  u.searchParams.set('date', when.yyyymmdd);
+  try {
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('#jsiScheduleRegist, select[name="staffId"], #jsiRsvHour', { timeout: 15_000 }).catch(() => {});
+  } catch (e) {
+    return fail(`予定登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA on schedule form', 'RECAPTCHA_REQUIRED', true);
+  }
+  const formReady = (await page.locator('#jsiScheduleRegist, select[name="staffId"]').first().count().catch(() => 0)) > 0;
+  if (!formReady) {
+    return fail(`予定登録フォームに到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
+  }
+
+  // 入力: スタッフ / 開始 / 終了 / タイトル / メモ。全てJSでセット+change発火。
+  const staffExt = p.salonboard_staff_external_id;
+  await page.evaluate(
+    ({ ext, hh, mm, eh, em, title, memo }) => {
+      const setSel = (sel, val) => {
+        const el = document.querySelector(sel);
+        if (!el) return;
+        if (!Array.from(el.options).some((o) => o.value === val)) return;
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const setInput = (sel, val) => {
+        const el = document.querySelector(sel);
+        if (!el) return;
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      setSel('select[name="staffId"]', ext);
+      setSel('#jsiRsvHour', hh);
+      setSel('#jsiRsvMinute', mm);
+      setSel('#jsiSchEndHour', eh);
+      setSel('#jsiSchEndMinute', em);
+      setInput('input[name="schTitle"]', title);
+      setInput('input[name="schMemo"]', memo);
+    },
+    { ext: staffExt, hh: startHH, mm: startMM, eh: endHH, em: endMM, title, memo },
+  ).catch(() => {});
+
+  if (!enablePush) {
+    return { status: 'confirm_only', confirmed: { confirmed_scheduled_at: p.scheduled_at, title } };
+  }
+
+  // 「登録する」(a#regist)。ネイティブ confirm が出れば accept。
+  const registerBtn = page.locator('a#regist').first();
+  if ((await registerBtn.count().catch(() => 0)) === 0) {
+    return fail('予定の登録ボタンが見つかりません', 'UNKNOWN_ERROR', true);
+  }
+  let dialogAccepted = false;
+  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) {} };
+  page.on('dialog', onDialog);
+  const beforeUrl = page.url();
+  try {
+    await registerBtn.click({ timeout: 15_000 }).catch(() => {});
+    // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大15秒ポーリング。
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      if (!/scheduleRegist/i.test(page.url())) break;
+      const done = await page.locator('text=/登録しました|完了しました|受け付けました/').first().count().catch(() => 0);
+      if (done > 0) break;
+      const err = await page.locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage').first().count().catch(() => 0);
+      if (err > 0) break;
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const errText = await page.locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage').first().innerText().catch(() => '');
+  if (errText && /エラー|失敗|できません|重複|登録できません/.test(errText)) {
+    return fail(`予定登録時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
+  }
+  const afterUrl = page.url();
+  const stillOnForm = /scheduleRegist/i.test(afterUrl);
+  const doneText = await page.locator('text=/登録しました|完了しました|スケジュール/').count().catch(() => 0);
+  const looksDone = !stillOnForm || doneText > 0 || afterUrl !== beforeUrl;
+  if (!looksDone) {
+    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl})`, 'UNKNOWN_ERROR', true);
+  }
+  return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
+}
+
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -5823,6 +5954,7 @@ module.exports = {
   scrapeShifts,
   scrapeCustomerDetails,
   pushBookingViaForm,
+  pushScheduleViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
