@@ -65,6 +65,14 @@ async function runUpload(job) {
     throw new Error("このMVPは美容室スタイルFRONTのみ対応です (mode=" + mode + ")");
   }
 
+  // ★二重投稿の最終防波堤: 登録完了画面に居る = この投稿は既に完了している。
+  //   何らかの理由でジョブが再実行されても、ここで成功を返して終わり、
+  //   再度 styleEdit を開いて再登録することを防ぐ。
+  if (isRegisterDonePage()) {
+    console.log("[KireiDot] 既に登録完了画面 → 二重投稿せず成功で終了");
+    return { status: "registered", value: null };
+  }
+
   const url = location.href;
   // ★ログイン状態の判定 (堅牢化 v0.0.16):
   //   旧実装は loggedInApp を「特定セレクタ(jscUploadImg/logout等)があるか」で
@@ -227,10 +235,17 @@ async function runUpload(job) {
       if (reg) {
         console.log("[KireiDot] 登録(doRegister)クリック");
         realClick(reg.closest("a") || reg);
-        // 登録後: styleList へ戻る or エラー文言を待つ。
+        // 登録後: 完了画面 or styleList or エラー文言を待つ。
         const ok = await waitForRegisterResult(30000);
         if (ok === "error") {
           return { status: "uploaded_not_registered", reason: getValidationError(), value: uploadResult.value };
+        }
+        if (ok === "timeout") {
+          // 完了画面もエラーも確認できなかった。完了画面に居れば成功、そうでなければ
+          // 「結果不明」として manualRequired 相当に倒す(再投稿で二重登録しないため
+          //  registered は返さない)。
+          if (isRegisterDonePage()) return { status: "registered", value: uploadResult.value };
+          return { status: "register_result_unknown", reason: "登録ボタンは押しましたが完了画面を確認できませんでした。SalonBoardの掲載一覧で重複が無いか確認してください。", value: uploadResult.value };
         }
         return { status: "registered", value: uploadResult.value };
       }
@@ -283,19 +298,33 @@ function fillStyleForm(sp) {
   }
 }
 
-// 登録(doRegister)後の結果待ち。styleList へ戻れば成功、バリデーションエラー文言なら error。
+// 登録(doRegister)後の結果待ち。
+//   - 完了画面「登録が完了しました。」を最優先で成功とみなす(これが正規の完了画面)。
+//   - styleList へ戻った場合も成功。
+//   - バリデーションエラー文言があれば error。
+// ★タイムアウトしても "ok" を返さない("timeout"を返す)。以前は不明時に "ok" を
+//   返していたが、完了を確認できないまま成功扱いするとworkerが再投稿を促し
+//   何度も登録される事故につながるため。
 async function waitForRegisterResult(timeoutMs) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    await sleep(500);
+    // 完了画面の確定文言 (スクショ: スタイル掲載情報編集 → 「登録が完了しました。」)。
+    if (isRegisterDonePage()) return "ok";
     // styleList へ戻った = 登録成功。
     if (/\/styleList/i.test(location.href)) return "ok";
     // styleEdit 上にバリデーションエラーが出ている。
     if (getValidationError()) return "error";
-    // FRONT画像枠が無くなった(別ページへ遷移) = 成功とみなす。
-    if (!document.querySelector("#FRONT_IMG_ID")) return "ok";
+    await sleep(500);
   }
-  return "ok";
+  return "timeout";
+}
+
+// 登録完了画面かどうか (確定文言で判定)。
+function isRegisterDonePage() {
+  const t = (document.body?.innerText || "").replace(/\s+/g, "");
+  return /登録が完了しました/.test(t) ||
+    /反映する場合は.*反映申請/.test(t) ||
+    /スタイル掲載情報一覧画面へ/.test(t);
 }
 
 function getValidationError() {
