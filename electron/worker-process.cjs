@@ -2657,8 +2657,12 @@ async function runPushJobs({ showBrowser } = {}) {
       });
       const page = await ctx.newPage();
 
-      // ログイン (セッション切れなら再ログイン)
-      let auth = await isLoggedIn(page, baseUrl);
+      // ログイン (セッション切れなら再ログイン)。
+      // ★genre を渡すのが重要: 美容室(hair)で /KLP/top/ を先に開くと毎回再ログインを
+      //   誘発し「ログイン直後にセッションが切れる」症状になる。jobs API が返す
+      //   job.genre (shops.genre 由来) で TOP URL を出し分ける。
+      const jobGenre = job.genre === 'hair' ? 'hair' : 'esthetic';
+      let auth = await isLoggedIn(page, baseUrl, jobGenre);
       if (auth === 'captcha') {
         await postCallback({
           job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id,
