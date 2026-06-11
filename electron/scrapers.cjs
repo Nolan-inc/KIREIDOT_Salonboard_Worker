@@ -1934,7 +1934,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
     schedUrl.searchParams.set('date', when.yyyymmdd);
     await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    // ★高速化: networkidle(広告ビーコン等でなかなか来ない)を待たず、必要な
+    //   #rlastupdate が出現したら即取得する。
+    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
     rlastupdate = (await page
       .locator('#rlastupdate')
       .first()
@@ -1953,7 +1955,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    // ★高速化(要望対応): networkidle(SalonBoardは常時通信で40秒近く待つことがある)を
+    //   待たず、入力に必要なフォーム要素が出た時点で即進む。広告/計測の通信完了は待たない。
+    await page.waitForSelector(
+      'form#extReserveRegist, #regist, textarea#rsvEtc, select#jsiRsvHour',
+      { timeout: 15_000 },
+    ).catch(() => {});
   } catch (e) {
     return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
@@ -2182,12 +2189,24 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
   const beforeUrl = page.url();
   try {
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
-      registerBtn.click({ timeout: 15_000 }),
-    ]).catch(() => {});
-    // confirm の OK 押下 → 送信 → 遷移を待つ
-    await page.waitForTimeout(2500);
+    await registerBtn.click({ timeout: 15_000 }).catch(() => {});
+    // ★高速化(要望対応): networkidle(30s)固定待ちをやめ、「完了サインが出たら即進む」
+    //   ポーリングにする。完了サイン = フォームから離脱 / 完了文言 / 詳細リンク出現 /
+    //   エラー領域出現。最大15秒だが通常は数秒で抜ける。
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      const left = !/extReserveRegist/i.test(page.url());
+      if (left) break;
+      const done = await page
+        .locator("a[href*='extReserveDetail'][href*='reserveId='], text=/完了しました|受け付けました|登録しました/")
+        .first().count().catch(() => 0);
+      if (done > 0) break;
+      const err = await page
+        .locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage')
+        .first().count().catch(() => 0);
+      if (err > 0) break;
+    }
   } finally {
     page.off('dialog', onDialog);
   }
@@ -2335,7 +2354,8 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   let onDetail = false;
   for (const path of detailCandidates) {
     await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    // ★高速化: networkidleを待たず、キャンセルボタンが出たら即進む。
+    await page.waitForSelector('#fnc_cancel', { timeout: 10_000 }).catch(() => {});
     if ((await page.locator('#fnc_cancel').count().catch(() => 0)) > 0) { onDetail = true; break; }
   }
 
@@ -2446,7 +2466,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let onForm = false;
   for (const path of candidates) {
     await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
+    await page.waitForSelector('select#jsiRsvHour, #rlastupdate, a#change, a#regist', { timeout: 12_000 }).catch(() => {});
     if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#change, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
@@ -3624,6 +3645,143 @@ async function postBlogViaForm(page, payload, opts = {}) {
   const m = page.url().match(/blogId=([A-Za-z0-9]+)/);
   if (m) externalId = m[1];
   return { status: 'ok', externalId };
+}
+
+/**
+ * SalonBoard の口コミ(レビュー)に返信を投稿する。
+ *
+ * 返信入力ページ URL はジャンルで異なる:
+ *   - エステ(esthe): /KLP/review/reviewReply/?reviewId=R...
+ *   - 美容室(hair):  /CLP/bt/review/reviewReply/R...
+ * フォーム要素 (実DOM確認済み):
+ *   - 返信者名: input#replyFrom (name=replyFrom, maxlength 40・必須)
+ *   - 返信本文: textarea (500文字以下/改行80回以下。カウンタ #id_reply_counter)
+ *   - 確認: a#replyConfirm 「確認する」 → 確認画面 → 最終「登録する/反映する」
+ *
+ * payload: { external_review_id, reply_body, reply_from, genre? }
+ * opts: { baseUrl, enablePost }
+ * 戻り値: { status:'ok'|'confirm_only'|'failed', externalId?, reason?, errorCode?, manualRequired? }
+ */
+async function postReviewReplyViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePost = opts.enablePost !== false;
+  const p = payload || {};
+  const genre = p.genre === 'hair' ? 'hair' : 'esthetic';
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const reviewId = String(p.external_review_id || '').trim();
+  if (!reviewId) return fail('口コミの管理番号(reviewId)がありません', 'UNKNOWN_ERROR', true);
+
+  // 本文: プレーン化 + 500文字 / 改行80回に丸める (SB制限)
+  let body = String(p.reply_body || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!body) return fail('返信本文が空です', 'UNKNOWN_ERROR', true);
+  if (body.length > 500) body = body.slice(0, 500);
+  // 改行80回以下に (超過分はスペースに)
+  {
+    let count = 0;
+    body = body.replace(/\n/g, () => (++count <= 80 ? '\n' : ' '));
+  }
+  const replyFrom = String(p.reply_from || '').trim().slice(0, 40) || 'スタッフ一同';
+
+  // 返信入力ページ URL
+  const formUrl =
+    genre === 'hair'
+      ? new URL(`/CLP/bt/review/reviewReply/${encodeURIComponent(reviewId)}`, baseUrl).toString()
+      : new URL(`/KLP/review/reviewReply/?reviewId=${encodeURIComponent(reviewId)}`, baseUrl).toString();
+
+  await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // フォーム到達確認 (返信者名 input が手掛かり)
+  const fromInput = page.locator('input#replyFrom, input[name="replyFrom"]').first();
+  if ((await fromInput.count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'review', 'no_reply_form', { diagnostics: { url: page.url(), title: await page.title().catch(() => '') } });
+    return fail(`口コミ返信フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  // 既に返信済み (本文 textarea が無い / 「返信済」表示) の場合は冪等にスキップ
+  const replyArea = page
+    .locator('textarea[name="replyContents"], textarea#replyContents, textarea[name="reply"], textarea#reply, .mod_title03_02 ~ table textarea, table.mod_table01 textarea')
+    .first();
+  if ((await replyArea.count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'review', 'no_reply_textarea', { diagnostics: { url: page.url() } });
+    return fail(`返信本文の入力欄が見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 入力
+  await fromInput.fill(replyFrom, { timeout: 8_000 }).catch(() => {});
+  await replyArea.fill(body, { timeout: 8_000 }).catch(() => {});
+  // input/change を発火 (カウンタや必須判定のため)
+  await replyArea.dispatchEvent('input').catch(() => {});
+  await replyArea.dispatchEvent('change').catch(() => {});
+
+  if (!enablePost) {
+    return { status: 'confirm_only' };
+  }
+
+  // 「確認する」→ 確認画面 → 最終「登録/反映」。ネイティブ confirm 両対応。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let confirmed = false;
+  try {
+    const confirmBtn = page.locator('a#replyConfirm, a.mod_btn_confirm_04, a:has-text("確認する")').first();
+    if ((await confirmBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'review', 'no_confirm', { diagnostics: { url: page.url() } });
+      return fail(`口コミ返信の「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    // バリデーションエラーで確認画面に進めていない場合
+    const interimBody = (await page.locator('body').innerText().catch(() => '')) || '';
+    if (/入力してください|必須|文字以下|改行/.test(interimBody) && !/確認/.test(interimBody)) {
+      const cap = await captureScrapeDebug(page, 'review', 'validation', { diagnostics: { url: page.url() } });
+      return fail(`返信内容のバリデーションエラー (${(interimBody.match(/.{0,30}(入力してください|必須|文字以下|改行).{0,20}/)?.[0] || '').trim()}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    // 確認画面の最終確定ボタン
+    const finalBtn = page
+      .locator('a#regist:visible, a#reflect:visible, a:has-text("登録する"):visible, a:has-text("返信する"):visible, a:has-text("登録・反映する"):visible, a.accept:visible, a.mod_btn_submit_01:visible, input[type="submit"][value*="登録"]')
+      .first();
+    await finalBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    if ((await finalBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmed = true;
+      await page.waitForTimeout(1500);
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'review', 'after', { diagnostics: { confirmed, nativeDialogAccepted, url: page.url() } });
+
+  // 完了検証
+  const after = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /返信しました|登録しました|受け付け|完了|審査中|返信済/.test(after)
+    || /\/review\/reviewList/.test(page.url());
+  const looksError = /エラー|失敗|入力してください|必須/.test(after) && !looksDone;
+  if (looksError) {
+    return fail(`口コミ返信でエラー (${(after.match(/.{0,40}(エラー|失敗|入力してください|必須).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !confirmed && !nativeDialogAccepted) {
+    return fail(`口コミ返信の完了を確認できませんでした (confirmed=${confirmed}${cap2 ? `, capture=${cap2}` : ''})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+  // external_id は口コミ管理番号をそのまま使う (返信は1口コミ1件)
+  return { status: 'ok', externalId: reviewId };
 }
 
 async function scrapeBlogs(page, opts = {}) {
@@ -5464,12 +5622,139 @@ async function uploadHairStyleFrontImage(page, file) {
   return { ok: true, imageId: imageId.trim() || null };
 }
 
+/**
+ * 口コミ(レビュー)一覧を取得する。
+ *
+ * SalonBoard の口コミ一覧 URL はジャンルで異なる:
+ *   - 美容室(hair):   https://salonboard.com/CLP/bt/review/reviewList/
+ *   - エステ(esthe):  https://salonboard.com/KLP/review/reviewList/
+ * いずれも `table.mod_table03` に 8 列 (ピックアップ/管理番号/投稿日時/来店日/
+ * 予約者名/担当/本文/返信状況) で並ぶ。本文は一覧では末尾省略(…)される。
+ *
+ * 返信状況は `<a class="mod_btn_mihenshin">未返信</a>` / `mod_btn_henshinzumi`(返信済)、
+ * 審査状況テキスト(審査OK(掲載中) 等)が同じセルに入る。返信リンク href から reviewId を拾う。
+ *
+ * ページング: `<p class="page">1/75ページ</p>` と `.next a[href]`。
+ * 負荷を抑えるため既定で最大 maxPages ページまで巡回する。
+ *
+ * @returns { rows, debug }
+ */
+async function scrapeReviews(page, opts = {}) {
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const maxPages = Number.isFinite(opts.maxPages) ? opts.maxPages : 5;
+  const listUrl =
+    genre === 'hair'
+      ? 'https://salonboard.com/CLP/bt/review/reviewList/'
+      : 'https://salonboard.com/KLP/review/reviewList/';
+
+  const all = [];
+  let pageInfo = { current: 1, total: 1 };
+  let visited = 0;
+  let url = listUrl;
+
+  for (let i = 0; i < maxPages; i++) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    await page.waitForSelector('table.mod_table03', { timeout: 8_000 }).catch(() => {});
+    visited++;
+
+    const res = await page.evaluate(() => {
+      const clean = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+      // セル内の <br> を改行/区切りとして扱い、1行目と残りを分けて返す
+      const lines = (el) => {
+        if (!el) return [];
+        return (el.innerHTML || '')
+          .split(/<br\s*\/?>/i)
+          .map((s) => s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+      };
+
+      const items = [];
+      // 管理番号を持つ行 = ピックアップ用 radio (name="pickUpReview") を起点にする
+      const radios = document.querySelectorAll('input[name="pickUpReview"]');
+      for (const radio of radios) {
+        const externalId = (radio.value || '').trim();
+        if (!externalId) continue;
+        const tr = radio.closest('tr');
+        if (!tr) continue;
+        const tds = Array.from(tr.querySelectorAll('td'));
+        if (tds.length < 8) continue;
+        // 列: 0=pickup 1=管理番号 2=投稿日時 3=来店日 4=予約者名(番号) 5=担当 6=本文 7=返信状況
+        const postedLines = lines(tds[2]); // ["2026/06/10","18:24"]
+        const visitLines = lines(tds[3]); // ["2026/06/10"]
+        const customerLines = lines(tds[4]); // ["宮本 結生","（-）"]
+        const replyAnchor = tds[7].querySelector('a');
+        const replyClass = replyAnchor ? replyAnchor.className : '';
+        const replyHref = replyAnchor ? replyAnchor.getAttribute('href') || '' : '';
+        const replyLabel = clean(replyAnchor); // 未返信 / 返信済
+        const auditText = clean(tds[7]).replace(replyLabel, '').trim(); // 審査OK(掲載中) / -
+
+        items.push({
+          external_id: externalId,
+          posted_at_label: postedLines.join(' '),
+          visit_date_label: visitLines.join(' '),
+          customer_name: customerLines[0] || '',
+          customer_number: (customerLines[1] || '').replace(/[（）()]/g, '') || null,
+          staff_name: clean(tds[5]) || null,
+          body_excerpt: clean(tds[6]) || '',
+          reply_status: /henshinzumi/.test(replyClass) ? 'replied' : 'unreplied',
+          audit_status: auditText && auditText !== '-' ? auditText : null,
+          reply_url: replyHref || null,
+        });
+      }
+
+      // ページング情報
+      let current = 1;
+      let total = 1;
+      const pageEl = document.querySelector('.paging .page');
+      if (pageEl) {
+        const m = (pageEl.textContent || '').match(/(\d+)\s*\/\s*(\d+)/);
+        if (m) {
+          current = Number(m[1]);
+          total = Number(m[2]);
+        }
+      }
+      const nextA = document.querySelector('.paging .next a[href]');
+      const nextHref = nextA ? nextA.getAttribute('href') : null;
+
+      return { items, current, total, nextHref, url: location.href, title: document.title };
+    });
+
+    for (const it of res.items) all.push(it);
+    pageInfo = { current: res.current, total: res.total };
+
+    if (!res.nextHref || res.current >= res.total) break;
+    url = new URL(res.nextHref, 'https://salonboard.com').href;
+  }
+
+  // 管理番号で重複排除 (ページ巡回中の重複保険)
+  const seen = new Set();
+  const rows = [];
+  for (const it of all) {
+    if (seen.has(it.external_id)) continue;
+    seen.add(it.external_id);
+    rows.push(it);
+  }
+
+  return {
+    rows,
+    debug: {
+      itemsFound: rows.length,
+      pagesVisited: visited,
+      totalPages: pageInfo.total,
+      genre,
+      url: listUrl,
+    },
+  };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
   scrapeMenus,
   scrapeCoupons,
   scrapeBlogs,
+  scrapeReviews,
   scrapeShifts,
   scrapeCustomerDetails,
   pushBookingViaForm,
@@ -5477,6 +5762,7 @@ module.exports = {
   changeBookingViaForm,
   postBlogViaForm,
   deleteBlogViaForm,
+  postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
   // テスト用にエクスポート
