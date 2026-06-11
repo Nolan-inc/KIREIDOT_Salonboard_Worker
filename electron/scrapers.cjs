@@ -1948,21 +1948,56 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return `${y}年${mo}月${d}日（${wd}）`;
   })();
 
-  // 予定登録画面を開く。
-  // ★date クエリを付けると「情報が一部失われています(再度操作をやり直してください)」
-  //   エラーになる(サーバーがフォームトークンと整合しないため)。クエリ無しで開き、
-  //   対象日はフォーム内の hidden(#jsiSchDate=name="date") を書き換えて指定する。
-  const u = new URL('/KLP/set/scheduleRegist/', baseUrl);
+  // ★予定登録画面は単独URL(/KLP/set/scheduleRegist/)に直接遷移できない
+  //   (「情報が一部失われています」エラーになる)。予約登録と同じ手順で
+  //   予約登録フォーム(extReserveRegist)を開き、そこの「予定を登録する」ボタン
+  //   (a#fnc_schedule)を押して予定画面へ遷移する必要がある。
+
+  // (1) スケジュール画面で rlastupdate を取得 (予約登録と同じ。これが無いと
+  //     登録フォームが "情報が一部失われています" になる)。
+  let rlastupdate = '';
+  try {
+    const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+    schedUrl.searchParams.set('date', when.yyyymmdd);
+    await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
+    rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+  } catch (e) {
+    return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+
+  // (2) 予約登録フォームを開く (予約と同じ URL + パラメータ)。
+  const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
+  u.searchParams.set('staffId', p.salonboard_staff_external_id);
+  u.searchParams.set('date', when.yyyymmdd);
+  u.searchParams.set('rsvHour', startHH);
+  u.searchParams.set('rsvMinute', startMM);
+  if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('#jsiScheduleRegist, select[name="staffId"], #jsiRsvHour', { timeout: 15_000 }).catch(() => {});
+    await page.waitForSelector('form#extReserveRegist, #fnc_schedule, #regist', { timeout: 15_000 }).catch(() => {});
   } catch (e) {
-    return fail(`予定登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+    return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
-    return fail('reCAPTCHA on schedule form', 'RECAPTCHA_REQUIRED', true);
+    return fail('reCAPTCHA on register form', 'RECAPTCHA_REQUIRED', true);
   }
-  const formReady = (await page.locator('#jsiScheduleRegist, select[name="staffId"]').first().count().catch(() => 0)) > 0;
+
+  // (3) 「予定を登録する」ボタン(a#fnc_schedule)を押して予定登録画面へ遷移。
+  const schedBtn = page.locator('a#fnc_schedule').first();
+  if ((await schedBtn.count().catch(() => 0)) === 0) {
+    return fail('「予定を登録する」ボタンが見つかりません (予約登録画面に到達できていない可能性)', 'CONFIRMATION_MISMATCH', true);
+  }
+  try {
+    await Promise.all([
+      page.waitForSelector('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour', { timeout: 15_000 }).catch(() => {}),
+      schedBtn.click({ timeout: 12_000 }),
+    ]);
+  } catch (_e) { /* 続行して下で formReady を検証 */ }
+  // 遷移待ち (クリックでページ遷移する場合に備える)。
+  await page.waitForSelector('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour', { timeout: 12_000 }).catch(() => {});
+
+  const formReady = (await page.locator('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour').first().count().catch(() => 0)) > 0;
   if (!formReady) {
     return fail(`予定登録フォームに到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
   }
