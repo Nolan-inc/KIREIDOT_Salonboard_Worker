@@ -1938,9 +1938,21 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const title = (String(p.block_reason || '').trim() || '予定').slice(0, 30);
   const memo = (String(p.block_reason || '').trim()).slice(0, 100);
 
-  // 予定登録画面を開く (日付クエリ付き)。
+  // 対象日 (YYYYMMDD) と 表示用文字列 (YYYY年M月D日（曜）)。
+  // フォームは date クエリ無しで開く=既定「今日」なので、対象日が違えば
+  // hidden(name="date") と表示 dummy を書き換える。
+  const ymd = when.yyyymmdd; // 例 20260611
+  const dispDate = (() => {
+    const y = Number(ymd.slice(0, 4)), mo = Number(ymd.slice(4, 6)), d = Number(ymd.slice(6, 8));
+    const wd = ['日', '月', '火', '水', '木', '金', '土'][new Date(Date.UTC(y, mo - 1, d)).getUTCDay()];
+    return `${y}年${mo}月${d}日（${wd}）`;
+  })();
+
+  // 予定登録画面を開く。
+  // ★date クエリを付けると「情報が一部失われています(再度操作をやり直してください)」
+  //   エラーになる(サーバーがフォームトークンと整合しないため)。クエリ無しで開き、
+  //   対象日はフォーム内の hidden(#jsiSchDate=name="date") を書き換えて指定する。
   const u = new URL('/KLP/set/scheduleRegist/', baseUrl);
-  u.searchParams.set('date', when.yyyymmdd);
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     await page.waitForSelector('#jsiScheduleRegist, select[name="staffId"], #jsiRsvHour', { timeout: 15_000 }).catch(() => {});
@@ -1958,7 +1970,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 入力: スタッフ / 開始 / 終了 / タイトル / メモ。全てJSでセット+change発火。
   const staffExt = p.salonboard_staff_external_id;
   await page.evaluate(
-    ({ ext, hh, mm, eh, em, title, memo }) => {
+    ({ ext, hh, mm, eh, em, title, memo, ymd, dispDate }) => {
       const setSel = (sel, val) => {
         const el = document.querySelector(sel);
         if (!el) return;
@@ -1974,6 +1986,9 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       };
+      // 対象日 (hidden name="date" と表示 dummy)。既定が今日なので対象日に上書き。
+      setInput('input[name="date"]', ymd);
+      setInput('#jsiSchDateDummy, input[name="schDateDummy"]', dispDate);
       setSel('select[name="staffId"]', ext);
       setSel('#jsiRsvHour', hh);
       setSel('#jsiRsvMinute', mm);
@@ -1982,7 +1997,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       setInput('input[name="schTitle"]', title);
       setInput('input[name="schMemo"]', memo);
     },
-    { ext: staffExt, hh: startHH, mm: startMM, eh: endHH, em: endMM, title, memo },
+    { ext: staffExt, hh: startHH, mm: startMM, eh: endHH, em: endMM, title, memo, ymd, dispDate },
   ).catch(() => {});
 
   if (!enablePush) {
