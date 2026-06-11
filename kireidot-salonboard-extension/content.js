@@ -124,7 +124,11 @@ async function runUpload(job) {
     // ログイン成功 → 以降のループ検知カウンタをリセット (relogin/logout を仕切り直す)。
     await resetJobCounter(job.jobId, "relogin");
     await resetJobCounter(job.jobId, "logout");
-    throw NAV("ログインしました。続けて処理します。");
+    // ★ログイン後は styleEdit へ明示遷移する。ここで「reloadして再ポーリング」だけだと、
+    //   ログイン直後にまだ /login が表示されている瞬間を次のポーリングが拾って
+    //   再ログインし、結果的に何度もログインが走っていた。遷移先を固定して断ち切る。
+    await sleep(800); // セッションCookie確定を少し待つ
+    throw NAV("ログインしました。スタイル登録画面へ進みます。", () => { location.href = location.origin + "/CNB/draft/styleEdit/"; });
   }
 
   // --- (A') /login URL なのにフォームが出ない (描画失敗等) → /login を開き直す ---
@@ -135,24 +139,13 @@ async function runUpload(job) {
     throw NAV("ログイン画面を開き直します。", () => { location.href = location.origin + "/login/"; });
   }
 
-  // --- (B) セッション切れ(処理途中で認証が切れた) → ログイン画面へ ---
-  //     ここに来る = フォームは無いがログイン済みアプリページ。本物のセッション
-  //     切れ表示(認証エラー/タイムアウト)があるときだけ /login へ。ログイン直後の
-  //     お知らせ文言には反応しないよう hasAuthError() は厳格化済み。
-  //     ジョブ毎に最大1回だけ(=ログイン後にもう一度切れたらループせず止める)。
-  if (hasAuthError() && loggedInApp) {
-    const reloginTries = await bumpJobCounter(job.jobId, "relogin");
-    if (reloginTries > 1) {
-      const e = new Error(
-        "ログイン後にSalonBoard側でセッションが繰り返し切れています。同じアカウントに別のログイン(予約同期くんの自動取得や別端末)が無いか確認してください。",
-      );
-      e.code = "LOGIN_LOOP";
-      throw e;
-    }
-    console.log("[KireiDot] セッション切れ検出 → /login へ");
-    await clearLoggedCompany();
-    throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
-  }
+  // --- (B) セッション切れの検知は「文言」では行わない (v0.0.18) ---
+  //   以前は hasAuthError() のテキスト一致で /login へ送っていたが、ログイン直後の
+  //   正常ページの文言にも誤反応し、ログイン成功→即/login→…の偽ループ(relogin)を
+  //   起こしていた。SalonBoardは認証が切れた状態でアプリURLを開くと必ずログイン
+  //   フォーム(または/loginリダイレクト)を出すので、その検知=(A)/(A')だけで
+  //   「切れていれば自動ログイン、生きていればそのまま投稿」が成立する。
+  //   → テキストベースのセッション切れ分岐は撤去。
 
   // --- (C) ログイン済み: 対象会社かどうか判定 ---
   const logged = await getLoggedCompany();
