@@ -66,27 +66,31 @@ async function runUpload(job) {
   }
 
   const url = location.href;
+  // ★ログイン状態の判定 (堅牢化 v0.0.16):
+  //   旧実装は loggedInApp を「特定セレクタ(jscUploadImg/logout等)があるか」で
+  //   判定していたため、ログイン後のトップ(例 /CLP/bt/top/)に それらが無く
+  //   「未ログイン」と誤判定 → 自分で /login へ送還 → ログイン⇄トップ⇄ログインの
+  //   無限ループになっていた。
+  //   正しいモデル: 「ログインページ(URLが/login or パスワード欄あり)以外は
+  //   ログイン済み」。SalonBoardは未ログインでアプリURLを開くと必ず/loginへ
+  //   リダイレクトしフォームを出すので、この判定で取りこぼさない。
+  const isLoginUrl = /\/login(\b|\/|\?|$)/i.test(url);
   let hasLoginForm = !!document.querySelector("input[type='password'], input[name='password']");
-  const onStyleEdit = !!document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']");
-  const onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(url) || isGroupTopPage();
-  const loggedInApp = onStyleEdit || onGroupTop || !!document.querySelector("a.jscUploadImg, a[href*='logout'], #biyouStoreInfoArea, #kireiStoreInfoArea");
-
-  // ★ログインページの描画が遅いことがある (document_idle 時点でフォーム未描画)。
-  //   その瞬間の判定だけだと「未ログイン&フォーム無し」→ /login へ再遷移、を
-  //   延々と繰り返す(ぐるぐる/ID未入力)ため、ログインページらしき場所では
-  //   フォームの出現を待ってから判定する。
-  if (!hasLoginForm && !loggedInApp) {
+  // /login なのにフォーム未描画(描画が遅い)なら出現を待つ。
+  if (!hasLoginForm && isLoginUrl) {
     try {
       await waitForSelector("input[type='password'], input[name='password']", 8000);
       hasLoginForm = true;
-    } catch (_e) { /* 8秒待っても出ない → 本当にフォームが無いページ */ }
+    } catch (_e) { /* それでも出ない = 想定外。下の判定で /login へ送る */ }
   }
+  const onStyleEdit = !!document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']");
+  const onGroupTop = /\/(?:CNC|KLP|CLP)\/groupTop/i.test(url) || isGroupTopPage();
+  // ログイン済み = ログインフォームが無く、/login URL でもない。
+  const loggedInApp = !hasLoginForm && !isLoginUrl;
 
   // --- (B) 認証エラー表示 → ログイン画面へ ---
-  // ★loggedInApp(ログアウトリンク等がある=ログイン中)のページでは発火させない。
-  //   SalonBoardのお知らせ文言(「〜の際は再度ログインしてください」等)に誤反応して、
-  //   ログイン成功直後に毎回 /login へ強制送還するループの原因だった。
-  if (hasAuthError() && !hasLoginForm && !loggedInApp) {
+  // ログイン済みページでは発火させない (お知らせ文言「再度ログイン〜」への誤反応防止)。
+  if (hasAuthError() && !loggedInApp && !hasLoginForm) {
     console.log("[KireiDot] 認証エラー → /login へ");
     await clearLoggedCompany();
     throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
@@ -94,7 +98,7 @@ async function runUpload(job) {
 
   // --- (A) ログインフォームが見えている → 対象会社のID/PWでログイン ---
   //     (URLが/loginでなくても、フォームが出ていればログイン画面とみなす)
-  if (hasLoginForm && !loggedInApp) {
+  if (hasLoginForm) {
     if (!loginId || !password) {
       const e = new Error("SalonBoardにログインしていません。認証情報がジョブにありません(店舗のSalonBoard ID/PWを登録してください)。");
       e.code = "NOT_LOGGED_IN";
@@ -124,11 +128,12 @@ async function runUpload(job) {
     throw NAV("ログインしました。続けて処理します。");
   }
 
-  // --- (A') ログインしていない & フォームも無い(=未ログインで別ページにいる/直接styleEditを開いて弾かれた) ---
-  //     → /login/ へ移動してログインフォームを出す。
-  if (!loggedInApp && !hasLoginForm && loginId && password) {
-    console.log("[KireiDot] 未ログイン & フォーム無し → /login へ");
-    throw NAV("ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
+  // --- (A') /login URL なのにフォームが出ない (描画失敗等) → /login を開き直す ---
+  //     ※ ログイン済みのトップ等はここに来ない(loggedInApp=trueで下の(C)以降へ進む)。
+  //       以前はログイン後トップをここで /login へ送り返してループしていた。
+  if (isLoginUrl && !hasLoginForm) {
+    console.log("[KireiDot] /login だがフォーム未検出 → /login を開き直す");
+    throw NAV("ログイン画面を開き直します。", () => { location.href = location.origin + "/login/"; });
   }
 
   // --- (C) ログイン済み: 対象会社かどうか判定 ---
