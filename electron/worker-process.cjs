@@ -2634,6 +2634,21 @@ async function runPushJobs({ showBrowser } = {}) {
       // handled=false → 従来の Playwright 方式へフォールバック (以下続行)。
     }
 
+    // ★事前ガード: push_booking(新規/変更)は SalonBoard スタッフ external_id が
+    //   無いと必ず失敗する。ブラウザを起動してログインしてから失敗すると
+    //   「予約画面を立ち上げた瞬間に消える」体験になり、無駄にSBへログインもする。
+    //   起動前に弾いて手動対応エラーを返す(ブラウザを開かない)。
+    if (job.job_type === 'push_booking' && !payload.salonboard_staff_external_id) {
+      emit('log', { level: 'warn', msg: `[${tag}] 🟡 担当スタッフがSalonBoardに紐付いていないため書き込みをスキップ (booking=${String(payload.booking_id || '').slice(0, 8)})`, at: new Date().toISOString() });
+      await postCallback({
+        job_id: job.id, job_type: 'push_booking',
+        status: 'manual_required', booking_id: payload.booking_id,
+        error_code: 'STAFF_MAPPING_NOT_FOUND', manual_required: true,
+        error: '担当スタッフがSalonBoardのスタイリストに紐付いていないため、SalonBoardへ反映できません。スタッフ管理でSalonBoardスタッフと紐付けてください。',
+      });
+      return;
+    }
+
     let browser = null;
     try {
       const pushArgs = [
