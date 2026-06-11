@@ -58,16 +58,29 @@ const NAV = (msg, action) => {
 
 async function runUpload(job) {
   const { mode, imageUrl, loginId, password, companyId, salonId, expectedSalonName } = job;
+  // ループ検知カウンタのキー。旧background(jobId未送信)でも動くようフォールバック。
+  if (!job.jobId) job.jobId = `${companyId || "na"}_${mode || "job"}`;
   console.log("[KireiDot] step", { url: location.href, companyId, hasCreds: !!(loginId && password), salonId });
   if (mode !== "hair-style-front") {
     throw new Error("このMVPは美容室スタイルFRONTのみ対応です (mode=" + mode + ")");
   }
 
   const url = location.href;
-  const hasLoginForm = !!document.querySelector("input[type='password'], input[name='password']");
+  let hasLoginForm = !!document.querySelector("input[type='password'], input[name='password']");
   const onStyleEdit = !!document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']");
   const onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(url) || isGroupTopPage();
   const loggedInApp = onStyleEdit || onGroupTop || !!document.querySelector("a.jscUploadImg, a[href*='logout'], #biyouStoreInfoArea, #kireiStoreInfoArea");
+
+  // ★ログインページの描画が遅いことがある (document_idle 時点でフォーム未描画)。
+  //   その瞬間の判定だけだと「未ログイン&フォーム無し」→ /login へ再遷移、を
+  //   延々と繰り返す(ぐるぐる/ID未入力)ため、ログインページらしき場所では
+  //   フォームの出現を待ってから判定する。
+  if (!hasLoginForm && !loggedInApp) {
+    try {
+      await waitForSelector("input[type='password'], input[name='password']", 8000);
+      hasLoginForm = true;
+    } catch (_e) { /* 8秒待っても出ない → 本当にフォームが無いページ */ }
+  }
 
   // --- (B) 認証エラー表示 → ログイン画面へ ---
   if (hasAuthError() && !hasLoginForm) {
@@ -84,7 +97,17 @@ async function runUpload(job) {
       e.code = "NOT_LOGGED_IN";
       throw e;
     }
-    console.log("[KireiDot] ログインフォーム検出 → 自動ログイン", { loginId: String(loginId).slice(0, 3) + "***" });
+    // ★ログイン試行の上限 (同一ジョブで4回以上 = 何かがセッションを切っている)。
+    //   無限ループでSalonBoardにロックされる前に止め、原因をエラーで伝える。
+    const loginTries = await bumpJobCounter(job.jobId, "login");
+    if (loginTries > 3) {
+      const e = new Error(
+        "ログインを繰り返しています(4回目)。同じSalonBoardアカウントで予約同期くんの自動取得や他の端末が同時にログインしてセッションを切り合っている可能性があります。予約同期くんを最新版(v0.2.156以降)へ更新し、他の端末のアプリを終了してから再投稿してください。",
+      );
+      e.code = "LOGIN_LOOP";
+      throw e;
+    }
+    console.log("[KireiDot] ログインフォーム検出 → 自動ログイン", { loginId: String(loginId).slice(0, 3) + "***", tries: loginTries });
     const r = await fillAndSubmitLogin(loginId, password);
     if (r === "captcha") {
       const e = new Error("reCAPTCHA が表示されました。手動でログインしてからお試しください。");
@@ -108,6 +131,15 @@ async function runUpload(job) {
   // --- (C) ログイン済み: 対象会社かどうか判定 ---
   const logged = await getLoggedCompany();
   if (companyId && logged.companyId && logged.companyId !== companyId) {
+    // ★ログアウトの上限 (同一ジョブで3回以上 = 会社切替が成立していない)。
+    const logoutTries = await bumpJobCounter(job.jobId, "logout");
+    if (logoutTries > 2) {
+      const e = new Error(
+        "会社の切替(ログアウト→ログイン)を繰り返しています。SalonBoardのログインID設定が正しいか確認してください。",
+      );
+      e.code = "LOGIN_LOOP";
+      throw e;
+    }
     console.log("[KireiDot] 別会社ログイン中 → ログアウト", { now: logged.companyId, target: companyId });
     await clearLoggedCompany();
     const out = await doLogout();
@@ -297,6 +329,33 @@ function clearLoggedCompany() {
   return new Promise((resolve) => {
     try { chrome.storage.local.remove(["kdLoggedCompanyId", "kdLoggedLoginId"], resolve); }
     catch (_e) { resolve(); }
+  });
+}
+
+// ----------------------------------------------------------------------
+// ジョブ単位の試行カウンタ (ページ遷移を跨いで持ち越すため storage に置く)。
+// ログイン/ログアウトの無限ループを検知して止めるのに使う。
+// 古いカウンタ(24h超)はついでに掃除する。
+// ----------------------------------------------------------------------
+function bumpJobCounter(jobId, kind) {
+  const key = `kdJobCnt_${jobId}_${kind}`;
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(null, (all) => {
+        const now = Date.now();
+        const cur = all?.[key]?.n || 0;
+        const next = cur + 1;
+        const patch = { [key]: { n: next, at: now } };
+        chrome.storage.local.set(patch, () => resolve(next));
+        // 掃除 (非同期・失敗無視)
+        try {
+          const stale = Object.keys(all || {}).filter(
+            (k) => k.startsWith("kdJobCnt_") && now - (all[k]?.at || 0) > 24 * 3600_000,
+          );
+          if (stale.length) chrome.storage.local.remove(stale, () => {});
+        } catch (_e) { /* noop */ }
+      });
+    } catch (_e) { resolve(1); }
   });
 }
 

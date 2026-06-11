@@ -119,6 +119,7 @@ async function runJob(job) {
 
   const message = {
     type: "KD_UPLOAD_IMAGE",
+    jobId: job.jobId, // ループ検知カウンタのキー (content の bumpJobCounter)
     mode: job.mode || "hair-style-front",
     imageUrl: job.imageUrl, // ローカルブリッジの画像URL
     // ログイン/会社切替/サロン選択用 (ローカルブリッジ由来)。
