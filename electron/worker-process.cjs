@@ -244,9 +244,14 @@ async function runStyleJobViaExtension({ payload, creds, shopName, enablePost, t
       } catch (_e) { /* 続行 */ }
     }
   }
+  // タイムアウト: 古いジョブがChromeを動かし続けて次のジョブと二重ループしないよう、
+  // ブリッジ側のジョブを必ず取り消す (picked でも取り消せる)。
+  // ここで Playwright にフォールバックすると同じSBアカウントへ二重ログインして
+  // 拡張のChromeセッションを蹴ってしまうため、フォールバックせず手動対応に倒す。
+  try { await extBridgeRequest('POST', `/jobs/${extJobId}/cancel`); } catch (_e) { /* noop */ }
   return {
-    handled: true, status: 'failed', errorCode: 'EXT_TIMEOUT', manualRequired: false,
-    reason: 'Chrome拡張でのスタイル投稿がタイムアウトしました(8分)。普段使いChromeでSalonBoardが開けているか確認してください。',
+    handled: true, status: 'failed', errorCode: 'EXT_TIMEOUT', manualRequired: true,
+    reason: 'Chrome拡張でのスタイル投稿が8分以内に完了しませんでした。Chromeに表示されているSalonBoardの状態(ログイン/エラー表示)を確認してから再投稿してください。',
   };
 }
 
@@ -579,6 +584,16 @@ function machineId() {
   }
 }
 
+/** アプリのバージョン。init で渡されなかった場合は package.json から読む
+ * (ハートビートの app_version が null になりデバイス画面で確認できなかった対策)。 */
+let _pkgVersion = null;
+function appVersionFallback() {
+  if (deviceAuth.appVersion) return deviceAuth.appVersion;
+  if (_pkgVersion) return _pkgVersion;
+  try { _pkgVersion = require('../package.json').version || null; } catch (_e) { _pkgVersion = null; }
+  return _pkgVersion;
+}
+
 /** extension-bridge の /health を読む (main process が同一マシンで立てている)。 */
 function fetchBridgeHealth() {
   return new Promise((resolve) => {
@@ -740,7 +755,7 @@ function buildDeviceHeaders(extra) {
     // 無ければ global token モード (Admin 側で全店舗スコープになる)。
     ...(deviceAuth.deviceId ? { 'X-Device-Id': deviceAuth.deviceId } : {}),
     'X-Worker-Id': deviceAuth.workerId ?? 'electron-worker',
-    ...(deviceAuth.appVersion ? { 'X-App-Version': deviceAuth.appVersion } : {}),
+    ...(appVersionFallback() ? { 'X-App-Version': appVersionFallback() } : {}),
     'X-Platform': deviceAuth.platform ?? process.platform,
     // アクティブ/待機切替の照合用 (Admin jobs API が待機端末の claim を弾く)。
     'X-Machine-Id': machineId(),

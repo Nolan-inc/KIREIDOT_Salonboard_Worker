@@ -284,12 +284,15 @@ function handle(req, res) {
     }
   }
 
-  // POST /jobs/:jobId/cancel — 拡張が拾う前(pending)のジョブだけ取り消す。
-  // 既に picked/uploading なら取り消さない (二重実行・取りこぼし防止)。
+  // POST /jobs/:jobId/cancel — ジョブを取り消す。
+  // pending だけでなく picked/uploading も取り消せる (workerがタイムアウトした後に
+  // 古いジョブがChromeを動かし続け、新しいジョブと二重ループする問題の対策)。
+  // 取り消し後は /jobs/next で配られず、NAVリトライの complete(retry) でも
+  // pending に戻さない = 拡張は次のポーリングで自然に止まる。
   if (req.method === 'POST' && parts[0] === 'jobs' && parts[2] === 'cancel') {
     const job = getJob(parts[1]);
     if (!job) return sendJson(res, 404, { error: 'job not found' });
-    if (job.status === 'pending') {
+    if (job.status === 'pending' || job.status === 'picked' || job.status === 'uploading') {
       job.status = 'cancelled';
       job.updatedAt = now();
       try { if (job.localImage?.file) fs.unlinkSync(job.localImage.file); } catch (_e) {}
@@ -323,6 +326,10 @@ function handle(req, res) {
     req.on('end', () => {
       let payload = {};
       try { payload = JSON.parse(body || '{}'); } catch (_e) {}
+      // 取り消し済みジョブは復活させない (retryでpendingに戻すと二重ループする)。
+      if (job.status === 'cancelled') {
+        return sendJson(res, 200, { ok: true, cancelled: true });
+      }
       if (payload.status === 'retry') {
         // 画面遷移(styleList→styleEdit)等で再実行が必要 → pending に戻す。
         // 何度も遷移ループしないよう retry 回数を制限。

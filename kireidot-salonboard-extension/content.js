@@ -83,7 +83,10 @@ async function runUpload(job) {
   }
 
   // --- (B) 認証エラー表示 → ログイン画面へ ---
-  if (hasAuthError() && !hasLoginForm) {
+  // ★loggedInApp(ログアウトリンク等がある=ログイン中)のページでは発火させない。
+  //   SalonBoardのお知らせ文言(「〜の際は再度ログインしてください」等)に誤反応して、
+  //   ログイン成功直後に毎回 /login へ強制送還するループの原因だった。
+  if (hasAuthError() && !hasLoginForm && !loggedInApp) {
     console.log("[KireiDot] 認証エラー → /login へ");
     await clearLoggedCompany();
     throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
@@ -299,8 +302,10 @@ function isLoginPage() {
 }
 
 function hasAuthError() {
+  // 文言判定はお知らせ等に誤反応しやすいので「エラー」を伴う厳しめの条件にする。
+  // (「再度ログイン」単体はトップのお知らせにも出るため除外)
   const text = document.body?.innerText || "";
-  return /認証エラー|ログインしなおして|ログインし直して|セッション.*切れ|再度ログイン/i.test(text);
+  return /認証エラー|セッションが(切れ|無効)|タイムアウトしました。?再度ログイン|ログインしなおして|ログインし直して/i.test(text);
 }
 
 function isGroupTopPage() {
