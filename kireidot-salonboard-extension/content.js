@@ -88,15 +88,11 @@ async function runUpload(job) {
   // ログイン済み = ログインフォームが無く、/login URL でもない。
   const loggedInApp = !hasLoginForm && !isLoginUrl;
 
-  // --- (B) 認証エラー表示 → ログイン画面へ ---
-  // ログイン済みページでは発火させない (お知らせ文言「再度ログイン〜」への誤反応防止)。
-  if (hasAuthError() && !loggedInApp && !hasLoginForm) {
-    console.log("[KireiDot] 認証エラー → /login へ");
-    await clearLoggedCompany();
-    throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
-  }
-
   // --- (A) ログインフォームが見えている → 対象会社のID/PWでログイン ---
+  //     ★認証エラー判定より先に評価する。フォームが出ているなら、たとえ
+  //       「ログインし直してください」の文言があっても、まず入力してログインする。
+  //       (以前は (B) を先に評価していたため、/login に文言があると毎回 /login へ
+  //        再遷移し、フォーム入力に到達できずログイン不能になっていた。)
   //     (URLが/loginでなくても、フォームが出ていればログイン画面とみなす)
   if (hasLoginForm) {
     if (!loginId || !password) {
@@ -125,6 +121,9 @@ async function runUpload(job) {
       e.code = "LOGIN_FAILED"; throw e;
     }
     await setLoggedCompany(companyId, loginId);
+    // ログイン成功 → 以降のループ検知カウンタをリセット (relogin/logout を仕切り直す)。
+    await resetJobCounter(job.jobId, "relogin");
+    await resetJobCounter(job.jobId, "logout");
     throw NAV("ログインしました。続けて処理します。");
   }
 
@@ -134,6 +133,25 @@ async function runUpload(job) {
   if (isLoginUrl && !hasLoginForm) {
     console.log("[KireiDot] /login だがフォーム未検出 → /login を開き直す");
     throw NAV("ログイン画面を開き直します。", () => { location.href = location.origin + "/login/"; });
+  }
+
+  // --- (B) セッション切れ(処理途中で認証が切れた) → ログイン画面へ ---
+  //     ここに来る = フォームは無いがログイン済みアプリページ。本物のセッション
+  //     切れ表示(認証エラー/タイムアウト)があるときだけ /login へ。ログイン直後の
+  //     お知らせ文言には反応しないよう hasAuthError() は厳格化済み。
+  //     ジョブ毎に最大1回だけ(=ログイン後にもう一度切れたらループせず止める)。
+  if (hasAuthError() && loggedInApp) {
+    const reloginTries = await bumpJobCounter(job.jobId, "relogin");
+    if (reloginTries > 1) {
+      const e = new Error(
+        "ログイン後にSalonBoard側でセッションが繰り返し切れています。同じアカウントに別のログイン(予約同期くんの自動取得や別端末)が無いか確認してください。",
+      );
+      e.code = "LOGIN_LOOP";
+      throw e;
+    }
+    console.log("[KireiDot] セッション切れ検出 → /login へ");
+    await clearLoggedCompany();
+    throw NAV("認証が切れています。ログイン画面へ移動します。", () => { location.href = location.origin + "/login/"; });
   }
 
   // --- (C) ログイン済み: 対象会社かどうか判定 ---
@@ -307,10 +325,24 @@ function isLoginPage() {
 }
 
 function hasAuthError() {
-  // 文言判定はお知らせ等に誤反応しやすいので「エラー」を伴う厳しめの条件にする。
-  // (「再度ログイン」単体はトップのお知らせにも出るため除外)
-  const text = document.body?.innerText || "";
-  return /認証エラー|セッションが(切れ|無効)|タイムアウトしました。?再度ログイン|ログインしなおして|ログインし直して/i.test(text);
+  // 文言判定はお知らせ等に誤反応しやすいので、エラー専用の表示領域に限定して見る。
+  // body 全文走査だと「〜の際は再度ログインしてください」等のお知らせに誤反応する。
+  const scopes = [
+    ".common-CNCcommon__errorText",
+    ".errorTxt",
+    ".error_message",
+    ".div_err_message",
+    "#errorArea",
+    ".mod_alert",
+    ".alertBox",
+  ];
+  let text = "";
+  for (const s of scopes) {
+    try { document.querySelectorAll(s).forEach((el) => { text += "\n" + (el.textContent || ""); }); } catch (_e) {}
+  }
+  text = text.replace(/\s+/g, "");
+  // エラー領域内に「認証エラー/セッション切れ/タイムアウト→再ログイン」がある時だけ true。
+  return /認証エラー|セッションが(切れ|無効)|タイムアウト.*再度ログイン|ログインし(なおして|直して)/.test(text);
 }
 
 function isGroupTopPage() {
@@ -366,6 +398,13 @@ function bumpJobCounter(jobId, kind) {
         } catch (_e) { /* noop */ }
       });
     } catch (_e) { resolve(1); }
+  });
+}
+
+function resetJobCounter(jobId, kind) {
+  return new Promise((resolve) => {
+    try { chrome.storage.local.remove(`kdJobCnt_${jobId}_${kind}`, resolve); }
+    catch (_e) { resolve(); }
   });
 }
 
@@ -494,9 +533,8 @@ async function ensureOnStyleEdit() {
   // 既に styleEdit (FRONT画像枠がある) ならOK。
   if (document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']")) return;
 
-  // ★重要: styleEdit へは「styleList(一覧) → スタイル新規追加」の順で入るのが正規ルート。
-  //   /CNB/draft/styleEdit/ を直接開くとサロン文脈が無く groupTop に弾き戻される
-  //   (= サロン選択↔styleEdit のループになる)。なので styleList を経由する。
+  const styleEditUrl = location.origin + "/CNB/draft/styleEdit/";
+  const styleListUrl = location.origin + "/CNB/draft/styleList/";
 
   // styleList に居る → 「スタイル新規追加」ボタンを押して styleEdit へ。
   if (/\/styleList/i.test(location.href) || document.querySelector("a.jscAddStyle, a[onclick*='addStyle']")) {
@@ -514,29 +552,35 @@ async function ensureOnStyleEdit() {
         await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 12000);
         return;
       } catch (_e) {
-        // クリックで遷移しなかった → NAVIGATEDで再ポーリング(styleEdit描画待ち)。
         throw NAV("スタイル新規追加へ進みます。");
       }
     }
+    // 新規追加ボタンが見つからない → styleEdit を直接開く。
+    console.log("[KireiDot] styleList に新規追加ボタンが無い → styleEdit を直接開く");
+    throw NAV("スタイル登録画面へ移動します。", () => { location.href = styleEditUrl; });
   }
 
-  // styleList でも styleEdit でもない → styleList へ移動 (styleEdit直開きはしない)。
-  if (!/\/styleList|\/styleEdit/i.test(location.href)) {
-    const listUrl = location.origin + "/CNB/draft/styleList/";
-    console.log("[KireiDot] styleList へ移動", listUrl);
-    throw NAV("スタイル一覧へ移動します。", () => { location.href = listUrl; });
+  // styleEdit のURLなら描画待ち。
+  if (/\/styleEdit/i.test(location.href)) {
+    try {
+      await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 10000);
+      return;
+    } catch (_e) {
+      // styleEdit を開いたのに画像枠が無い = サロン未選択で弾かれた等。
+      // groupTop に飛ばされていれば runUpload の (D) が拾う。ここでは styleList
+      // 経由を試す (単店舗ではここに来ない)。
+      if (isGroupTopPage() || /\/(?:CNC|KLP|CLP)\/groupTop/i.test(location.href)) {
+        throw NAV("サロン選択へ戻ります。");
+      }
+      console.log("[KireiDot] styleEdit に画像枠が無い → styleList 経由を試す");
+      throw NAV("スタイル一覧から開き直します。", () => { location.href = styleListUrl; });
+    }
   }
 
-  // styleEdit のURLなのに FRONT画像枠が無い → 描画待ち。
-  try {
-    await waitForSelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']", 8000);
-    return;
-  } catch (_e) {
-    throw new Error(
-      "スタイル登録画面(styleEdit)に画像枠が見つかりません。手動で「スタイル新規追加」を開いてからお試しください。URL=" +
-        location.href
-    );
-  }
+  // それ以外のページ(トップ等) → styleEdit を直接開く (ユーザー要望: 画像アップロードは
+  // styleEdit。単店舗アカウントは直接開ける。弾かれたら上の分岐で styleList 経由に回る)。
+  console.log("[KireiDot] styleEdit を直接開く", styleEditUrl);
+  throw NAV("スタイル登録画面へ移動します。", () => { location.href = styleEditUrl; });
 }
 
 // ----------------------------------------------------------------------

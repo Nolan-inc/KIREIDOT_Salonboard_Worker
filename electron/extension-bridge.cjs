@@ -225,7 +225,7 @@ function handle(req, res) {
       try {
         const job = await createJob(opts);
         if (job.status !== 'failed' && opts.openChrome) {
-          openChromeWithUrl(job.salonboardUrl || 'https://salonboard.com/CNB/draft/styleList/');
+          openChromeWithUrl(job.salonboardUrl || 'https://salonboard.com/CNB/draft/styleEdit/');
         }
         return sendJson(res, 200, { ok: job.status !== 'failed', jobId: job.jobId, status: job.status, error: job.error });
       } catch (e) {

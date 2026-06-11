@@ -161,7 +161,7 @@ async function runStyleJobViaExtension({ payload, creds, shopName, enablePost, t
       type: 'hair_style_front',
       target: 'FRONT_IMG_ID',
       imageUrl,
-      salonboardUrl: 'https://salonboard.com/CNB/draft/styleList/',
+      salonboardUrl: 'https://salonboard.com/CNB/draft/styleEdit/',
       loginId: creds.login_id || null,
       password: creds.password || null,
       // 会社切替の判定軸: ログインIDが一意なので companyId = loginId。
