@@ -93,7 +93,29 @@ async function runUpload(job) {
   }
   const onStyleEdit = !!document.querySelector("#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG']");
   const onGroupTop = /\/(?:CNC|KLP|CLP)\/groupTop/i.test(url) || isGroupTopPage();
-  // ログイン済み = ログインフォームが無く、/login URL でもない。
+
+  // ★認証エラー画面の確実な検知 (v0.0.20):
+  //   「認証エラーです。ログインしなおしてください。[ログインへ]」だけの画面は、
+  //   URLが/loginでなく(styleEdit/doRegist等のまま)・パスワード欄も無いため
+  //   従来 loggedInApp=true と誤判定し、ログインに行かず styleEdit を開き続けて
+  //   無限ループしていた。この画面は「ログインへ リンク + 認証エラー文言 + アプリ
+  //   コンテンツが無い」で確実に判別できる。検知したら /login へ送ってログインさせる。
+  if (isAuthErrorPage()) {
+    const authTries = await bumpJobCounter(job.jobId, "autherr");
+    if (authTries > 3) {
+      const e = new Error(
+        "認証エラー画面からのログインを繰り返しています。ID/パスワードが正しいか、対象が美容室(ADER)の正しいアカウントか確認してください。",
+      );
+      e.code = "LOGIN_FAILED"; throw e;
+    }
+    console.log("[KireiDot] 認証エラー画面を検知 → ログイン画面へ", { tries: authTries });
+    await clearLoggedCompany();
+    const goLogin = findFirst(["a[href*='/login']", "a[href*='login']"]);
+    const href = goLogin && goLogin.href ? goLogin.href : (location.origin + "/login/");
+    throw NAV("認証エラー。ログイン画面へ移動します。", () => { location.href = href; });
+  }
+
+  // ログイン済み = ログインフォームが無く、/login URL でもなく、認証エラー画面でもない。
   const loggedInApp = !hasLoginForm && !isLoginUrl;
 
   // --- (A) ログインフォームが見えている → 対象会社のID/PWでログイン ---
@@ -132,6 +154,7 @@ async function runUpload(job) {
     // ログイン成功 → 以降のループ検知カウンタをリセット (relogin/logout を仕切り直す)。
     await resetJobCounter(job.jobId, "relogin");
     await resetJobCounter(job.jobId, "logout");
+    await resetJobCounter(job.jobId, "autherr");
     // ★ログイン後は styleEdit へ明示遷移する。ここで「reloadして再ポーリング」だけだと、
     //   ログイン直後にまだ /login が表示されている瞬間を次のポーリングが拾って
     //   再ログインし、結果的に何度もログインが走っていた。遷移先を固定して断ち切る。
@@ -346,25 +369,33 @@ function isLoginPage() {
   return hasPw && !hasApp;
 }
 
-function hasAuthError() {
-  // 文言判定はお知らせ等に誤反応しやすいので、エラー専用の表示領域に限定して見る。
-  // body 全文走査だと「〜の際は再度ログインしてください」等のお知らせに誤反応する。
-  const scopes = [
-    ".common-CNCcommon__errorText",
-    ".errorTxt",
-    ".error_message",
-    ".div_err_message",
-    "#errorArea",
-    ".mod_alert",
-    ".alertBox",
-  ];
-  let text = "";
-  for (const s of scopes) {
-    try { document.querySelectorAll(s).forEach((el) => { text += "\n" + (el.textContent || ""); }); } catch (_e) {}
+// 認証エラー専用の中間ページかどうか。
+//   例: 「認証エラーです。ログインしなおしてください。 [ログインへ]」だけの画面。
+//   3条件すべてを満たすときだけ true にして、通常ページのお知らせ文言や
+//   ログイン済みページでの誤反応を防ぐ:
+//     1) 認証エラーの文言がある
+//     2) 「ログインへ」リンクがある (このページの主アクション)
+//     3) アプリ本体のコンテンツが無い (FRONT画像枠/スタイル一覧/サロン選択など)
+function isAuthErrorPage() {
+  const body = (document.body?.innerText || "").replace(/\s+/g, "");
+  const hasAuthText = /認証エラー|ログインし(なおして|直して)|セッションが(切れ|無効)|タイムアウト/.test(body);
+  if (!hasAuthText) return false;
+
+  // 「ログインへ」リンク (href に login を含む or テキストが「ログインへ」)。
+  let hasLoginLink = !!document.querySelector("a[href*='login' i]");
+  if (!hasLoginLink) {
+    hasLoginLink = Array.from(document.querySelectorAll("a")).some(
+      (a) => /ログインへ|ログイン画面/.test((a.textContent || "").replace(/\s+/g, "")),
+    );
   }
-  text = text.replace(/\s+/g, "");
-  // エラー領域内に「認証エラー/セッション切れ/タイムアウト→再ログイン」がある時だけ true。
-  return /認証エラー|セッションが(切れ|無効)|タイムアウト.*再度ログイン|ログインし(なおして|直して)/.test(text);
+  if (!hasLoginLink) return false;
+
+  // アプリ本体コンテンツが無いこと (あれば=ログイン済みの実ページなので誤反応にしない)。
+  const hasAppContent = !!document.querySelector(
+    "#FRONT_IMG_ID_IMG, img[id*='FRONT_IMG'], a.jscUploadImg, a.jscAddStyle, " +
+    "#biyouStoreInfoArea, #kireiStoreInfoArea, a[href*='logout']"
+  );
+  return !hasAppContent;
 }
 
 function isGroupTopPage() {
@@ -593,6 +624,11 @@ async function ensureOnStyleEdit() {
       // 経由を試す (単店舗ではここに来ない)。
       if (isGroupTopPage() || /\/(?:CNC|KLP|CLP)\/groupTop/i.test(location.href)) {
         throw NAV("サロン選択へ戻ります。");
+      }
+      // 認証エラー画面に飛ばされていれば runUpload 先頭の判定が拾うので、ここで
+      // styleList へ無限に開き直さないようガードする。
+      if (isAuthErrorPage()) {
+        throw NAV("認証エラー。ログイン画面へ戻ります。", () => { location.href = location.origin + "/login/"; });
       }
       console.log("[KireiDot] styleEdit に画像枠が無い → styleList 経由を試す");
       throw NAV("スタイル一覧から開き直します。", () => { location.href = styleListUrl; });
