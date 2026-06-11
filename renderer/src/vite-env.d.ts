@@ -37,7 +37,7 @@ type ExtensionEvent = {
 };
 
 // utilityProcess (electron/worker-process.cjs) からのイベント。
-type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'customers';
+type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'reviews' | 'customers';
 type WorkerEvent =
   | { type: 'boot'; payload: { pid: number; at: string } }
   | { type: 'ready'; payload: { ok: boolean } }
@@ -296,6 +296,8 @@ interface Window {
         deviceName?: string;
         workerId?: string;
         enablePush?: boolean;
+        slackToken?: string;
+        slackChannel?: string;
       }) => Promise<DeviceConfigTestResult & { config: DeviceConfigMasked }>;
       clear: () => Promise<{ ok: boolean }>;
       test: (payload?: {
@@ -366,6 +368,9 @@ type DeviceConfigMasked = {
   apiUrl?: string | null;
   workerId?: string | null;
   enablePush?: boolean;
+  slackConfigured?: boolean;
+  slackChannel?: string | null;
+  slackTokenLast4?: string | null;
   configuredAt?: string | null;
   lastVerifiedAt?: string | null;
   tokenLast4?: string | null;

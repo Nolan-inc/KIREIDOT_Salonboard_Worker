@@ -259,6 +259,9 @@ ipcMain.handle('device:save', async (_event, payload) => {
     deviceName: String(payload?.deviceName ?? '').trim() || null,
     workerId: String(payload?.workerId ?? '').trim() || null,
     ...(payload?.enablePush !== undefined ? { enablePush: !!payload.enablePush } : {}),
+    // Slack エラー通知 (任意)。トークン+チャンネル両方そろうと有効。
+    ...(payload?.slackToken !== undefined ? { slackToken: String(payload.slackToken ?? '').trim() } : {}),
+    ...(payload?.slackChannel !== undefined ? { slackChannel: String(payload.slackChannel ?? '').trim() } : {}),
   };
   // global token 運用: API URL + Token は必須。Device ID は任意 (空なら全店舗モード)。
   if (!cfg.deviceToken || !cfg.apiUrl) {
@@ -281,6 +284,8 @@ ipcMain.handle('device:save', async (_event, payload) => {
       deviceToken: cfg.deviceToken,
       workerId: cfg.workerId || 'electron-worker',
       ...(cfg.enablePush !== undefined ? { enablePush: !!cfg.enablePush } : {}),
+      ...(cfg.slackToken !== undefined ? { slackToken: cfg.slackToken } : {}),
+      ...(cfg.slackChannel !== undefined ? { slackChannel: cfg.slackChannel } : {}),
     },
   });
   return {
@@ -482,6 +487,8 @@ ipcMain.handle('worker:init', async (_event, payload) => {
           deviceToken: dev.deviceToken ?? null,
           workerId: dev.workerId ?? payload?.workerId ?? 'electron-worker',
           enablePush: dev.enablePush === true,
+          slackToken: dev.slackToken ?? null,
+          slackChannel: dev.slackChannel ?? null,
         }
       : {}),
   };

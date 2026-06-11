@@ -42,6 +42,9 @@ function readDeviceConfig(app) {
       workerId: typeof json.workerId === 'string' ? json.workerId : null,
       // 実登録 (SalonBoard へ書き込み = 登録ボタンを押す) を許可するか
       enablePush: json.enablePush === true,
+      // Slack エラー通知 (任意)
+      slackToken: typeof json.slackToken === 'string' ? json.slackToken : null,
+      slackChannel: typeof json.slackChannel === 'string' ? json.slackChannel : null,
       configuredAt: json.configuredAt ?? null,
       lastVerifiedAt: json.lastVerifiedAt ?? null,
     };
@@ -65,6 +68,10 @@ function writeDeviceConfig(app, cfg) {
     workerId: cfg.workerId ?? existing?.workerId ?? null,
     enablePush:
       cfg.enablePush !== undefined ? !!cfg.enablePush : existing?.enablePush ?? false,
+    slackToken:
+      cfg.slackToken !== undefined ? (cfg.slackToken || null) : existing?.slackToken ?? null,
+    slackChannel:
+      cfg.slackChannel !== undefined ? (cfg.slackChannel || null) : existing?.slackChannel ?? null,
     configuredAt: existing?.configuredAt ?? new Date().toISOString(),
     lastVerifiedAt:
       cfg.lastVerifiedAt !== undefined
@@ -108,6 +115,10 @@ function getMaskedDeviceConfig(app) {
     apiUrl: cfg.apiUrl,
     workerId: cfg.workerId,
     enablePush: cfg.enablePush === true,
+    // Slack: トークンはマスク (有無と末尾4桁のみ)、チャンネルはそのまま返す。
+    slackConfigured: !!(cfg.slackToken && cfg.slackChannel),
+    slackChannel: cfg.slackChannel ?? null,
+    slackTokenLast4: cfg.slackToken ? cfg.slackToken.slice(-4) : null,
     configuredAt: cfg.configuredAt,
     lastVerifiedAt: cfg.lastVerifiedAt,
     tokenLast4: cfg.deviceToken ? cfg.deviceToken.slice(-4) : null,

@@ -477,6 +477,9 @@ function DeviceConfigSection() {
   const [token, setToken] = useState('');
   const [name, setName] = useState('');
   const [editing, setEditing] = useState(false);
+  // Slack エラー通知 (任意)
+  const [slackToken, setSlackToken] = useState('');
+  const [slackChannel, setSlackChannel] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [enablePush, setEnablePush] = useState(false);
@@ -502,6 +505,8 @@ function DeviceConfigSection() {
       setApiUrl(c.apiUrl ?? DEFAULT_API_URL);
       setName(c.deviceName ?? '');
     }
+    // Slack: チャンネルは復元 (トークンはマスクなので空欄のまま=未変更扱い)
+    setSlackChannel((c as any).slackChannel ?? '');
     setLoading(false);
   };
 
@@ -557,11 +562,16 @@ function DeviceConfigSection() {
       apiUrl: apiUrl.trim(),
       deviceToken: token.trim(),
       deviceName: name.trim() || undefined,
+      // Slack エラー通知。トークンは入力があった時だけ送る(空欄=既存維持)。
+      // チャンネルは常に送る(空にすると無効化)。
+      ...(slackToken.trim() ? { slackToken: slackToken.trim() } : {}),
+      slackChannel: slackChannel.trim(),
     });
     setResult(summarize(r));
     setConfig(r.config ?? null);
     setEditing(false);
     setToken(''); // 保存後はフォームから token をクリア (画面に残さない)
+    setSlackToken(''); // Slack トークンも残さない
     setBusy(false);
   };
 
@@ -698,6 +708,34 @@ function DeviceConfigSection() {
                   onChange={setName}
                   placeholder="例: 本部-同期用PC"
                 />
+                <div className="rounded-[10px] border border-hairline bg-surface-soft/40 p-3 space-y-2">
+                  <p className="text-[11px] font-semibold text-ink">
+                    Slack エラー通知 (任意)
+                  </p>
+                  <p className="text-[11px] text-muted">
+                    予約の登録・変更・キャンセル等でエラーが出たとき、指定の Slack
+                    チャンネルへ通知します。両方入力すると有効になります。
+                  </p>
+                  <LabeledInput
+                    label="Slack Bot Token (xoxb-...)"
+                    value={slackToken}
+                    onChange={setSlackToken}
+                    placeholder={
+                      (config as any)?.slackConfigured
+                        ? `設定済み (****${(config as any)?.slackTokenLast4 ?? ''}) ・変更時のみ入力`
+                        : 'xoxb-... (chat:write 権限のBotトークン)'
+                    }
+                    password
+                    mono
+                  />
+                  <LabeledInput
+                    label="通知先チャンネルID"
+                    value={slackChannel}
+                    onChange={setSlackChannel}
+                    placeholder="例: C0BAPMRQR2L"
+                    mono
+                  />
+                </div>
               </div>
             ) : null}
 

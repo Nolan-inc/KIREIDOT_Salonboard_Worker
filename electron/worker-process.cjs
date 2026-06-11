@@ -40,6 +40,7 @@ const {
   changeBookingViaForm,
   postBlogViaForm,
   deleteBlogViaForm,
+  postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
 } = require('./scrapers.cjs');
@@ -431,6 +432,8 @@ let deviceAuth = {
   workerId: 'electron-worker',
   appVersion: null,
   platform: process.platform,
+  // Slack エラー通知 { token: 'xoxb-...', channel: 'C...' }。設定画面から渡される。
+  slack: null,
 };
 
 /**
@@ -483,12 +486,84 @@ function enqueueSerial(task) {
   return run;
 }
 
+// =====================================================================
+// Slack エラー通知
+//   予約同期くんで起きた「エラー/警告ログ」と「失敗系の callback」を Slack へ送る。
+//   トークンとチャンネルは設定(device-config)経由で deviceAuth.slack に入る。
+//   - 連続/重複通知の抑制(同一文面は60秒に1回)とレート制限で氾濫を防ぐ。
+//   - 送信失敗で本処理を止めない(例外を投げない)。
+// =====================================================================
+const SLACK_DEDUP_MS = 60_000;
+const _slackRecent = new Map(); // key(本文) -> 最終送信epoch
+let _slackLastSentAt = 0;
+
+function slackEnabled() {
+  return !!(deviceAuth && deviceAuth.slack && deviceAuth.slack.token && deviceAuth.slack.channel);
+}
+
+async function sendSlack(text) {
+  if (!slackEnabled()) return;
+  const now = Date.now();
+  // 重複抑制 (同一本文は60秒に1回)。
+  const key = String(text).slice(0, 300);
+  const last = _slackRecent.get(key) || 0;
+  if (now - last < SLACK_DEDUP_MS) return;
+  _slackRecent.set(key, now);
+  // 軽いレート制限 (最短1秒間隔)。
+  if (now - _slackLastSentAt < 1000) {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  _slackLastSentAt = Date.now();
+  // 古いdedupエントリを掃除。
+  if (_slackRecent.size > 200) {
+    for (const [k, t] of _slackRecent) { if (now - t > SLACK_DEDUP_MS * 5) _slackRecent.delete(k); }
+  }
+  try {
+    const machine = (typeof machineId === 'function' ? machineId() : 'worker');
+    const ver = (typeof appVersionFallback === 'function' ? appVersionFallback() : null);
+    const prefix = `:warning: *予約同期くんエラー* (${machine}${ver ? ` v${ver}` : ''})`;
+    const res = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${deviceAuth.slack.token}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({ channel: deviceAuth.slack.channel, text: `${prefix}\n${text}` }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!json.ok) console.warn('[slack] notify failed', json.error);
+  } catch (e) {
+    console.warn('[slack] notify error', e?.message ?? e);
+  }
+}
+
+// emit されたイベントから「エラーとして Slack に送るべきもの」を判定して送る。
+function maybeSlackFromEmit(type, payload) {
+  if (!slackEnabled()) return;
+  try {
+    if (type === 'error') {
+      const msg = payload?.msg ?? payload?.error ?? JSON.stringify(payload);
+      void sendSlack(`エラー: ${msg}`);
+      return;
+    }
+    if (type === 'log') {
+      const lvl = payload?.level;
+      if (lvl === 'error' || lvl === 'warn') {
+        void sendSlack(`[${lvl}] ${payload?.msg ?? ''}`);
+      }
+      return;
+    }
+  } catch (_e) { /* noop */ }
+}
+
 function emit(type, payload) {
   try {
     process.parentPort?.postMessage({ type, payload });
   } catch (_e) {
     /* parent が居ない場合は無視 */
   }
+  // エラー/警告は Slack にも飛ばす (本処理は止めない)。
+  maybeSlackFromEmit(type, payload);
 }
 
 function log(msg, level = 'info') {
@@ -508,6 +583,8 @@ async function initSupabase({
   workerId,
   appVersion,
   enablePush,
+  slackToken,
+  slackChannel,
 }) {
   if (!url || !anonKey) {
     throw new Error('Supabase URL / anon key が空です。.env.local の VITE_SUPABASE_URL を確認してください');
@@ -543,6 +620,8 @@ async function initSupabase({
     platform: process.platform,
     // 実登録 (登録ボタンを押す) を許可するか。設定画面のトグル → main → ここへ。
     enablePush: !!enablePush,
+    // Slack エラー通知。トークン+チャンネルが両方あるときだけ有効。
+    slack: (slackToken && slackChannel) ? { token: slackToken, channel: slackChannel } : null,
   };
   if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceToken) {
     log(
@@ -675,7 +754,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -2636,6 +2715,7 @@ async function runPushJobs({ showBrowser } = {}) {
       const isBlog = job.job_type === 'push_blog';
       const isBlogDelete = job.job_type === 'delete_blog';
       const isPhotoGallery = job.job_type === 'push_photo_gallery';
+      const isReviewReply = job.job_type === 'push_review_reply';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -2697,6 +2777,34 @@ async function runPushJobs({ showBrowser } = {}) {
             error_code: result.errorCode, error: result.reason, manual_required: toManual,
           });
           emit('log', { level: 'warn', msg: `[${tag}] ブログ: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isReviewReply) {
+        // ---- 口コミ返信投稿 ----
+        const result = await postReviewReplyViaForm(page, payload, { baseUrl, enablePost: enablePush });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_review_reply', status: 'succeeded',
+            review_import_id: payload.review_import_id ?? null,
+            external_id: result.externalId ?? null,
+            summary: 'push_review_reply 投稿完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ 口コミ返信投稿完了${result.externalId ? ` (id=${result.externalId})` : ''}`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_review_reply', status: 'manual_required',
+            review_import_id: payload.review_import_id ?? null,
+            error_code: 'PUSH_DISABLED', error: '入力まで成功しましたが、実登録(実書込)が無効のため投稿していません。設定で有効化してください。', manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 口コミ返信入力のみ (実登録OFF)`, at: new Date().toISOString() });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_review_reply',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            review_import_id: payload.review_import_id ?? null,
+            error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 口コミ返信: ${result.reason}`, at: new Date().toISOString() });
         }
       } else if (isPhotoGallery) {
         // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル styleEdit) ----
@@ -2935,6 +3043,20 @@ async function runPushJobs({ showBrowser } = {}) {
 
 /** /api/salonboard/callback に結果を POST する。 */
 async function postCallback(body) {
+  // 失敗系の結果(登録/変更/キャンセル/投稿の失敗)は Slack にも通知する。
+  // emit('log',{level:'error'}) を通らないケース(callbackだけで完結する失敗)も
+  // 取りこぼさないための保険。成功(succeeded)は通知しない。
+  try {
+    const st = body?.status;
+    if (st && st !== 'succeeded' && st !== 'manual_required_none' &&
+        ['failed', 'retryable_failed', 'non_retryable_failed', 'manual_required',
+         'captcha_detected', 'blocked', 'login_required'].includes(st)) {
+      const jt = body?.job_type || 'job';
+      const code = body?.error_code ? `[${body.error_code}] ` : '';
+      const reason = body?.error || body?.summary || '';
+      void sendSlack(`${jt} ${st}: ${code}${reason}`.slice(0, 500));
+    }
+  } catch (_e) { /* noop */ }
   const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
   if (!headers) return;
   try {
@@ -3581,9 +3703,19 @@ process.parentPort?.on('message', async (event) => {
               d.deviceToken !== undefined ? d.deviceToken || null : deviceAuth.deviceToken,
             workerId: d.workerId || deviceAuth.workerId || 'electron-worker',
             ...(d.enablePush !== undefined ? { enablePush: !!d.enablePush } : {}),
+            // Slack エラー通知設定。token/channel いずれか渡されたら更新。
+            ...((d.slackToken !== undefined || d.slackChannel !== undefined)
+              ? {
+                  slack: (() => {
+                    const tok = d.slackToken !== undefined ? (d.slackToken || null) : (deviceAuth.slack?.token || null);
+                    const ch = d.slackChannel !== undefined ? (d.slackChannel || null) : (deviceAuth.slack?.channel || null);
+                    return (tok && ch) ? { token: tok, channel: ch } : null;
+                  })(),
+                }
+              : {}),
           };
           log(
-            `device設定を更新しました (apiBaseUrl=${deviceAuth.apiBaseUrl ? 'set' : 'null'}, token=${deviceAuth.deviceToken ? 'set' : 'null'})`,
+            `device設定を更新しました (apiBaseUrl=${deviceAuth.apiBaseUrl ? 'set' : 'null'}, token=${deviceAuth.deviceToken ? 'set' : 'null'}, slack=${deviceAuth.slack ? 'set' : 'null'})`,
           );
         }
         break;
