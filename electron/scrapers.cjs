@@ -2014,15 +2014,50 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
     }
   }, staffExt).catch(() => {});
-  // 開始 時/分
+  // 開始 時/分。change を発火して SalonBoard 側の終了時間再計算ハンドラを起こす。
   await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
   await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
-  // 所要 (rsvTermHour の value は分換算: 60=1時間)
-  const durMin = p.duration_min || 60;
-  await page.locator('select#jsiRsvTermHour').first()
-    .selectOption({ value: String(Math.floor(durMin / 60) * 60) }).catch(() => {});
-  await page.locator('select#jsiRsvTermMinute').first()
-    .selectOption({ value: String(durMin % 60).padStart(2, '0') }).catch(() => {});
+  // 所要 (rsvTermHour の value は分換算: value="60"=1時間, "0"=0時間)。
+  // duration_min を厳密に反映する。null のときだけ 60 にフォールバック。
+  const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
+    ? Number(p.duration_min)
+    : 60;
+  const termHourVal = String(Math.floor(durMin / 60) * 60); // 例: 30→"0", 90→"60"
+  const termMinVal = String(durMin % 60).padStart(2, '0');   // 例: 30→"30", 90→"30"
+  // ★重要: SalonBoard は開始時刻/所要の各 select で終了時間を自動再計算する。
+  //   selectOption だけだと内部状態が更新されず「既定の1時間」のまま登録される
+  //   ことがある(30分→1時間になる症状)。time/term の全 select を JS で直接
+  //   セットし、それぞれ change を発火して widget に確実に反映させる。
+  await page.evaluate(
+    ({ hh, mm, th, tm }) => {
+      const setSel = (id, val) => {
+        const el = document.getElementById(id);
+        if (!el) return false;
+        const has = Array.from(el.options).some((o) => o.value === val);
+        if (!has) return false;
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      };
+      setSel('jsiRsvHour', hh);
+      setSel('jsiRsvMinute', mm);
+      setSel('jsiRsvTermHour', th);
+      setSel('jsiRsvTermMinute', tm);
+    },
+    { hh: String(when.hour), mm: startMM, th: termHourVal, tm: termMinVal },
+  ).catch(() => {});
+  // 反映確認 → ズレていたら Playwright の selectOption でもう一度。
+  await page.waitForTimeout(300);
+  const termOk = await page.evaluate(({ th, tm }) => {
+    const h = document.getElementById('jsiRsvTermHour');
+    const m = document.getElementById('jsiRsvTermMinute');
+    return !!h && !!m && h.value === th && m.value === tm;
+  }, { th: termHourVal, tm: termMinVal }).catch(() => false);
+  if (!termOk) {
+    await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
+    await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+  }
 
   // メニュー = ネット予約クーポン (任意)。menuTarget があれば label 完全一致 →
   // 部分一致で選ぶ。見つからなくても予約自体は続行する (メニュー無しで登録)。
@@ -2456,7 +2491,6 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMM = String(when.minute).padStart(2, '0');
-  const durMin = p.duration_min || 60;
 
   // 1) 変更画面を開く (ext → net)
   const candidates = [
@@ -2493,11 +2527,42 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     }, staffExt).catch(() => {});
   }
 
-  // 3) 時間・所要を更新 (登録フォームと同じセレクタ)
-  await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
-  await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
-  await page.locator('select#jsiRsvTermHour').first().selectOption({ value: String(Math.floor(durMin / 60) * 60) }).catch(() => {});
-  await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: String(durMin % 60).padStart(2, '0') }).catch(() => {});
+  // 3) 時間・所要を更新 (登録フォームと同じセレクタ)。所要は新規登録と同じ堅牢化:
+  //    JSで全selectをセット+change発火し、反映を検証してダメなら selectOption で再セット。
+  {
+    const dMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
+      ? Number(p.duration_min)
+      : 60;
+    const thVal = String(Math.floor(dMin / 60) * 60);
+    const tmVal = String(dMin % 60).padStart(2, '0');
+    await page.evaluate(
+      ({ hh, mm, th, tm }) => {
+        const setSel = (id, val) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          if (!Array.from(el.options).some((o) => o.value === val)) return;
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        setSel('jsiRsvHour', hh);
+        setSel('jsiRsvMinute', mm);
+        setSel('jsiRsvTermHour', th);
+        setSel('jsiRsvTermMinute', tm);
+      },
+      { hh: String(when.hour), mm: startMM, th: thVal, tm: tmVal },
+    ).catch(() => {});
+    await page.waitForTimeout(300);
+    const ok = await page.evaluate(({ th, tm }) => {
+      const h = document.getElementById('jsiRsvTermHour');
+      const m = document.getElementById('jsiRsvTermMinute');
+      return !!h && !!m && h.value === th && m.value === tm;
+    }, { th: thVal, tm: tmVal }).catch(() => false);
+    if (!ok) {
+      await page.locator('select#jsiRsvTermHour').first().selectOption({ value: thVal }).catch(() => {});
+      await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: tmVal }).catch(() => {});
+    }
+  }
 
   if (!enableChange) {
     return { status: 'confirm_only' };
