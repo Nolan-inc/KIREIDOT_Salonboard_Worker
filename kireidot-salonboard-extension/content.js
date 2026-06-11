@@ -263,14 +263,20 @@ async function runUpload(job) {
         if (ok === "error") {
           return { status: "uploaded_not_registered", reason: getValidationError(), value: uploadResult.value };
         }
+        // 登録成功時の external_id (画像ID B... / 完了画面の登録NID)。アップロード時に
+        // 取れた値を優先し、無ければ完了画面のフッター等から拾う。
+        const finalId = uploadResult.value || extractRegisteredId();
+        if (ok === "ok") {
+          return { status: "registered", value: finalId };
+        }
         if (ok === "timeout") {
           // 完了画面もエラーも確認できなかった。完了画面に居れば成功、そうでなければ
           // 「結果不明」として manualRequired 相当に倒す(再投稿で二重登録しないため
           //  registered は返さない)。
-          if (isRegisterDonePage()) return { status: "registered", value: uploadResult.value };
-          return { status: "register_result_unknown", reason: "登録ボタンは押しましたが完了画面を確認できませんでした。SalonBoardの掲載一覧で重複が無いか確認してください。", value: uploadResult.value };
+          if (isRegisterDonePage()) return { status: "registered", value: finalId };
+          return { status: "register_result_unknown", reason: "登録ボタンは押しましたが完了画面を確認できませんでした。SalonBoardの掲載一覧で重複が無いか確認してください。", value: finalId };
         }
-        return { status: "registered", value: uploadResult.value };
+        return { status: "registered", value: finalId };
       }
       return { status: "uploaded_no_register_btn", value: uploadResult.value };
     }
@@ -340,6 +346,23 @@ async function waitForRegisterResult(timeoutMs) {
     await sleep(500);
   }
   return "timeout";
+}
+
+// 登録完了画面/フォームから external_id (画像ID B... / 登録NID C...) を拾う。
+function extractRegisteredId() {
+  // 1) フォームの hidden / span (登録前から残っていることがある)。
+  const frontImg = document.querySelector("input[name='FRONT_IMG_ID'], #FRONT_IMG_ID");
+  if (frontImg && frontImg.value) return frontImg.value;
+  const span = document.getElementById("FRONT_IMG_ID_ID");
+  if (span && (span.textContent || "").trim()) return span.textContent.trim();
+  // 2) 完了画面フッター等の「登録NID(C0B4397)」「登録ID: B12345」風の表記。
+  const t = document.body?.innerText || "";
+  let m = t.match(/登録\s*N?ID[\s:：(（]*([A-Z]?\d{3,}[A-Z]?\d*)/i);
+  if (m) return m[1];
+  // 3) 本文中の B/C で始まる ID 候補 (最後の手段)。
+  m = t.match(/\b([BC]\d{4,})\b/);
+  if (m) return m[1];
+  return null;
 }
 
 // 登録完了画面かどうか (確定文言で判定)。
