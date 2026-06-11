@@ -496,9 +496,17 @@ function enqueueSerial(task) {
 const SLACK_DEDUP_MS = 60_000;
 const _slackRecent = new Map(); // key(本文) -> 最終送信epoch
 let _slackLastSentAt = 0;
+// 通知先の既定チャンネル。設定でチャンネルを空にしてもここへ送る。
+// https://nolan-co-jp.slack.com/archives/C0B9N3RA4BE
+const SLACK_DEFAULT_CHANNEL = 'C0B9N3RA4BE';
 
+function slackChannelOrDefault() {
+  return (deviceAuth && deviceAuth.slack && deviceAuth.slack.channel) || SLACK_DEFAULT_CHANNEL;
+}
+
+// トークンさえあれば有効 (チャンネルは未指定なら既定チャンネルへ)。
 function slackEnabled() {
-  return !!(deviceAuth && deviceAuth.slack && deviceAuth.slack.token && deviceAuth.slack.channel);
+  return !!(deviceAuth && deviceAuth.slack && deviceAuth.slack.token);
 }
 
 async function sendSlack(text) {
@@ -528,7 +536,7 @@ async function sendSlack(text) {
         Authorization: `Bearer ${deviceAuth.slack.token}`,
         'Content-Type': 'application/json; charset=utf-8',
       },
-      body: JSON.stringify({ channel: deviceAuth.slack.channel, text: `${prefix}\n${text}` }),
+      body: JSON.stringify({ channel: slackChannelOrDefault(), text: `${prefix}\n${text}` }),
     });
     const json = await res.json().catch(() => ({}));
     if (!json.ok) console.warn('[slack] notify failed', json.error);
@@ -621,7 +629,8 @@ async function initSupabase({
     // 実登録 (登録ボタンを押す) を許可するか。設定画面のトグル → main → ここへ。
     enablePush: !!enablePush,
     // Slack エラー通知。トークン+チャンネルが両方あるときだけ有効。
-    slack: (slackToken && slackChannel) ? { token: slackToken, channel: slackChannel } : null,
+    // トークンがあれば有効化 (チャンネル未指定なら既定チャンネルへ送る)。
+    slack: slackToken ? { token: slackToken, channel: slackChannel || null } : null,
   };
   if (!deviceAuth.apiBaseUrl || !deviceAuth.deviceToken) {
     log(
@@ -3728,7 +3737,8 @@ process.parentPort?.on('message', async (event) => {
                   slack: (() => {
                     const tok = d.slackToken !== undefined ? (d.slackToken || null) : (deviceAuth.slack?.token || null);
                     const ch = d.slackChannel !== undefined ? (d.slackChannel || null) : (deviceAuth.slack?.channel || null);
-                    return (tok && ch) ? { token: tok, channel: ch } : null;
+                    // トークンがあれば有効。チャンネル未指定なら既定チャンネルへ。
+                    return tok ? { token: tok, channel: ch || null } : null;
                   })(),
                 }
               : {}),

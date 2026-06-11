@@ -713,8 +713,8 @@ function DeviceConfigSection() {
                     Slack エラー通知 (任意)
                   </p>
                   <p className="text-[11px] text-muted">
-                    予約の登録・変更・キャンセル等でエラーが出たとき、指定の Slack
-                    チャンネルへ通知します。両方入力すると有効になります。
+                    予約の登録・変更・キャンセル等でエラーが出たとき、Slack へ通知します。
+                    Bot Token を入れれば有効になります(チャンネル未指定なら既定チャンネルへ送信)。
                   </p>
                   <LabeledInput
                     label="Slack Bot Token (xoxb-...)"
@@ -729,10 +729,10 @@ function DeviceConfigSection() {
                     mono
                   />
                   <LabeledInput
-                    label="通知先チャンネルID"
+                    label="通知先チャンネルID (任意)"
                     value={slackChannel}
                     onChange={setSlackChannel}
-                    placeholder="例: C0BAPMRQR2L"
+                    placeholder="未指定なら既定チャンネル (C0B9N3RA4BE) へ"
                     mono
                   />
                 </div>
