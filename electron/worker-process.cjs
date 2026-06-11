@@ -32,6 +32,7 @@ const {
   scrapeMenus,
   scrapeCoupons,
   scrapeBlogs,
+  scrapeReviews,
   scrapeShifts,
   scrapeCustomerDetails,
   pushBookingViaForm,
@@ -1499,6 +1500,28 @@ async function processShop(target, channels, runId, opts = {}) {
       }
     }
 
+    if (channelSet.has('reviews')) {
+      try {
+        emit('shop:progress', { shopId, step: 'reviews', msg: '口コミを取得中…' });
+        const { rows, debug } = await scrapeReviews(page, { genre });
+        const sent = await sendReviews(shopId, rows);
+        counts.reviews = sent;
+        summary.push(`口コミ ${sent} 件 (検出${debug?.itemsFound ?? rows.length})`);
+        emit('log', {
+          level: debug?.itemsFound ? 'info' : 'warn',
+          msg: `[${shopId.slice(0, 8)}] review scrape: 検出${debug?.itemsFound ?? 0}件 / ${debug?.pagesVisited ?? 0}ページ巡回(全${debug?.totalPages ?? '?'}) / url=${debug?.url ?? '?'}`,
+          at: new Date().toISOString(),
+        });
+        emit('shop:progress', { shopId, step: 'reviews', msg: `口コミ ${sent} 件保存` });
+      } catch (e) {
+        emit('log', {
+          level: 'warn',
+          msg: `[${shopId.slice(0, 8)}] review scrape error: ${e instanceof Error ? e.message : e}`,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
     if (channelSet.has('customers')) {
       try {
         emit('shop:progress', { shopId, step: 'customers', msg: '顧客詳細を取得中…' });
@@ -2308,6 +2331,25 @@ async function sendBlogs(shopId, rows) {
   return valid.length;
 }
 
+async function sendReviews(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const valid = rows.filter((r) => r.external_id);
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_reviews', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_reviews: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
 async function sendShifts(shopId, rows) {
   if (!rows || rows.length === 0) return 0;
   // 最低限 staff_external_id + shift_date が無いと UNIQUE 制約に当たって全件失敗するので捨てる
@@ -2451,7 +2493,7 @@ async function runPushJobs({ showBrowser } = {}) {
 
   // 1 ジョブを処理する (ブラウザ起動→ログイン→種別分岐→close)。
   // 店舗ごとに直列、店舗間は並列で呼ばれる。
-  const runOne = async (job) => {
+  const runOneInner = async (job) => {
     const payload = job.payload || {};
     const creds = job.credentials || {};
     const baseUrl = creds.base_url || 'https://salonboard.com/';
@@ -2772,6 +2814,39 @@ async function runPushJobs({ showBrowser } = {}) {
         });
       } catch (_e) { /* ignore */ }
       await browser?.close().catch(() => {});
+    }
+  };
+
+  // pushジョブも取得(sync)と同じ店舗ロックで相互排他にする。
+  // 同一SBアカウントに Playwright(取得/同期) と 普段使いChrome(拡張スタイル投稿) が
+  // 同時ログインすると SalonBoard が先のセッションを切り、ログイン⇄ログアウトの
+  // 無限ループになるため (12分毎の自動取得と拡張ジョブの衝突が実例)。
+  // 取得側は既にロック中の店舗を skip するので、こちらは「待ってから実行」する。
+  const runOne = async (job) => {
+    const shopId = job.shop_id;
+    const label = deviceAuth.workerId ?? 'electron-worker';
+    let locked = false;
+    if (shopId) {
+      const startedWait = Date.now();
+      let announced = false;
+      for (;;) {
+        const lock = tryAcquireShopLock(shopId, label);
+        if (lock.ok) { locked = true; break; }
+        if (Date.now() - startedWait > 10 * 60_000) {
+          emit('log', { level: 'warn', msg: `[push ${String(job.id).slice(0, 8)}] 店舗ロック待ちが10分を超えたため、そのまま実行します`, at: new Date().toISOString() });
+          break;
+        }
+        if (!announced) {
+          announced = true;
+          emit('log', { level: 'info', msg: `[push ${String(job.id).slice(0, 8)}] 同じ店舗の取得/同期が実行中のため、完了を待ってから書き込みます…`, at: new Date().toISOString() });
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+    try {
+      await runOneInner(job);
+    } finally {
+      if (locked && shopId) releaseShopLock(shopId);
     }
   };
 
