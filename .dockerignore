@@ -1,0 +1,16 @@
+node_modules
+dist
+electron
+renderer
+build-resources
+kireidot-salonboard-extension
+kireidot-salonboard-extension.zip
+salonboard_code
+scripts
+docs
+Untitled
+*.md
+.env*
+.git
+infra
+.github

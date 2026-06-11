@@ -1260,12 +1260,39 @@ async function captureRegisterDebug(
   }
 }
 
+// ------------------------------------------------------------
+// SIGTERM/SIGINT クリティカルセクション保護 (設計 §6.2)
+//
+// Fargate Spot 中断・ECS デプロイ drain は SIGTERM → (stopTimeout 後) SIGKILL で
+// 届く。登録ボタン押下後に SIGKILL されると登録成否が不明になり二重登録リスクが
+// 生じるため、停止要求は「ジョブ間 (main の stopping)」に加えて push_booking の
+// 「登録ボタン押下前」でも観測する:
+//   - 押下前に停止要求あり → 安全に中断して retryable_failed (再キューに任せる)
+//   - 押下後               → 中断せず callback まで完走する (stopTimeout=120s 内)
+// ------------------------------------------------------------
+let shutdownRequested = false;
+function requestShutdown(): void {
+  shutdownRequested = true;
+}
+function isShutdownRequested(): boolean {
+  return shutdownRequested;
+}
+
 async function pushBooking(
   page: Page,
   job: Job,
   p: PushBookingPayload,
 ): Promise<PushBookingResult> {
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
+
+  // 停止要求済みならブラウザ操作を始める前に中断 (drain を速くする)。
+  if (isShutdownRequested()) {
+    return fail(
+      "停止要求(SIGTERM)を受信したためジョブ開始前に中断しました (再試行可)",
+      "UNKNOWN_ERROR",
+      false,
+    );
+  }
 
   // --- payload バリデーション (致命的不足は manual_required) ---
   if (!p.booking_id || !p.scheduled_at) {
@@ -1570,6 +1597,19 @@ async function pushBooking(
     return fail("登録ボタン (登録する) が見つかりません", "UNKNOWN_ERROR", true);
   }
 
+  // --- クリティカルセクション境界 (設計 §6.2) ---
+  // ここが「登録ボタン押下前」の最終チェックポイント。停止要求を受けていたら
+  // 押さずに中断する (押下後の SIGKILL = 登録成否不明を避ける)。
+  // これより先 (click 以降) は停止要求があっても callback まで完走する。
+  if (isShutdownRequested()) {
+    await captureRegisterDebug(page, job, "aborted_before_register");
+    return fail(
+      "停止要求(SIGTERM)を受信したため登録ボタン押下前に中断しました (再試行可)",
+      "UNKNOWN_ERROR",
+      false,
+    );
+  }
+
   const beforeUrl = page.url();
   await Promise.all([
     page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {}),
@@ -1847,6 +1887,7 @@ async function main() {
   let stopping = false;
   const stop = () => {
     stopping = true;
+    requestShutdown(); // push_booking のクリティカルセクション保護にも伝える
     console.log("\n[boot] shutting down...");
   };
   process.on("SIGINT", stop);
@@ -1908,6 +1949,8 @@ export {
   readStorageState,
   saveStorageState,
   parseJstParts,
+  requestShutdown,
+  isShutdownRequested,
   ENABLE_PUSH,
   DRY_RUN,
 };

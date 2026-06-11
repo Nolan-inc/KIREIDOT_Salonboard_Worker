@@ -1,0 +1,10 @@
+{
+  "name": "kireidot-salonboard-worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "SalonBoard 同期 Worker (worker.ts) のコンテナ実行用ランタイム依存。Electron 同居の root package.json とは分離。",
+  "dependencies": {
+    "playwright": "1.59.1"
+  }
+}

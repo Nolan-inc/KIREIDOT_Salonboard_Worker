@@ -1,0 +1,93 @@
+name: Deploy SalonBoard Worker (ECS)
+
+# NOTE: AWS_DEPLOY_ROLE_ARN secret (terraform output github_deploy_role_arn) を
+# リポジトリに設定するまでは手動トリガーのみ。設定後に push トリガーを有効化する:
+#   push: { branches: [main], paths: ["worker.ts", "salonboard-selectors.ts",
+#           "salonboard-rescan.ts", "docker/**", ".github/workflows/deploy-worker.yml"] }
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC (長期アクセスキー不使用)
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REPOSITORY: kireidot-sb/salonboard-worker
+  ECS_CLUSTER: kireidot-sb-cluster
+  ECS_SERVICE: kireidot-sb-worker
+  TASK_FAMILY: kireidot-sb-worker
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker/package.json の playwright と Dockerfile のベースイメージタグの
+      # 厳密一致を機械チェック (乖離するとブラウザ起動に失敗するため)
+      - name: Verify playwright version match
+        run: |
+          PKG_VER=$(jq -r '.dependencies.playwright' docker/package.json)
+          IMG_VER=$(grep -oP 'ARG PLAYWRIGHT_VERSION=\K[0-9.]+' docker/Dockerfile)
+          echo "package.json=$PKG_VER Dockerfile=$IMG_VER"
+          test "$PKG_VER" = "$IMG_VER"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          APP_VERSION=$(jq -r '.version' package.json)
+          docker build \
+            -f docker/Dockerfile \
+            --build-arg APP_VERSION="$APP_VERSION" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            .
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+      # イメージ内で Chromium が実際に起動できることのスモークテスト
+      - name: Smoke test (chromium launch)
+        run: |
+          docker run --rm --entrypoint node \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" \
+            -e "import('playwright').then(async (m) => { const b = await m.chromium.launch(); const p = await b.newPage(); await p.goto('about:blank'); await b.close(); console.log('chromium ok'); })"
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+      - name: Push image
+        run: |
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+      # 現行タスク定義のイメージだけ差し替えて新リビジョン登録 → サービス更新。
+      # ECS rolling update は新タスク起動後に旧タスクへ SIGTERM (stopTimeout=120s drain)
+      # するため、実行中ジョブを落とさずデプロイできる
+      - name: Register task definition & update service
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+            --query taskDefinition --output json \
+          | jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" '
+              .containerDefinitions[0].image = $IMAGE
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                    .compatibilities, .registeredAt, .registeredBy)' \
+          > taskdef.json
+          NEW_ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "registered: $NEW_ARN"
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$NEW_ARN" >/dev/null
+          echo "service updated"
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
