@@ -14,6 +14,10 @@ output "task_definition_family" {
   value = aws_ecs_task_definition.worker.family
 }
 
+output "canary_task_definition_family" {
+  value = aws_ecs_task_definition.canary.family
+}
+
 output "private_subnet_ids" {
   value = aws_subnet.private[*].id
 }

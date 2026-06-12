@@ -91,3 +91,26 @@ resource "aws_ssm_parameter" "worker_token" {
     ignore_changes = [value]
   }
 }
+
+# Akamai カナリア用: テスト店舗の SalonBoard 認証情報 (Admin/ジョブキュー非依存)。
+#   aws ssm put-parameter --name /kireidot/worker/CANARY_LOGIN_ID --type SecureString --value '<id>' --overwrite
+#   aws ssm put-parameter --name /kireidot/worker/CANARY_PASSWORD --type SecureString --value '<pw>' --overwrite
+resource "aws_ssm_parameter" "canary_login_id" {
+  name  = "/kireidot/worker/CANARY_LOGIN_ID"
+  type  = "SecureString"
+  value = "CHANGE_ME"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "canary_password" {
+  name  = "/kireidot/worker/CANARY_PASSWORD"
+  type  = "SecureString"
+  value = "CHANGE_ME"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}

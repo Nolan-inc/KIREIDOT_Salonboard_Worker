@@ -22,9 +22,13 @@ resource "aws_iam_role_policy" "task_execution_ssm" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameters"]
-      Resource = [aws_ssm_parameter.worker_token.arn]
+      Effect = "Allow"
+      Action = ["ssm:GetParameters"]
+      Resource = [
+        aws_ssm_parameter.worker_token.arn,
+        aws_ssm_parameter.canary_login_id.arn,
+        aws_ssm_parameter.canary_password.arn,
+      ]
     }]
   })
 }

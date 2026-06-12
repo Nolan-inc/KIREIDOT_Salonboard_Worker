@@ -1917,6 +1917,10 @@ function sleep(ms: number) {
 // 実行ファイル (process.argv[1]) の一致で行う。
 const IS_WORKER_ENTRYPOINT = (() => {
   try {
+    // canary (CANARY_MODE=1) は worker を import して関数を再利用するだけ。
+    // esbuild バンドルでは import.meta.url が出力ファイルと一致してしまうため、
+    // entrypoint 判定より先に明示的に除外する (ポーリングループを起動しない)。
+    if (process.env.CANARY_MODE === "1") return false;
     const entry = process.argv[1];
     if (!entry) return true; // 判定材料が無ければ従来どおり起動 (後方互換)
     const entryUrl = new URL(`file://${resolve(entry)}`).href;

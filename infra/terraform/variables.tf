@@ -15,8 +15,9 @@ variable "vpc_cidr" {
 }
 
 variable "kireidot_api_url" {
-  description = "KireidotAdmin の API ベース URL (例: https://admin.kireidot.jp)"
+  description = "KireidotAdmin の API ベース URL (例: https://admin.kireidot.jp)。worker Service を動かす Phase 1 までに実値へ更新すること (カナリアは未使用)"
   type        = string
+  default     = "https://CHANGE-ME.invalid"
 }
 
 variable "poll_interval_ms" {

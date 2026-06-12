@@ -78,6 +78,50 @@ resource "aws_ecs_task_definition" "worker" {
   }])
 }
 
+# Akamai カナリア (Phase 0): Admin/ジョブキューに触れない読み取り専用ループ。
+# Service は作らず `aws ecs run-task` で 1 個だけ手動起動する (docs/aws-migration.md)。
+resource "aws_ecs_task_definition" "canary" {
+  family                   = "${var.name}-canary"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.worker_cpu
+  memory                   = var.worker_memory
+  execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
+  container_definitions = jsonencode([{
+    name        = "canary"
+    image       = "${aws_ecr_repository.worker.repository_url}:latest"
+    essential   = true
+    stopTimeout = 120
+
+    environment = [
+      { name = "CANARY_MODE", value = "1" },
+      { name = "CANARY_INTERVAL_MS", value = "300000" },
+      { name = "CANARY_SHOP_LABEL", value = "phase0-canary" },
+    ]
+
+    secrets = [
+      { name = "SALONBOARD_LOGIN_ID", valueFrom = aws_ssm_parameter.canary_login_id.arn },
+      { name = "SALONBOARD_PASSWORD", valueFrom = aws_ssm_parameter.canary_password.arn },
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.worker.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "canary"
+      }
+    }
+  }])
+}
+
 resource "aws_ecs_service" "worker" {
   name            = "${var.name}-worker"
   cluster         = aws_ecs_cluster.main.id
