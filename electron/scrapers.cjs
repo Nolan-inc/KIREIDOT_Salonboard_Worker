@@ -556,6 +556,18 @@ async function applyBookingDateFilter(page, { fromStr, toStr }, { diag } = {}) {
           page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
           loc.click({ timeout: 5000 }),
         ]);
+        // waitForLoadState はクリック時点のページが読み込み済みだと「即解決」する。
+        // その場合、後続の抽出が検索前の旧 DOM (結果テーブル無し) を読んで
+        // 検出0 になる (間欠的な「予約 0/0件」の正体)。
+        // 結果ページ URL (/reserveList/search) と結果テーブルの出現を明示的に待つ。
+        await page
+          .waitForURL(/\/reserveList\/(search|changePage)/, { timeout: 20_000 })
+          .catch(() => {});
+        const resultVisible = await page
+          .waitForSelector('#resultList, table.reserveSearchResultTable', { timeout: 10_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!resultVisible) report('result table not visible after submit (該当0件 or 結果ページ未到達)');
         await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
         report(`clicked submit: ${sel}`);
         await snapshot('after-submit');
@@ -1062,7 +1074,37 @@ async function scrapeBookings(page, opts = {}) {
     }
     visitedPageHashes.add(sig);
 
-    // 「次へ」 / ">" / 「次のページ番号」を辿る
+    // ページ送り: まず「次へ」リンクの href (changePage?pn=N) を読んで直接 GET する。
+    // クリック方式は waitForLoadState の即解決レースや href="#" の番号リンクが
+    // 効かないケースがあり、同一ページを重複取得→ループ誤検知で打ち切られていた。
+    let advanced = false;
+    const onKnownResultPage = /\/reserveList\/(search|changePage)/.test(page.url());
+    try {
+      const nextHref = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll('a[href*="changePage"]'));
+        const next = links.find((a) => /次へ/.test((a.textContent || '').trim()));
+        return next ? next.getAttribute('href') : null;
+      });
+      if (nextHref) {
+        const nextUrl = new URL(nextHref, page.url()).toString();
+        await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page
+          .waitForSelector('#resultList, table.reserveSearchResultTable', { timeout: 10_000 })
+          .catch(() => {});
+        advanced = true;
+        diag.push(`page ${pageNum}: goto ${nextHref}`);
+      } else if (onKnownResultPage) {
+        // 既知の結果ページで「次へ」が無い = 最終ページ。クリック式フォールバックに
+        // 落とすと「次の月」(カレンダーの月送り) や月番号リンク (1〜12, href="#") を
+        // 誤クリックして同一結果を重複取得→ループ誤検知になるため、ここで終了する。
+        diag.push(`page ${pageNum}: no 次へ link, last page`);
+        break;
+      }
+    } catch (e) {
+      diag.push(`page ${pageNum}: next goto failed (${e?.message ?? e})`);
+    }
+
+    // フォールバック: 「次へ」 / ">" / 「次のページ番号」をクリックで辿る
     const nextSelectors = [
       'a:has-text("次へ"):not(.disabled)',
       'a:has-text("次"):not(:has-text("次回"))',
@@ -1072,8 +1114,8 @@ async function scrapeBookings(page, opts = {}) {
       'a.pagerNext',
       // ページ番号リンクで「次の番号」を探す → 後段の JS で
     ];
-    let advanced = false;
     for (const sel of nextSelectors) {
+      if (advanced) break;
       const loc = page.locator(sel).first();
       if ((await loc.count()) === 0) continue;
       try {
