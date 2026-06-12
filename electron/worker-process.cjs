@@ -3074,10 +3074,10 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery を処理する。
+    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery / push_shifts を処理する。
     const handled = [];
     for (const j of claimedJobs) {
-      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery') {
+      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery' && j.job_type !== 'push_shifts') {
         await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
         drainedOther++;
       } else {
