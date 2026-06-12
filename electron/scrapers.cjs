@@ -2365,14 +2365,46 @@ async function scrapeShiftPatterns(page, baseUrl) {
   //     登録済みテーブル: #openTimeArea table の各行 (tr)
   //       td[0]=シフト名称, td[1]=短縮名, td[2]=設定時間(span 開始 / span 終了),
   //       削除チェックボックス input[name=deleteShiftIds][value=S…] (=external_id)
-  const diag = {};
-  try {
-    await page.goto(new URL('/KLP/set/workPatternSetup/', base).toString(), {
-      waitUntil: 'domcontentloaded', timeout: 25_000,
-    });
-  } catch (e) {
-    diag.gotoError = String(e?.message ?? e).slice(0, 80);
+  const diag = { tried: [] };
+  const isReached = async () =>
+    (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0;
+
+  // (1) 直接 goto を複数プレフィックスで試す (店舗ジャンルで KLP/CNK が異なる)。
+  for (const path of ['/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
+    try {
+      await page.goto(new URL(path, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    } catch (e) {
+      diag.tried.push({ path, err: String(e?.message ?? e).slice(0, 60) });
+      continue;
+    }
+    diag.tried.push({ path, url: page.url().replace('https://salonboard.com', '') });
+    if (await isReached()) break;
   }
+
+  // (2) 直接で開けない場合: スタッフ設定ページ経由で「勤務パターン登録」リンクを辿る。
+  //   勤務パターン登録は「スタッフ設定」配下の画面で、直接URLだと
+  //   「情報が一部失われています」で弾かれることがある。
+  if (!(await isReached())) {
+    for (const staffPath of ['/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
+      try {
+        await page.goto(new URL(staffPath, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      } catch (_e) { continue; }
+      if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) break;
+      // 「勤務パターン登録」へのリンク (テキスト or href) を探してクリック
+      const link = page
+        .locator('a:has-text("勤務パターン"), a[href*="workPatternSetup"]')
+        .first();
+      if ((await link.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', { timeout: 15_000 }).catch(() => {}),
+          link.click({ timeout: 10_000 }).catch(() => {}),
+        ]);
+        diag.tried.push({ via: staffPath, url: page.url().replace('https://salonboard.com', '') });
+        if (await isReached()) break;
+      }
+    }
+  }
+
   diag.url = page.url().replace('https://salonboard.com', '');
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
@@ -2382,11 +2414,11 @@ async function scrapeShiftPatterns(page, baseUrl) {
   }
 
   // フォーム到達確認 (勤務パターン登録画面)
-  const reached = (await page.locator('#workPatternSetup, #openTimeArea').count().catch(() => 0)) > 0;
+  const reached = await isReached();
   diag.reached = reached;
   if (!reached) {
     const err = new Error(
-      `勤務パターン登録画面を開けませんでした (url=${diag.url})。予約同期くんがSalonBoardにログインできているか確認してください。`,
+      `勤務パターン登録画面を開けませんでした (最終URL=${diag.url})。SalonBoardの「スタッフ設定 > 勤務パターン登録」に手動でアクセスできるか、予約同期くんがログインできているか確認してください。`,
     );
     err.code = 'SHIFT_PATTERNS_UNREACHABLE';
     err.diag = diag;
