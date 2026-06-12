@@ -767,7 +767,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -810,7 +810,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts', 'fetch_shift_patterns'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -1661,21 +1661,8 @@ async function processShop(target, channels, runId, opts = {}) {
           at: new Date().toISOString(),
         });
       }
-      // 勤務パターン (全日/土日祝早 等) も取得して DB へ。
-      // Admin のシフトパターン紐付けUIのデータソースになる。失敗しても同期は続行。
-      try {
-        const pats = await scrapeShiftPatterns(page, baseUrl);
-        if (pats.length > 0) {
-          await sendShiftPatterns(shopId, pats);
-          emit('shop:progress', { shopId, step: 'shifts', msg: `勤務パターン ${pats.length} 件保存` });
-        }
-      } catch (e) {
-        emit('log', {
-          level: 'warn',
-          msg: `[${shopId.slice(0, 8)}] shift patterns scrape error: ${e instanceof Error ? e.message : e}`,
-          at: new Date().toISOString(),
-        });
-      }
+      // 勤務パターンの取得は毎時同期では行わない (Adminのシフトパターン設定の
+      // 「SalonBoardから同期」ボタン = fetch_shift_patterns ジョブでのみ取得)。
     }
 
     await markCredentialSuccess(shopId);
@@ -2785,6 +2772,7 @@ async function runPushJobs({ showBrowser } = {}) {
       const isPhotoGallery = job.job_type === 'push_photo_gallery';
       const isReviewReply = job.job_type === 'push_review_reply';
       const isShifts = job.job_type === 'push_shifts';
+      const isFetchShiftPatterns = job.job_type === 'fetch_shift_patterns';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -2902,6 +2890,26 @@ async function runPushJobs({ showBrowser } = {}) {
             error_code: result.errorCode, error: result.reason, manual_required: toManual,
           });
           emit('log', { level: 'warn', msg: `[${tag}] フォトギャラリー: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isFetchShiftPatterns) {
+        // ---- 勤務パターン取得 (シフトパターン設定の「SalonBoardから同期」ボタン) ----
+        try {
+          const pats = await scrapeShiftPatterns(page, baseUrl);
+          const sent = await sendShiftPatterns(job.shop_id, pats);
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_shift_patterns', status: 'succeeded',
+            summary: `勤務パターン ${sent} 件取得`,
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ 勤務パターン ${sent} 件取得`, at: new Date().toISOString() });
+        } catch (e) {
+          const toManual = exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_shift_patterns',
+            status: toManual ? 'manual_required' : 'retryable_failed',
+            error_code: 'UNKNOWN_ERROR', error: `勤務パターン取得に失敗: ${e?.message ?? e}`,
+            manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 勤務パターン取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
       } else if (isShifts) {
         // ---- シフト反映 (KIREIDOT shifts → SalonBoard シフト設定) ----
@@ -3118,7 +3126,7 @@ async function runPushJobs({ showBrowser } = {}) {
     // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery / push_shifts を処理する。
     const handled = [];
     for (const j of claimedJobs) {
-      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery' && j.job_type !== 'push_shifts') {
+      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery' && j.job_type !== 'push_shifts' && j.job_type !== 'fetch_shift_patterns') {
         await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
         drainedOther++;
       } else {
