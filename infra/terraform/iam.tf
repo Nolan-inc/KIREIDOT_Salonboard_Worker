@@ -73,9 +73,14 @@ resource "aws_iam_role_policy" "task_s3" {
 }
 
 # ---- GitHub Actions OIDC デプロイロール (長期キー不使用) ----
-data "aws_iam_openid_connect_provider" "github" {
-  count = var.github_repo == "" ? 0 : 1
-  url   = "https://token.actions.githubusercontent.com"
+# アカウントに OIDC プロバイダが未作成だったため Terraform 管理で作成する。
+# thumbprint は 2023 年以降 AWS 側でGitHub のルート CA を信頼するため実質未使用だが、
+# API 上必須のためプレースホルダを渡す。
+resource "aws_iam_openid_connect_provider" "github" {
+  count           = var.github_repo == "" ? 0 : 1
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["ffffffffffffffffffffffffffffffffffffffff"]
 }
 
 resource "aws_iam_role" "github_deploy" {
@@ -85,7 +90,7 @@ resource "aws_iam_role" "github_deploy" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Federated = data.aws_iam_openid_connect_provider.github[0].arn }
+      Principal = { Federated = aws_iam_openid_connect_provider.github[0].arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
