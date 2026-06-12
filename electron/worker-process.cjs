@@ -37,6 +37,7 @@ const {
   scrapeCustomerDetails,
   pushBookingViaForm,
   pushScheduleViaForm,
+  deleteScheduleViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
@@ -2865,15 +2866,24 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isCancel) {
         // ---- キャンセル ----
-        const result = await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
+        // 休憩・業務(booking_type='block')は SalonBoard では「予約」ではなく「予定」
+        // として登録されているため、予約キャンセルではなくスケジュール画面から
+        // 予定そのものを削除する (deleteScheduleViaForm)。
+        const isBlockSchedule = payload.booking_type === 'block';
+        const result = isBlockSchedule
+          ? await deleteScheduleViaForm(page, payload, { baseUrl, enableDelete: enablePush })
+          : await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking', status: 'succeeded',
-            booking_id: payload.booking_id, summary: 'cancel_booking 完了',
+            booking_id: payload.booking_id,
+            summary: isBlockSchedule
+              ? `cancel_booking 完了 (予定削除${result.alreadyAbsent ? ': 既に削除済み' : ''})`
+              : 'cancel_booking 完了',
             // 一覧検索で reserveId を特定できた場合は callback に渡して bookings に焼き直す。
             external_id: result.recoveredReserveId || result.externalId || null,
           });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard キャンセル完了${result.recoveredReserveId ? ` (reserveId回収=${result.recoveredReserveId})` : ''}`, at: new Date().toISOString() });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard ${isBlockSchedule ? '予定削除' : 'キャンセル'}完了${result.recoveredReserveId ? ` (reserveId回収=${result.recoveredReserveId})` : ''}${result.alreadyAbsent ? ' (既に削除済み)' : ''}`, at: new Date().toISOString() });
         } else if (result.status === 'confirm_only') {
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking', status: 'manual_required',

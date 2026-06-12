@@ -1,0 +1,81 @@
+<!--
+  SalonBoard エステ(esthe) 口コミ返信入力 — 実DOM参照
+  URL: https://salonboard.com/KLP/review/reviewReply/?reviewId=R080299137
+  （美容室は /CLP/bt/review/reviewReply/R080299137 形式。フォーム構造は共通想定）
+
+  scraper: electron/scrapers.cjs postReviewReplyViaForm(page, payload, opts)
+  job_type: push_review_reply (KIREIDOT→SB の書き込み)
+
+  入力要素:
+    - 返信者名: input#replyFrom (name=replyFrom, maxlength 40, autocomplete off・必須)
+    - 返信本文: textarea (500文字以下 / 改行80回以下。カウンタ span#id_reply_counter "0/500")
+    - 確認: a#replyConfirm.mod_btn_confirm_04 「確認する」 → 確認画面 → 最終「登録する」
+    - 戻る: a#back (/KLP/review/reviewList/doList/)
+
+  ※NG例(SB注意書き): 投稿者の実名(本名)を書かない / ニックネーム表記ミス /
+    本サービスの仕様・機能への言及(審査・不具合) / 他店(姉妹店)紹介。
+-->
+<div class="section">
+  <div class="mod_title01_02 cf">
+    <h1 class="ttl">口コミ返信入力</h1>
+  </div>
+
+  <!-- 口コミ投稿情報 (参考表示。スクレイプ対象ではない) -->
+  <div class="mod_title02 mt20"><h2 class="ttl cf">口コミ投稿情報</h2></div>
+  <table class="mod_table01 w980 mt20 wdbr_break_all" style="table-layout: fixed;">
+    <tbody>
+      <tr><th class="w130 mod_middle bold">管理番号</th><td colspan="4">R080299137</td></tr>
+      <tr><th class="mod_middle bold">予約番号</th><td colspan="4">BF10899200</td></tr>
+      <tr><th class="mod_middle bold">予約者名</th><td colspan="4">矢崎 結衣 （お客様番号：-）</td></tr>
+      <tr><th class="mod_middle bold">ニックネーム</th><td colspan="4">やっちー</td></tr>
+      <tr><th class="mod_middle bold">スタッフ</th><td colspan="4">momoka</td></tr>
+      <tr><th class="mod_middle bold">来店日</th><td colspan="4">2026年6月10日（水）</td></tr>
+      <tr><th class="mod_middle bold">メニュー</th><td colspan="4">フェイシャル＋ブライダル<br>(所要目安時間 2時間)</td></tr>
+      <tr><th class="bg_fbf7ec">技術・仕上がり</th><td class="w162">4</td></tr>
+      <tr><th class="bg_fbf7ec">接客サービス</th><td>5</td><th class="bg_fbf7ec">メニュー・料金</th><td>3</td></tr>
+      <tr><th class="bg_fbf7ec">総合満足度</th><td colspan="3">4</td></tr>
+    </tbody>
+  </table>
+
+  <!-- 返信内容入力 (スクレイプ/入力対象) -->
+  <div class="mod_title02 mt40"><h2 class="ttl cf">口コミ返信内容</h2></div>
+
+  <div class="mod_title03_02 mt20 cf">
+    <h3 class="ttl">返信内容入力：</h3>
+    <p class="txt_option mod_icon_01 mod_weight_bold fs12">必須項目</p>
+  </div>
+  <table class="mod_table01 w980 mt5" style="table-layout: fixed;">
+    <tbody>
+      <tr class="mod_middle">
+        <th class="w130 bold">返信者</th>
+        <td>
+          <div class="mod_column04 pr10">
+            <!-- 返信者名 input (必須・40文字) -->
+            <input type="text" name="replyFrom" maxlength="40" size="35" autocomplete="off" value="" id="replyFrom" class="w400">
+          </div>
+        </td>
+      </tr>
+      <tr class="mod_middle">
+        <th class="w130 bold">返信内容</th>
+        <td>
+          <!-- 返信本文 textarea (500文字以下/改行80回以下)。name は環境により replyContents 等 -->
+          <textarea name="replyContents" id="replyContents" cols="80" rows="8" class="w980"></textarea>
+          <p class="mt5">
+            ※1 500文字以下<br>
+            ※2 改行80回以下<br>
+            <br>
+            &nbsp;<span id="id_reply_counter">0/500</span>
+          </p>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ボタン: 戻る / 確認する -->
+  <div class="mod_column03 mod_box_01 mt30 cf">
+    <div class="w228 mod_box_center">
+      <a href="/KLP/review/reviewList/doList/" id="back" class="columnBlock mod_btn_back_02 mr5">戻る</a>
+      <a href="javascript:void(0);" class="columnBlock mod_btn_confirm_04" id="replyConfirm">確認する</a>
+    </div>
+  </div>
+</div>

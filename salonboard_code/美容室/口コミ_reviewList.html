@@ -1,0 +1,121 @@
+<!--
+  SalonBoard 美容室(hair) 口コミ一覧 — 実DOM参照
+  URL: https://salonboard.com/CLP/bt/review/reviewList/   (ページング: ?pn=2 ...)
+  ※ エステは /KLP/review/reviewList/ (prefix が異なる)。テーブル構造(table.mod_table03)は共通。
+
+  scraper: electron/scrapers.cjs scrapeReviews(page, { genre })
+  列: 0=ピックアップ(radio name="pickUpReview" value=管理番号) / 1=管理番号 /
+      2=投稿日時(br区切り 日付+時刻) / 3=来店日 / 4=予約者名(br お客様番号) /
+      5=担当スタイリスト / 6=本文(末尾省略 …) / 7=返信状況(a.mod_btn_mihenshin=未返信 /
+      a.mod_btn_henshinzumi=返信済 + 審査状況テキスト)
+  返信ページ: <a href="/CLP/bt/review/reviewReply/R080293848">  (美容室)
+              <a href="/KLP/review/reviewReply/?reviewId=R...">  (エステ)
+-->
+<div class="section">
+  <div class="mod_title01_02 cf">
+    <h1 class="ttl">口コミ一覧</h1>
+  </div>
+  <ul class="mt15">
+    <li>HOT PEPPER Beauty予約に対して投稿された、お客様からの口コミの確認・返信ができます。</li>
+  </ul>
+
+  <div class="mod_column01 cf">
+    <div class="columnBlock w240">
+      <h3 class="mod_title03 mt20">口コミ表示切替</h3>
+      <select name="reviewListTypeCd" id="search_review" class="w192 mt5">
+        <option value="0" selected="selected">すべての口コミ</option>
+        <option value="1">未確認の口コミ</option>
+        <option value="2">未返信の口コミ</option>
+        <option value="3">編集中</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ページング: <p class="page mod_font01">1/75ページ</p> / <p class="next"><a href="/CLP/bt/review/reviewList/?pn=2">次へ</a></p> -->
+  <div class="paging">
+    <p class="prev_disable"><span>前へ</span></p>
+    <p class="page mod_font01">1/75ページ</p>
+    <p class="next"><a href="/CLP/bt/review/reviewList/?pn=2">次へ</a></p>
+  </div>
+
+  <table class="mod_table03 w980 mt15">
+    <tbody>
+      <tr class="mod_middle">
+        <th class="w75">ピックアップ</th>
+        <th class="w60">管理番号</th>
+        <th class="w96">口コミ<br>投稿日時</th>
+        <th class="w48">来店日</th>
+        <th class="w90">予約者名<br>（お客様番号）</th>
+        <th class="w100">担当スタイリスト</th>
+        <th class="w160">本文</th>
+        <th class="w92">返信(審査状況)</th>
+      </tr>
+
+      <!-- ピックアップ設定済みの例 (radio checked + p.mod_pickup01) -->
+      <tr class="mod_middle">
+        <td>
+          <p class="mod_pickup01">Pick Up</p>
+          <input type="radio" name="pickUpReview" value="R080029621" checked="">
+        </td>
+        <td>R080029621</td>
+        <td>2026/05/21<br>—</td>
+        <td>2026/<br>05/21</td>
+        <td class="wdbr_break_all">荒井 美優<br>（-）</td>
+        <td class="wdbr_break_all">稲村 聖空</td>
+        <td class="mod_left wdbr_break_all">2年間伸ばしてきた髪を、今回思い切ってバッサリ切っていただき…</td>
+        <td>
+          <a href="/CLP/bt/review/reviewReply/R080029621" class="mod_btn_henshinzumi">返信済</a>
+          審査OK(掲載中)
+        </td>
+      </tr>
+
+      <!-- 未返信の例 -->
+      <tr class="mod_middle">
+        <td><input type="radio" name="pickUpReview" value="R080293848"></td>
+        <td>R080293848</td>
+        <td>2026/06/10<br>18:24</td>
+        <td>2026/<br>06/10</td>
+        <td class="wdbr_break_all">宮本 結生<br>（-）</td>
+        <td class="wdbr_break_all">谷橋 龍也</td>
+        <td class="mod_left wdbr_break_all">丁寧にしていただけました</td>
+        <td>
+          <a href="/CLP/bt/review/reviewReply/R080293848" class="mod_btn_mihenshin">未返信</a>
+          -
+        </td>
+      </tr>
+
+      <tr class="mod_middle">
+        <td><input type="radio" name="pickUpReview" value="R080215312"></td>
+        <td>R080215312</td>
+        <td>2026/06/08<br>12:30</td>
+        <td>2026/<br>05/31</td>
+        <td class="wdbr_break_all">梅田 裕美<br>（-）</td>
+        <td class="wdbr_break_all">木下 秀斗</td>
+        <td class="mod_left wdbr_break_all">セットの仕方も教えてもらえてよかったです。</td>
+        <td>
+          <a href="/CLP/bt/review/reviewReply/R080215312" class="mod_btn_mihenshin">未返信</a>
+          -
+        </td>
+      </tr>
+
+      <tr class="mod_middle">
+        <td><input type="radio" name="pickUpReview" value="R080161047"></td>
+        <td>R080161047</td>
+        <td>2026/06/06<br>21:42</td>
+        <td>2026/<br>06/06</td>
+        <td class="wdbr_break_all">内藤 央乃<br>（-）</td>
+        <td class="wdbr_break_all">ニシヤマ ユーキ</td>
+        <td class="mod_left wdbr_break_all">こんな風にしてほしいと思っていた通りのカットとカラーになって…</td>
+        <td>
+          <a href="/CLP/bt/review/reviewReply/R080161047" class="mod_btn_henshinzumi">返信済</a>
+          審査OK(掲載中)
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ピックアップ口コミ更新ボタン (1つのみ設定可) -->
+  <div class="mod_column02 mt15 cf">
+    <a href="javascript:void(0);" id="pickup" class="columnBlock mod_btn_update_01 mr10">ピックアップ口コミを更新</a>
+  </div>
+</div>

@@ -17,6 +17,7 @@
 | `スタイル登録_styleEdit.html` | スタイル掲載情報編集/登録（新規追加=`addStyle`） | `https://salonboard.com/CNB/draft/styleEdit/`（POST: `/doRegister`） | ✅ **postHairStyleViaForm**（フォトギャラリー自動投稿 kind=style） |
 | `予約一覧フォーム_hairReservations.html` | 予約一覧の検索フォーム(React SPA) | `https://salonboard.com/CLS/hair/reservations/init/` | 不使用(スケジュール方式に変更) |
 | `スケジュール_salonSchedule.html` | スケジュール(予約明細あり) | `https://salonboard.com/CLP/bt/schedule/salonSchedule/?date=YYYYMMDD` | ✅ **scrapeHairBookings (本採用)** |
+| `口コミ_reviewList.html` | 口コミ一覧 | `https://salonboard.com/CLP/bt/review/reviewList/`（ページング `?pn=N`） | ✅ **scrapeReviews**（テーブル `table.mod_table03` はエステと共通。返信URLが `/CLP/bt/review/reviewReply/R...`） |
 
 ## ⚠️ 重要: 予約一覧は React製SPA (エステの旧式フォームと別物)
 

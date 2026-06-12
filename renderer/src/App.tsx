@@ -9,6 +9,7 @@ import { Coupons } from './pages/Coupons';
 import { Shifts } from './pages/Shifts';
 import { Styles } from './pages/Styles';
 import { Blog } from './pages/Blog';
+import { Reviews } from './pages/Reviews';
 import { Settings } from './pages/Settings';
 import { SalonboardPage } from './pages/Salonboard';
 import { ShopList } from './pages/ShopList';
@@ -55,6 +56,7 @@ function Routes() {
       {active === 'shifts' && selectedShopId && <Shifts />}
       {active === 'styles' && selectedShopId && <Styles />}
       {active === 'blog' && selectedShopId && <Blog />}
+      {active === 'reviews' && selectedShopId && <Reviews />}
       {active === 'salonboard' && <SalonboardPage />}
       {active === 'settings' && <Settings />}
     </AppShell>

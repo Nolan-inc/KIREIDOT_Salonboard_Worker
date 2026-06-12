@@ -8,6 +8,7 @@ import {
   Scissors,
   Ticket,
   Link2,
+  MessageSquareText,
   Settings as SettingsIcon,
   Store,
   type LucideIcon,
@@ -23,6 +24,7 @@ export type NavKey =
   | 'shifts'
   | 'styles'
   | 'blog'
+  | 'reviews'
   | 'salonboard'
   | 'settings';
 
@@ -95,6 +97,12 @@ export const NAV_ITEMS: NavItem[] = [
     icon: Newspaper,
   },
   {
+    key: 'reviews',
+    label: '口コミ',
+    description: 'SalonBoard の口コミ確認・AI返信案の生成',
+    icon: MessageSquareText,
+  },
+  {
     key: 'settings',
     label: '設定',
     description: 'アカウント・各種設定',
@@ -112,6 +120,7 @@ const SHOP_SCOPED_KEYS: ReadonlySet<NavKey> = new Set<NavKey>([
   'shifts',
   'styles',
   'blog',
+  'reviews',
 ]);
 
 /**

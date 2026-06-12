@@ -451,6 +451,53 @@ export async function fetchMenusMerged(scope: StaffScope): Promise<MergedMenuRow
 }
 
 // =========================
+// 口コミ (サロンボード由来) — salonboard_review_imports を読む
+// =========================
+export type ReviewRow = {
+  id: string;
+  external_id: string;
+  posted_at_label: string | null;
+  visit_date_label: string | null;
+  customer_name: string | null;
+  staff_name: string | null;
+  body_excerpt: string | null;
+  reply_status: 'unreplied' | 'replied';
+  audit_status: string | null;
+  reply_url: string | null;
+  ai_reply_draft: string | null;
+  ai_reply_generated_at: string | null;
+};
+
+export async function fetchReviewList(scope: StaffScope): Promise<ReviewRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_review_imports')
+    .select(
+      'id, external_id, posted_at_label, visit_date_label, customer_name, staff_name, body_excerpt, reply_status, audit_status, reply_url, ai_reply_draft, ai_reply_generated_at',
+    )
+    .eq('shop_id', scope.shopId)
+    .order('posted_at_label', { ascending: false, nullsFirst: false });
+  if (error) {
+    console.warn('[data] fetchReviewList error:', error.message);
+    return [];
+  }
+  return (data ?? []) as ReviewRow[];
+}
+
+/** AI 返信案を保存する (生成は Admin API、保存は RLS update で本人店舗のみ可)。 */
+export async function saveReviewAiReply(reviewId: string, reply: string): Promise<boolean> {
+  const { error } = await supabase
+    .from('salonboard_review_imports')
+    .update({ ai_reply_draft: reply, ai_reply_generated_at: new Date().toISOString() })
+    .eq('id', reviewId);
+  if (error) {
+    console.warn('[data] saveReviewAiReply error:', error.message);
+    return false;
+  }
+  return true;
+}
+
+// =========================
 // クーポン (サロンボード由来) — salonboard_coupon_imports を読む
 // ホットペッパー上ではメニューとクーポンは別概念なので別テーブル。
 // =========================

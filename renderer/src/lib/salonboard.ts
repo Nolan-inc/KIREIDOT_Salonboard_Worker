@@ -204,6 +204,36 @@ export async function fetchDeviceOverview(): Promise<DeviceOverviewResult> {
 }
 
 // ---------------------------------------------------------------------------
+// 口コミへの AI 返信案生成
+//   POST /api/salonboard/review-reply  { review_id }
+//   Admin 側で OpenAI 生成 + ai_reply_draft 保存 → 返信文を返す。
+// ---------------------------------------------------------------------------
+export type GenerateReviewReplyResult =
+  | { ok: true; reply: string }
+  | { ok: false; error: string };
+
+export async function generateReviewReply(reviewId: string): Promise<GenerateReviewReplyResult> {
+  const base = adminApiBase();
+  const headers = deviceAuthHeaders();
+  if (!base) return { ok: false, error: 'API URL が未設定です (VITE_KIREIDOT_API_URL)' };
+  if (!headers) return { ok: false, error: 'デバイス認証が未設定です (設定でトークンを登録してください)' };
+  try {
+    const res = await fetch(`${base}/api/salonboard/review-reply`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ review_id: reviewId }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) {
+      return { ok: false, error: (json && json.error) || `http_${res.status}` };
+    }
+    return { ok: true, reply: String(json.reply ?? '') };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ? String(e.message) : 'network_error' };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // device 認証経由の「新規予約作成 → SalonBoard 書き戻し」
 //
 // 予約同期くんの画面から予約を作る。Worker は顧客マスタや Admin の

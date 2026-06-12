@@ -2078,6 +2078,216 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
 }
 
+// =====================================================================
+// 予定削除 (KIREIDOT のブロック予約のキャンセル/削除 → SalonBoard の「予定」削除)
+//   予定は reserveId を持たないため、スケジュール画面の予定ブロック
+//   (.jscScheduleToDo) を「スタッフ列 + 開始時刻 (+タイトル)」で特定し、
+//   クリック → ポップアップ「予定変更」→ 予定変更画面 (form#scheduleChange,
+//   action=/KLP/set/scheduleChange/) の「削除する」(a#delete) で削除する。
+//   実DOM (確認済み 2026-06-12):
+//     グリッド:   <div class="scheduleToDo jscScheduleToDo staffTask">
+//                   <span class="todoTitle">日常業務</span>
+//                   <p class="scheduleTimeZoneSetting">["13:15", "14:00"]</p>
+//                 ※シフト由来の休日ブロックは .isDayOff → 絶対に削除対象にしない
+//     ポップアップ: .mod_popup_02.sch.js_yotei 内「予定変更」(a.mod_btn_10)
+//     変更画面:   #jsiSchDate / #jsiStartTimeHour / #jsiStartTimeMinute /
+//                 select[name=staffId] / 削除ボタン a#delete「削除する」
+// =====================================================================
+async function deleteScheduleViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enableDelete = opts.enableDelete !== false;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  if (!p.scheduled_at) {
+    return fail('予定の日時(scheduled_at)が無く、削除対象の予定を特定できません', 'UNKNOWN_ERROR', true);
+  }
+  const when = parseJstPartsForPush(p.scheduled_at);
+  if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  const startMin = when.hour * 60 + when.minute;
+  const title = String(p.block_reason || '').trim().slice(0, 30) || null;
+  const staffExt = String(p.salonboard_staff_external_id || '').toUpperCase() || null;
+
+  // スケジュール画面上で対象の予定ブロックを探す共通ロジック。
+  // mark=true なら見つかった要素に data-kireidot-del 属性を付ける。
+  const findTodo = (mark) => page.evaluate(
+    ({ staffExt, startMin, title, mark }) => {
+      const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
+        const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
+        return m ? m[1].toUpperCase() : null;
+      });
+      const staffTable = document.querySelector('.jscScheduleMainTableStaff');
+      if (!staffTable) return { error: 'no_staff_table' };
+      const staffColFound = !staffExt || heads.includes(staffExt);
+      const lines = Array.from(staffTable.querySelectorAll('.scheduleMainTableLine'));
+      const items = [];
+      lines.forEach((line, i) => {
+        if (staffExt && heads[i] !== staffExt) return;
+        for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
+          if (el.classList.contains('isDayOff')) continue; // シフトの休日は対象外
+          const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
+          const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
+          if (!m) continue;
+          items.push({
+            el,
+            start: parseInt(m[1], 10) * 60 + parseInt(m[2], 10),
+            end: parseInt(m[3], 10) * 60 + parseInt(m[4], 10),
+            title: (el.querySelector('.todoTitle')?.textContent || '').trim(),
+          });
+        }
+      });
+      // 開始時刻一致 → 複数ならタイトルで絞る
+      let cands = items.filter((it) => it.start === startMin);
+      if (cands.length > 1 && title) {
+        const byTitle = cands.filter((it) => it.title === title);
+        if (byTitle.length) cands = byTitle;
+      }
+      // 開始一致が無ければ「タイトル一致 + 時間帯が開始時刻を含む」で救済
+      if (cands.length === 0 && title) {
+        cands = items.filter((it) => it.title === title && it.start <= startMin && startMin < it.end);
+      }
+      if (cands.length === 1) {
+        if (mark) cands[0].el.setAttribute('data-kireidot-del', '1');
+        return { ok: true, matched: 1, staffColFound, title: cands[0].title, start: cands[0].start, end: cands[0].end };
+      }
+      return { ok: false, matched: cands.length, staffColFound, total: items.length };
+    },
+    { staffExt, startMin, title, mark: !!mark },
+  );
+
+  // (1) スケジュール画面を開く
+  try {
+    const u = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+    u.searchParams.set('date', when.yyyymmdd);
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 15_000 });
+  } catch (e) {
+    return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // (2) 対象の予定ブロックを特定してマーク
+  const found = await findTodo(true).catch(() => null);
+  if (!found || found.error === 'no_staff_table') {
+    return fail('スケジュール画面のスタッフ表を取得できませんでした', 'UNKNOWN_ERROR', true);
+  }
+  if (staffExt && !found.staffColFound) {
+    return fail(`スケジュール画面に対象スタッフ列 (${staffExt}) が見つかりません`, 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+  if (!found.ok) {
+    if (found.matched >= 2) {
+      return fail(`同時刻に複数の予定があり一意に特定できません (候補=${found.matched}件)。SalonBoard で手動削除してください。`, 'UNKNOWN_ERROR', true);
+    }
+    // 該当の予定が無い = 既に削除済み (冪等成功)
+    return { status: 'ok', externalId: null, alreadyAbsent: true };
+  }
+
+  // (3) 予定ブロックをクリック → ポップアップの「予定変更」をクリック
+  const target = page.locator('.jscScheduleToDo[data-kireidot-del="1"]').first();
+  try {
+    await target.scrollIntoViewIfNeeded().catch(() => {});
+    await target.click({ timeout: 10_000 });
+  } catch (e) {
+    return fail(`予定ブロックをクリックできませんでした: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
+  }
+  const changeBtn = page.locator('.mod_popup_02.js_yotei a:has-text("予定変更")').first();
+  await changeBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+  if ((await changeBtn.count().catch(() => 0)) === 0) {
+    return fail('予定ポップアップの「予定変更」ボタンが見つかりません', 'CONFIRMATION_MISMATCH', true);
+  }
+  try {
+    await Promise.all([
+      page.waitForSelector('form#scheduleChange, a#delete', { timeout: 15_000 }).catch(() => {}),
+      changeBtn.click({ timeout: 10_000 }),
+    ]);
+  } catch (_e) { /* 下で到達検証 */ }
+  await page.waitForSelector('form#scheduleChange', { timeout: 10_000 }).catch(() => {});
+  if ((await page.locator('form#scheduleChange').count().catch(() => 0)) === 0) {
+    return fail(`予定変更画面に到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
+  }
+
+  // (4) 誤削除防止: 変更画面の日付・開始時刻・スタッフが対象と一致するか検証
+  const formCheck = await page.evaluate(
+    ({ ymd, hh, mm, staffExt }) => {
+      const v = (sel) => document.querySelector(sel)?.value ?? null;
+      const date = v('#jsiSchDate') || v('input[name="schDate"]');
+      const sh = v('#jsiStartTimeHour') || v('select[name="schStartHour"]');
+      const sm = v('#jsiStartTimeMinute') || v('select[name="schStartMinute"]');
+      const st = v('select[name="staffId"]');
+      return {
+        dateOk: !date || date === ymd,
+        startOk: (!sh || parseInt(sh, 10) === parseInt(hh, 10)) && (!sm || sm === mm),
+        staffOk: !staffExt || !st || st.toUpperCase() === staffExt,
+        date, sh, sm, st,
+      };
+    },
+    { ymd: when.yyyymmdd, hh: String(when.hour), mm: String(when.minute).padStart(2, '0'), staffExt },
+  ).catch(() => null);
+  if (!formCheck || !formCheck.dateOk || !formCheck.startOk || !formCheck.staffOk) {
+    return fail(
+      `予定変更画面の内容が対象と一致しません (date=${formCheck?.date}, start=${formCheck?.sh}:${formCheck?.sm}, staff=${formCheck?.st})。誤削除を避けるため中止しました。`,
+      'CONFIRMATION_MISMATCH', true,
+    );
+  }
+
+  if (!enableDelete) {
+    return { status: 'confirm_only' };
+  }
+
+  // (5) 「削除する」(a#delete) をクリック。ネイティブ confirm / HTMLダイアログ両対応。
+  const delBtn = page.locator('a#delete').first();
+  if ((await delBtn.count().catch(() => 0)) === 0) {
+    return fail('「削除する」ボタン(a#delete)が見つかりません', 'UNKNOWN_ERROR', true);
+  }
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    await delBtn.click({ timeout: 12_000 }).catch(() => {});
+    // ページ内HTMLダイアログ (「はい」.accept) が出る場合に備える
+    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 4_000 }).catch(() => {});
+    if ((await yesBtn.count().catch(() => 0)) > 0) {
+      await yesBtn.click({ timeout: 8_000 }).catch(() => {});
+    }
+    // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大15秒ポーリング
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      if (!/scheduleChange/i.test(page.url())) break;
+      const done = await page.locator('text=/削除しました|削除が完了/').first().count().catch(() => 0);
+      if (done > 0) break;
+      const err = await page.locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage').first().count().catch(() => 0);
+      if (err > 0) break;
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const errText = await page.locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage').first().innerText().catch(() => '');
+  if (errText && /エラー|失敗|できません/.test(errText)) {
+    return fail(`予定削除時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
+  }
+
+  // (6) スケジュール画面に戻って予定が消えたことを検証
+  try {
+    const u2 = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+    u2.searchParams.set('date', when.yyyymmdd);
+    await page.goto(u2.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 12_000 });
+    const still = await findTodo(false).catch(() => null);
+    if (still && still.ok) {
+      return fail(`削除操作後もスケジュール上に予定が残っています (dialog=${nativeDialogAccepted})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+    }
+  } catch (_e) {
+    // 検証用の再読込に失敗しただけなら、(5) の完了サインを信用して成功扱い。
+  }
+
+  return { status: 'ok', externalId: null };
+}
+
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -6005,6 +6215,7 @@ module.exports = {
   scrapeCustomerDetails,
   pushBookingViaForm,
   pushScheduleViaForm,
+  deleteScheduleViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,

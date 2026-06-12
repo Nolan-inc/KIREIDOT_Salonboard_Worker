@@ -34,7 +34,7 @@ export type SyncRunSummary = {
   done: boolean;
 };
 
-export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'customers';
+export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'reviews' | 'customers';
 
 /**
  * 店舗 PC 自体の設定状態 (preflight 結果)。
@@ -109,10 +109,26 @@ type SyncContextValue = {
 
 const SyncContext = createContext<SyncContextValue | null>(null);
 
+// 口コミ(reviews)は更新頻度が低くページング巡回も重いため、全チャネル自動同期には含めず
+// 「1日1回」専用スケジューラ(下記 REVIEW_AUTO_SYNC)で取得する。手動同期(口コミ画面の
+// 「サロンボードから取得」)は引き続きいつでも実行できる。
 const DEFAULT_CHANNELS: ChannelKey[] = ['bookings', 'staff', 'menus', 'coupons', 'shifts', 'blog', 'customers'];
 
 /** 自動同期 ON/OFF を localStorage に保存するキー */
 const AUTO_SYNC_KEY = 'salondesk.autoSyncEnabled';
+
+/**
+ * 口コミ「1日1回」自動取得。
+ * - 最後に取得した時刻 (localStorage) から REVIEW_AUTO_SYNC_MIN_INTERVAL_MS 以上
+ *   経過していて、かつ稼働時間帯(6:00〜21:00)なら全店まとめて reviews を取得する。
+ * - アプリ再起動しても localStorage の時刻で「1日1回」を維持する(リセットされない)。
+ * - 端末を閉じていて取得タイミングを逃しても、次に稼働時間帯で開いた最初の tick で取得する。
+ */
+const REVIEW_AUTO_SYNC_KEY = 'salondesk.lastReviewSyncAt';
+/** 口コミ自動取得の最小間隔: 20 時間 (= 実質1日1回。多少の起動ズレを許容)。 */
+const REVIEW_AUTO_SYNC_MIN_INTERVAL_MS = 20 * 60 * 60_000;
+/** 口コミ自動取得の判定周期 (5 分に 1 回)。 */
+const REVIEW_AUTO_SYNC_TICK_MS = 5 * 60_000;
 /** 自動同期チェック間隔 (ms)。実行間隔ではなく「実行可否を判定する周期」 */
 const AUTO_SYNC_TICK_MS = 60_000; // 60 秒に 1 回判定
 
@@ -730,6 +746,70 @@ export function SyncControllerProvider({ children }: { children: ReactNode }) {
       clearInterval(interval);
     };
   }, [bookingsAutoSyncEnabled, ready]);
+
+  // ---- 口コミ「1日1回」自動取得 ----
+  // 自動同期(autoSyncEnabled)が ON のとき、最後の取得から 20 時間以上経過し、かつ
+  // 稼働時間帯(6:00〜21:00)なら全店まとめて channels=['reviews'] を取得する。
+  // localStorage の時刻で「1日1回」を維持するため、アプリ再起動でリセットされない。
+  useEffect(() => {
+    if (!autoSyncEnabled || !ready) return;
+    let cancelled = false;
+
+    const readLast = (): number => {
+      try {
+        const v = Number(localStorage.getItem(REVIEW_AUTO_SYNC_KEY) ?? '0');
+        return Number.isFinite(v) ? v : 0;
+      } catch {
+        return 0;
+      }
+    };
+    const writeLast = (t: number) => {
+      try {
+        localStorage.setItem(REVIEW_AUTO_SYNC_KEY, String(t));
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (runningRef.current) return; // 他の同期と競合させない
+      if (!isWithinActiveHours()) return; // 夜間は停止
+
+      const now = Date.now();
+      if (now - readLast() < REVIEW_AUTO_SYNC_MIN_INTERVAL_MS) return; // まだ1日経っていない
+
+      const bridge = typeof window !== 'undefined' ? window.kireidotApp : undefined;
+      if (!bridge?.deviceConfig) return;
+      const overview = await bridge.deviceConfig.test();
+      lastOverviewAtRef.current = Date.now();
+      if (!overview.ok) return;
+
+      const eligibleShopIds = (overview.shops ?? [])
+        .filter((s) => {
+          if (s.credential_status !== 'active') return false;
+          if (!s.enabled) return false;
+          if (s.sync_fetch_enabled === false) return false;
+          if (s.blocked_until && new Date(s.blocked_until).getTime() > now) return false;
+          return true;
+        })
+        .map((s) => s.shop_id);
+      if (eligibleShopIds.length === 0) return;
+
+      // 先に時刻を記録してから実行 (失敗しても二重発火しない。次回は20時間後)
+      writeLast(now);
+      await bridge.workerSync({ shopIds: eligibleShopIds, channels: ['reviews'] });
+    };
+
+    // 起動直後にも 1 回判定 (前回取得から1日経っていれば取得)
+    const initialDelay = setTimeout(() => void tick(), 15_000);
+    const interval = setInterval(() => void tick(), REVIEW_AUTO_SYNC_TICK_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(initialDelay);
+      clearInterval(interval);
+    };
+  }, [autoSyncEnabled, ready]);
 
   const value = useMemo<SyncContextValue>(
     () => ({

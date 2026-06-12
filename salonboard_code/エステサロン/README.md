@@ -23,11 +23,17 @@
 | `クーポン_couponList.html` | クーポン一覧 | `https://salonboard.com/CNK/draft/couponList` |
 | `ブログ_blog.html` | ブログ投稿フォーム | `https://salonboard.com/KLP/blog/blog/`（一覧は `/KLP/blog/blogList/`） |
 | `フォトギャラリー_photoGalleryEdit.html` | フォトギャラリー編集（一括） | `https://salonboard.com/CNK/draft/photoGalleryEdit`（POST: `/doRegister`） |
-| `口コミ_reviewList.html` | 口コミ | `https://salonboard.com/KLP/review/reviewList/` |
+| `口コミ_reviewList.html` | 口コミ一覧 | `https://salonboard.com/KLP/review/reviewList/`（ページング `?pn=N`） |
+| `口コミ返信入力_reviewReply.html` | 口コミ返信フォーム | `https://salonboard.com/KLP/review/reviewReply/?reviewId=R...`（input#replyFrom + textarea + a#replyConfirm） |
 | `_調査用_salonboard_test.html` | （調査用テンポラリ） | — |
 
 ## 状況
 - 取得・登録（予約/スタッフ/メニュー/クーポン/ブログ）は実装済みで本番稼働中。
 - フォトギャラリー(photoGalleryEdit) は **空き枠に画像+タイトル+キャプション+ジャンル+掲載を入れて一括登録** する方式。
   自動投稿は `postPhotoGalleryViaForm`（scrapers.cjs, job_type `push_photo_gallery`）。詳細は同HTML冒頭コメント参照。
-- 口コミ(reviewList) は HTML はあるが scraper 未実装。
+- 口コミ(reviewList) は `scrapeReviews`(scrapers.cjs) で取得し `salonboard_review_imports` に保存。
+  channel=`reviews`(1日1回自動取得)。AI返信案は Admin `/api/salonboard/review-reply` / cron `/api/cron/review-reply`(OpenAI、店舗・スタイリスト情報込み) で生成し `ai_reply_draft` に保存。
+- **口コミ返信投稿(reviewReply)**: Admin `/admin/reviews` でAI返信案を編集→「この返信案を使用する」で
+  `push_review_reply` ジョブを enqueue → Worker `postReviewReplyViaForm`(scrapers.cjs) が返信フォームに
+  replyFrom(担当スタッフ名)+本文を入力し確認→登録。ENABLE_PUSH準拠(false=確認画面まで)。
+  結果は callback で `salonboard_review_imports.reply_post_status`(posted/failed/manual_required) に反映。
