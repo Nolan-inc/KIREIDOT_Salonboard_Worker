@@ -2425,26 +2425,36 @@ async function scrapeShiftPatterns(page, baseUrl) {
     throw err;
   }
 
+  // 登録済みパターン行 (削除チェックボックスを持つ) が描画されるまで少し待つ。
+  // SBのHTMLは tbody が不正 (<tbody...> が壊れている) なため、closest('tr') が
+  // 効かないことがある。チェックボックスから祖先方向に最も近い <tr> を手繰る方式にする。
+  await page.waitForSelector('#openTimeArea input[name="deleteShiftIds"], input[name="deleteShiftIds"]', { timeout: 8_000 }).catch(() => {});
   const rows = await page.evaluate(() => {
     const out = [];
-    // 登録済みパターンは削除チェックボックスを持つ行 (新規追加フォーム行は持たない)。
     const boxes = Array.from(document.querySelectorAll('input[name="deleteShiftIds"]'));
+    const closestRow = (el) => {
+      let n = el;
+      while (n && n.tagName !== 'TR') n = n.parentElement;
+      return n;
+    };
     for (const box of boxes) {
       const id = (box.getAttribute('value') || '').trim();
       if (!id) continue;
-      const tr = box.closest('tr');
-      if (!tr) continue;
-      const tds = Array.from(tr.querySelectorAll('td'));
-      const name = (tds[0]?.textContent || '').trim();
-      const shortName = (tds[1]?.textContent || '').trim();
-      // 設定時間: td[2] 内の span 2つ (開始/終了)
-      const spans = Array.from(tds[2]?.querySelectorAll('span') || []).map((s) => (s.textContent || '').trim());
-      const timeText = spans.join(' ');
+      const tr = closestRow(box);
+      let name = '', shortName = '', timeText = '';
+      if (tr) {
+        const tds = Array.from(tr.children).filter((c) => c.tagName === 'TD');
+        name = (tds[0]?.textContent || '').trim();
+        shortName = (tds[1]?.textContent || '').trim();
+        const spans = Array.from(tds[2]?.querySelectorAll('span') || []).map((s) => (s.textContent || '').trim());
+        timeText = spans.join(' ') || (tds[2]?.textContent || '').trim();
+      }
       out.push({ id, name, shortName, timeText });
     }
     return out;
   }).catch(() => []);
   diag.count = rows.length;
+  diag.boxCount = await page.locator('input[name="deleteShiftIds"]').count().catch(() => -1);
 
   const parseRange = (text) => {
     const m = /(\d{1,2})[:時](\d{2})[\s\S]*?(\d{1,2})[:時](\d{2})/.exec(String(text || ''));
@@ -2465,18 +2475,23 @@ async function scrapeShiftPatterns(page, baseUrl) {
     };
   });
 
-  if (patterns.length === 0) {
-    // 登録済みパターンが本当に0件 (まだ1つも作っていない)。これは「失敗」ではないが
-    // 反映に使えないので、ユーザーに分かるよう専用コードで知らせる。
+  // external_id を持つ有効なパターンだけ残す
+  const valid = patterns.filter((p) => p.external_id);
+  if (valid.length === 0) {
+    // boxCount>0 なのに valid=0 = 抽出ロジックの不整合 (画面構造が変わった等)。
+    // boxCount=0 = 本当にパターン未登録。区別して案内する。
+    const noneRegistered = (diag.boxCount ?? 0) <= 0;
     const err = new Error(
-      'SalonBoardに勤務パターンが1つも登録されていません。SalonBoardの「スタッフ設定 > 勤務パターン登録」でパターン（早番・遅番など）を登録してください。',
+      noneRegistered
+        ? `SalonBoardに勤務パターンが1つも登録されていません (url=${diag.url})。SalonBoardの「スタッフ設定 > 勤務パターン登録」でパターン（早番・遅番など）を登録してください。`
+        : `勤務パターンの読み取りに失敗しました (画面上には${diag.boxCount}件あるのに抽出できませんでした, url=${diag.url})。`,
     );
-    err.code = 'SHIFT_PATTERNS_NONE';
+    err.code = noneRegistered ? 'SHIFT_PATTERNS_NONE' : 'SHIFT_PATTERNS_PARSE';
     err.diag = diag;
     throw err;
   }
 
-  return { patterns, sourceMonth: null, diag };
+  return { patterns: valid, sourceMonth: null, diag };
 }
 
 async function pushShiftsViaForm(page, payload, opts = {}) {
