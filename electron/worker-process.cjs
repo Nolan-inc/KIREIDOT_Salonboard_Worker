@@ -2894,20 +2894,34 @@ async function runPushJobs({ showBrowser } = {}) {
       } else if (isFetchShiftPatterns) {
         // ---- 勤務パターン取得 (シフトパターン設定の「SalonBoardから同期」ボタン) ----
         try {
-          const pats = await scrapeShiftPatterns(page, baseUrl);
+          const res = await scrapeShiftPatterns(page, baseUrl); // 取得できなければ throw
+          const pats = res.patterns || [];
           const sent = await sendShiftPatterns(job.shop_id, pats);
-          await postCallback({
-            job_id: job.id, job_type: 'fetch_shift_patterns', status: 'succeeded',
-            summary: `勤務パターン ${sent} 件取得`,
-          });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ 勤務パターン ${sent} 件取得`, at: new Date().toISOString() });
+          if (sent === 0) {
+            // 取得は0件だがthrowされなかった (理論上ここには来ないが保険)
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_shift_patterns', status: 'manual_required',
+              error_code: 'SHIFT_PATTERNS_EMPTY',
+              error: '勤務パターンが0件でした。SalonBoardの「毎月の受付設定」でシフト設定が完了しているか確認してください。',
+              manual_required: true,
+            });
+            emit('log', { level: 'warn', msg: `[${tag}] 🟡 勤務パターン 0 件`, at: new Date().toISOString() });
+          } else {
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_shift_patterns', status: 'succeeded',
+              summary: `勤務パターン ${sent} 件取得 (${res.sourceMonth})`,
+            });
+            emit('log', { level: 'info', msg: `[${tag}] ✅ 勤務パターン ${sent} 件取得 (${res.sourceMonth})`, at: new Date().toISOString() });
+          }
         } catch (e) {
-          const toManual = exhausted;
+          const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
+          // 「画面は開けたが空/未設定」は再試行しても直らないので manual_required。
+          const noRetry = isCaptcha || e?.code === 'SHIFT_PATTERNS_EMPTY' || exhausted;
           await postCallback({
             job_id: job.id, job_type: 'fetch_shift_patterns',
-            status: toManual ? 'manual_required' : 'retryable_failed',
-            error_code: 'UNKNOWN_ERROR', error: `勤務パターン取得に失敗: ${e?.message ?? e}`,
-            manual_required: toManual,
+            status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
+            error_code: e?.code || 'UNKNOWN_ERROR', error: `${e?.message ?? e}`.slice(0, 500),
+            manual_required: noRetry,
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🔴 勤務パターン取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
