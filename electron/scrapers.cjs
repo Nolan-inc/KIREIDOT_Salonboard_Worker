@@ -2526,21 +2526,36 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     } else {
       await page.locator('#holidayBatch').check({ timeout: 5_000 }).catch(() => {});
     }
-    await page.locator('#batchSet').click({ timeout: 10_000 });
-    // 反映待ち: 先頭セルのテキストが期待値になるまでポーリング (最大10秒)
-    const cellSel = `#${plan.staffExt}_${firstYmd}`;
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-      await page.waitForTimeout(400);
-      const errVisible = await page.locator('#popupErrorMessageBatch:visible').count().catch(() => 0);
-      if (errVisible > 0) {
-        const errText = (await page.locator('#popupErrorMessageBatch').innerText().catch(() => '')).trim();
-        if (errText) throw new Error(`一括入力エラー: ${errText.slice(0, 100)}`);
+    // 「一括入力」クリック → 確認ダイアログ (ネイティブ confirm / ページ内ポップアップ
+    // の「OK」「はい」) を承認する。ハンドラ無しだと Playwright が confirm を自動
+    // キャンセルしてしまい、何も反映されない。
+    const onDialog = async (d) => { try { await d.accept(); } catch (_e) { /* noop */ } };
+    page.on('dialog', onDialog);
+    try {
+      await page.locator('#batchSet').click({ timeout: 10_000 });
+      // ページ内HTML確認ダイアログの OK/はい を待ってクリック
+      const okBtn = page.locator('a.accept:visible, .buttons a.accept:visible, a:visible:has-text("OK"), button:visible:has-text("OK"), a:visible:has-text("はい")').first();
+      await okBtn.waitFor({ state: 'visible', timeout: 3_000 }).catch(() => {});
+      if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
+        await okBtn.click({ timeout: 5_000 }).catch(() => {});
       }
-      const t = ((await page.locator(cellSel).textContent().catch(() => '')) || '').trim();
-      if (plan.kind === 'off' ? t === '休' : t && t !== '休') return;
+      // 反映待ち: 先頭セルのテキストが期待値になるまでポーリング (最大10秒)
+      const cellSel = `#${plan.staffExt}_${firstYmd}`;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(400);
+        const errVisible = await page.locator('#popupErrorMessageBatch:visible').count().catch(() => 0);
+        if (errVisible > 0) {
+          const errText = (await page.locator('#popupErrorMessageBatch').innerText().catch(() => '')).trim();
+          if (errText) throw new Error(`一括入力エラー: ${errText.slice(0, 100)}`);
+        }
+        const t = ((await page.locator(cellSel).textContent().catch(() => '')) || '').trim();
+        if (plan.kind === 'off' ? t === '休' : t && t !== '休') return;
+      }
+      // タイムアウトでも致命とせず続行 (最後の検証で拾う)
+    } finally {
+      page.off('dialog', onDialog);
     }
-    // タイムアウトでも致命とせず続行 (最後の検証で拾う)
   };
 
   try {
@@ -2571,6 +2586,12 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       }
       await btn.scrollIntoViewIfNeeded().catch(() => {});
       await btn.click({ timeout: 10_000 }).catch(() => {});
+      // ページ内HTML確認ダイアログ (OK/はい) が出る場合は承認 (ネイティブ confirm は onDialog が処理)
+      const okBtn = page.locator('a.accept:visible, .buttons a.accept:visible, a:visible:has-text("OK"), button:visible:has-text("OK"), a:visible:has-text("はい")').first();
+      await okBtn.waitFor({ state: 'visible', timeout: 3_000 }).catch(() => {});
+      if ((await okBtn.count().catch(() => 0)) > 0 && (await okBtn.isVisible().catch(() => false))) {
+        await okBtn.click({ timeout: 5_000 }).catch(() => {});
+      }
       // 完了メッセージ or エラーを最大15秒待つ
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
