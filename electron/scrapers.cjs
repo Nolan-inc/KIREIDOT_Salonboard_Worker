@@ -2288,6 +2288,333 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   return { status: 'ok', externalId: null };
 }
 
+// =====================================================================
+// シフト反映 (KIREIDOT shifts → SalonBoard シフト設定)
+//   毎月の受付設定 > シフト設定 (/KLP/set/shiftSetup/?date=YYYYMM) を操作する。
+//   実DOM (確認済み 2026-06-12):
+//     グリッド: table#shiftSchedule、セル a#W{ext}_{YYYYMMDD}.shiftdate (テキスト=休/パターン名)
+//     一括入力: a#batchSetLabel → #batchSetPanel
+//       スタッフ: input[name=staffIdList][value=W…]
+//       日付:   radio#shiftDateDate + select#shiftDate01..05 (value='01'..'31'、最大5日)
+//       出勤:   radio#workdayBatch + select#shiftIdBatch (勤務パターン S…)
+//               パターンの時間帯は選択時に div#shiftTextBatch に表示される
+//       休日:   radio#holidayBatch
+//       実行:   a#batchSet (エラーは #popupErrorMessageBatch)
+//     確定:   スタッフ行の a#update1_{ext}_{YYYYMM} (「設定」) → /KLP/ajax/updateShiftSchedules/
+//             完了メッセージは #completeMsgArea
+//   方針:
+//     - KIREIDOTのシフトは任意時刻、SBは勤務パターン選択式 → パターンの時間帯を
+//       読み取り、完全一致が無ければ最も近いパターンを選ぶ (warningに記録)。
+//     - 「shiftsに行が無い日 = 休み」: payload.entries は全日 work/off で埋まって来る。
+//     - 差分のみ反映: セルの現在値 (休/パターン名) と一致する日はスキップ。
+//     - 過去日はスキップ (SB側で編集不可/不要)。
+//     - enablePush=false なら計画だけ立てて何も書かない (confirm_only)。
+// =====================================================================
+async function pushShiftsViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const month = String(p.month || '');
+  if (!/^\d{6}$/.test(month)) return fail(`push_shifts: month が不正です (${p.month})`, 'UNKNOWN_ERROR', true);
+  const entries = Array.isArray(p.entries) ? p.entries : [];
+  if (entries.length === 0) {
+    return fail('push_shifts: 反映対象スタッフがありません (SalonBoardスタッフ紐付けを確認してください)', 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+
+  const toMin = (hhmm) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ''));
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  };
+  const parseTimeRange = (text) => {
+    const m = /(\d{1,2})[:時](\d{2})\s*[〜~～\-－ー]\s*(\d{1,2})[:時](\d{2})/.exec(String(text || ''));
+    if (!m) return null;
+    return {
+      start: `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`,
+      end: `${String(parseInt(m[3], 10)).padStart(2, '0')}:${m[4]}`,
+    };
+  };
+  // 今日 (JST) より前の日はスキップ
+  const todayJst = (() => {
+    const d = new Date(Date.now() + 9 * 3600_000);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  })();
+
+  // (1) シフト設定ページを開く (直接 goto。失敗時は monthlySetup のリンク経由)
+  const openSetup = async () => {
+    const u = new URL('/KLP/set/shiftSetup/', baseUrl);
+    u.searchParams.set('date', month);
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 12_000 }).catch(() => {});
+    if ((await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0) return true;
+    // フォールバック: 毎月の受付設定からリンクをクリック
+    await page.goto(new URL('/KLP/set/monthlySetup/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    const link = page.locator(`a[href*="shiftSetup/?date=${month}"]`).first();
+    if ((await link.count().catch(() => 0)) === 0) return false;
+    await Promise.all([
+      page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 15_000 }).catch(() => {}),
+      link.click({ timeout: 10_000 }).catch(() => {}),
+    ]);
+    return (await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0;
+  };
+  try {
+    if (!(await openSetup())) {
+      return fail(`シフト設定画面 (shiftSetup ${month}) を開けませんでした。「毎月の受付設定」でこの月が設定済みか確認してください。`, 'UNKNOWN_ERROR', true);
+    }
+  } catch (e) {
+    return fail(`シフト設定画面を開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  // (2) 現在のセル値を読む: { 'W..._YYYYMMDD': '休'|パターン名 }
+  const readCells = () => page.evaluate(() => {
+    const out = {};
+    for (const a of document.querySelectorAll('#shiftSchedule a.shiftdate')) {
+      const m = (a.id || '').match(/^([A-Z0-9]+)_(\d{8})$/i);
+      if (!m) continue;
+      out[`${m[1].toUpperCase()}_${m[2]}`] = (a.textContent || '').trim();
+    }
+    return out;
+  });
+  let cells;
+  try {
+    cells = await readCells();
+  } catch (e) {
+    return fail(`シフト表の読み取りに失敗: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
+  }
+
+  // (3) 一括入力パネルを開いて勤務パターン一覧 (id/name/時間帯) を取得
+  const ensureBatchPanel = async () => {
+    const panel = page.locator('#batchSetPanel');
+    if (await panel.isVisible().catch(() => false)) return true;
+    await page.locator('#batchSetLabel').click({ timeout: 8_000 }).catch(() => {});
+    await panel.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    return await panel.isVisible().catch(() => false);
+  };
+  if (!(await ensureBatchPanel())) {
+    return fail('一括入力パネル (#batchSetPanel) を開けませんでした', 'UNKNOWN_ERROR', true);
+  }
+  let patterns = await page.evaluate(() => {
+    const sel = document.querySelector('#shiftIdBatch');
+    if (!sel) return null;
+    return Array.from(sel.options)
+      .filter((o) => o.value)
+      .map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
+  }).catch(() => null);
+  if (!patterns || patterns.length === 0) {
+    return fail('勤務パターン一覧 (select#shiftIdBatch) を取得できませんでした', 'UNKNOWN_ERROR', true);
+  }
+  for (const pat of patterns) {
+    await page.evaluate((id) => {
+      const sel = document.querySelector('#shiftIdBatch');
+      if (!sel) return;
+      sel.value = id;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }, pat.id).catch(() => {});
+    await page.waitForTimeout(250);
+    const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
+    const tr = parseTimeRange(txt);
+    if (tr) { pat.start = tr.start; pat.end = tr.end; }
+  }
+  const timedPatterns = patterns.filter((x) => x.start && x.end);
+
+  // パターン選択: 完全一致 → 最近傍 (開始/終了の差の合計が最小)
+  const warnings = [];
+  const choosePattern = (start, end) => {
+    const s = toMin(start); const e = toMin(end);
+    if (s == null || e == null) return null;
+    let exact = timedPatterns.find((x) => toMin(x.start) === s && toMin(x.end) === e);
+    if (exact) return { pattern: exact, diff: 0 };
+    let best = null; let bestDiff = Infinity;
+    for (const x of timedPatterns) {
+      const d = Math.abs(toMin(x.start) - s) + Math.abs(toMin(x.end) - e);
+      if (d < bestDiff) { bestDiff = d; best = x; }
+    }
+    return best ? { pattern: best, diff: bestDiff } : null;
+  };
+  const cellMatchesPattern = (text, pat) => {
+    const t = String(text || '').trim();
+    if (!t || t === '休') return false;
+    const n = String(pat?.name || '').trim();
+    return !!n && (t === n || n.startsWith(t) || t.startsWith(n));
+  };
+
+  // (4) 差分計画を立てる: スタッフごとに {kind, patternId} で日をグルーピング
+  const plans = []; // {staffExt, kind:'off'|'work', patternId|null, patternName, days:['01',...], dates:['YYYY-MM-DD',...]}
+  let skipped = 0; let totalChanges = 0;
+  const knownExts = new Set(Object.keys(cells).map((k) => k.split('_')[0]));
+  const staffChanged = new Set();
+  for (const entry of entries) {
+    const ext = String(entry.staff_external_id || '').toUpperCase();
+    if (!ext) continue;
+    if (!knownExts.has(ext)) {
+      warnings.push(`${entry.staff_name ?? ext}: シフト設定画面にスタッフ列がありません (スキップ)`);
+      continue;
+    }
+    const groups = new Map(); // key → plan
+    for (const day of entry.days || []) {
+      const date = String(day.date || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < todayJst) continue;
+      const ymd = date.replace(/-/g, '');
+      const cur = cells[`${ext}_${ymd}`];
+      if (cur === undefined) continue; // セルが無い日 (月外)
+      let kind; let chosen = null;
+      if (day.kind === 'work') {
+        const sel = choosePattern(day.start, day.end);
+        if (!sel) {
+          warnings.push(`${entry.staff_name ?? ext} ${date}: 勤務パターンの時間帯を取得できず反映できません`);
+          continue;
+        }
+        if (sel.diff > 0) {
+          warnings.push(`${entry.staff_name ?? ext} ${date}: ${day.start}〜${day.end} に一致するパターンが無いため「${sel.pattern.name}」(${sel.pattern.start}〜${sel.pattern.end}) で代用`);
+        }
+        kind = 'work'; chosen = sel.pattern;
+        if (cellMatchesPattern(cur, chosen)) { skipped++; continue; } // 既に同パターン
+      } else {
+        kind = 'off';
+        if (cur === '休') { skipped++; continue; } // 既に休
+      }
+      const key = kind === 'off' ? 'off' : `work:${chosen.id}`;
+      let plan = groups.get(key);
+      if (!plan) {
+        plan = { staffExt: ext, staffName: entry.staff_name ?? ext, kind, patternId: chosen?.id ?? null, patternName: chosen?.name ?? null, days: [], dates: [] };
+        groups.set(key, plan);
+      }
+      plan.days.push(ymd.slice(6, 8));
+      plan.dates.push(date);
+      totalChanges++;
+    }
+    if (groups.size > 0) staffChanged.add(ext);
+    plans.push(...groups.values());
+  }
+
+  if (totalChanges === 0) {
+    return { status: 'ok', summary: `変更なし (全${entries.length}名のシフトはSalonBoardと一致)`, changed: 0, warnings };
+  }
+  if (!enablePush) {
+    return {
+      status: 'confirm_only',
+      summary: `反映予定 ${totalChanges}件 (スタッフ${staffChanged.size}名, スキップ${skipped}件)`,
+      changed: totalChanges,
+      warnings,
+    };
+  }
+
+  // (5) 一括入力で反映 (5日ずつ)
+  const applyChunk = async (plan, chunkDays, firstYmd, expectText) => {
+    if (!(await ensureBatchPanel())) throw new Error('一括入力パネルを開けません');
+    // スタッフ選択 (対象のみON)
+    const boxes = page.locator('input[name="staffIdList"]');
+    const n = await boxes.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const b = boxes.nth(i);
+      const v = ((await b.getAttribute('value').catch(() => '')) || '').toUpperCase();
+      await b.setChecked(v === plan.staffExt, { timeout: 5_000 }).catch(() => {});
+    }
+    // 日付モード + 日付セット
+    await page.locator('#shiftDateDate').check({ timeout: 5_000 }).catch(() => {});
+    for (let i = 1; i <= 5; i++) {
+      await page.selectOption(`#shiftDate0${i}`, chunkDays[i - 1] ?? '').catch(() => {});
+    }
+    // 出勤/休日
+    if (plan.kind === 'work') {
+      await page.locator('#workdayBatch').check({ timeout: 5_000 }).catch(() => {});
+      await page.selectOption('#shiftIdBatch', plan.patternId).catch(() => {});
+    } else {
+      await page.locator('#holidayBatch').check({ timeout: 5_000 }).catch(() => {});
+    }
+    await page.locator('#batchSet').click({ timeout: 10_000 });
+    // 反映待ち: 先頭セルのテキストが期待値になるまでポーリング (最大10秒)
+    const cellSel = `#${plan.staffExt}_${firstYmd}`;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      const errVisible = await page.locator('#popupErrorMessageBatch:visible').count().catch(() => 0);
+      if (errVisible > 0) {
+        const errText = (await page.locator('#popupErrorMessageBatch').innerText().catch(() => '')).trim();
+        if (errText) throw new Error(`一括入力エラー: ${errText.slice(0, 100)}`);
+      }
+      const t = ((await page.locator(cellSel).textContent().catch(() => '')) || '').trim();
+      if (plan.kind === 'off' ? t === '休' : t && t !== '休') return;
+    }
+    // タイムアウトでも致命とせず続行 (最後の検証で拾う)
+  };
+
+  try {
+    for (const plan of plans) {
+      for (let i = 0; i < plan.days.length; i += 5) {
+        const chunk = plan.days.slice(i, i + 5);
+        const firstYmd = `${month}${chunk[0]}`;
+        await applyChunk(plan, chunk, firstYmd);
+      }
+    }
+  } catch (e) {
+    return fail(`シフトの一括入力に失敗: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
+  }
+
+  // パネルを閉じる (「設定」ボタンが隠れないように)
+  await page.locator('#batchSetClose').click({ timeout: 5_000 }).catch(() => {});
+  await page.waitForTimeout(300);
+
+  // (6) 変更したスタッフごとに「設定」ボタンで確定
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    for (const ext of staffChanged) {
+      const btn = page.locator(`#update1_${ext}_${month}`).first();
+      if ((await btn.count().catch(() => 0)) === 0) {
+        return fail(`スタッフ ${ext} の「設定」ボタンが見つかりません`, 'UNKNOWN_ERROR', true);
+      }
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
+      await btn.click({ timeout: 10_000 }).catch(() => {});
+      // 完了メッセージ or エラーを最大15秒待つ
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(400);
+        const done = await page.locator('#completeMsgArea:visible').count().catch(() => 0);
+        if (done > 0) break;
+        const err = await page.locator('.mod_box_warning:visible, .errorMessage:visible').count().catch(() => 0);
+        if (err > 0) break;
+      }
+      const errText = (await page.locator('.mod_box_warning:visible, .errorMessage:visible').first().innerText().catch(() => '')).trim();
+      if (errText && /エラー|失敗|できません/.test(errText)) {
+        return fail(`シフト確定 (設定ボタン) でエラー: ${errText.slice(0, 100)}`, 'UNKNOWN_ERROR', true);
+      }
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  // (7) 最終検証: ページを開き直して、変更対象の日が期待値になっているか確認
+  let mismatches = 0;
+  try {
+    if (await openSetup()) {
+      const after = await readCells();
+      for (const plan of plans) {
+        for (const ymdDay of plan.days) {
+          const t = (after[`${plan.staffExt}_${month}${ymdDay}`] || '').trim();
+          const ok = plan.kind === 'off' ? t === '休' : cellMatchesPattern(t, { name: plan.patternName });
+          if (!ok) mismatches++;
+        }
+      }
+    }
+  } catch (_e) { /* 検証用の再読込失敗は黙認 (確定エラーは上で検出済み) */ }
+  if (mismatches > 0) {
+    return fail(`シフト反映後の検証で ${mismatches}/${totalChanges} 件が期待値と一致しません。SalonBoardのシフト設定を確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+
+  return {
+    status: 'ok',
+    summary: `シフト反映 ${totalChanges}件 (スタッフ${staffChanged.size}名, スキップ${skipped}件${nativeDialogAccepted ? ', confirm承認' : ''})`,
+    changed: totalChanges,
+    warnings,
+  };
+}
+
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -6216,6 +6543,7 @@ module.exports = {
   pushBookingViaForm,
   pushScheduleViaForm,
   deleteScheduleViaForm,
+  pushShiftsViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,

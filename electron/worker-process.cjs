@@ -38,6 +38,7 @@ const {
   pushBookingViaForm,
   pushScheduleViaForm,
   deleteScheduleViaForm,
+  pushShiftsViaForm,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
@@ -765,7 +766,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -808,7 +809,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -2746,6 +2747,7 @@ async function runPushJobs({ showBrowser } = {}) {
       const isBlogDelete = job.job_type === 'delete_blog';
       const isPhotoGallery = job.job_type === 'push_photo_gallery';
       const isReviewReply = job.job_type === 'push_review_reply';
+      const isShifts = job.job_type === 'push_shifts';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -2863,6 +2865,38 @@ async function runPushJobs({ showBrowser } = {}) {
             error_code: result.errorCode, error: result.reason, manual_required: toManual,
           });
           emit('log', { level: 'warn', msg: `[${tag}] フォトギャラリー: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isShifts) {
+        // ---- シフト反映 (KIREIDOT shifts → SalonBoard シフト設定) ----
+        const result = await pushShiftsViaForm(page, payload, { baseUrl, enablePush });
+        const unmapped = Array.isArray(payload.unmapped_staff) && payload.unmapped_staff.length > 0
+          ? ` / 未紐付けスタッフ: ${payload.unmapped_staff.join(', ')}`
+          : '';
+        const warnText = Array.isArray(result.warnings) && result.warnings.length > 0
+          ? ` / 注意: ${result.warnings.slice(0, 5).join(' | ')}${result.warnings.length > 5 ? ` 他${result.warnings.length - 5}件` : ''}`
+          : '';
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_shifts', status: 'succeeded',
+            summary: `${result.summary ?? 'push_shifts 完了'}${unmapped}${warnText}`.slice(0, 900),
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ シフト反映完了: ${result.summary ?? ''}${unmapped}${warnText}`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'push_shifts', status: 'manual_required',
+            error_code: 'PUSH_DISABLED',
+            error: `計画まで作成しましたが、実登録(実書込)が無効のため反映していません (${result.summary ?? ''})。設定で有効化してください。`,
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 シフト反映は計画のみ (実登録OFF): ${result.summary ?? ''}`, at: new Date().toISOString() });
+        } else {
+          const toManual = result.manualRequired || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'push_shifts',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            error_code: result.errorCode, error: `${result.reason ?? ''}${warnText}`.slice(0, 900), manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 シフト反映失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
         }
       } else if (isCancel) {
         // ---- キャンセル ----
