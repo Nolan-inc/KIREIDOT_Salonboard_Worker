@@ -2358,14 +2358,64 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
 // push_shifts 実行時に DB (salonboard_shift_patterns) へ upsert される。
 async function scrapeShiftPatterns(page, baseUrl) {
   const base = baseUrl || 'https://salonboard.com/';
-  // 月により「未設定/編集不可」でパネルが出ないことがあるので、今月→翌月→翌々月の順で試す。
-  const now = new Date(Date.now() + 9 * 3600_000);
-  const months = [0, 1, 2].map((add) => {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + add, 1));
-    return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-  });
+  // 勤務パターンは「勤務パターン登録」画面 (/KLP/set/workPatternSetup/) の
+  // 登録済み一覧テーブルから取得する。これはシフト設定(毎月の受付設定)の完了に
+  // 依存しないので、未設定の月でも取得できる。
+  //   実DOM (確認済み 2026-06-12):
+  //     登録済みテーブル: #openTimeArea table の各行 (tr)
+  //       td[0]=シフト名称, td[1]=短縮名, td[2]=設定時間(span 開始 / span 終了),
+  //       削除チェックボックス input[name=deleteShiftIds][value=S…] (=external_id)
+  const diag = {};
+  try {
+    await page.goto(new URL('/KLP/set/workPatternSetup/', base).toString(), {
+      waitUntil: 'domcontentloaded', timeout: 25_000,
+    });
+  } catch (e) {
+    diag.gotoError = String(e?.message ?? e).slice(0, 80);
+  }
+  diag.url = page.url().replace('https://salonboard.com', '');
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    const err = new Error('reCAPTCHA が表示されました');
+    err.code = 'RECAPTCHA_REQUIRED';
+    throw err;
+  }
+
+  // フォーム到達確認 (勤務パターン登録画面)
+  const reached = (await page.locator('#workPatternSetup, #openTimeArea').count().catch(() => 0)) > 0;
+  diag.reached = reached;
+  if (!reached) {
+    const err = new Error(
+      `勤務パターン登録画面を開けませんでした (url=${diag.url})。予約同期くんがSalonBoardにログインできているか確認してください。`,
+    );
+    err.code = 'SHIFT_PATTERNS_UNREACHABLE';
+    err.diag = diag;
+    throw err;
+  }
+
+  const rows = await page.evaluate(() => {
+    const out = [];
+    // 登録済みパターンは削除チェックボックスを持つ行 (新規追加フォーム行は持たない)。
+    const boxes = Array.from(document.querySelectorAll('input[name="deleteShiftIds"]'));
+    for (const box of boxes) {
+      const id = (box.getAttribute('value') || '').trim();
+      if (!id) continue;
+      const tr = box.closest('tr');
+      if (!tr) continue;
+      const tds = Array.from(tr.querySelectorAll('td'));
+      const name = (tds[0]?.textContent || '').trim();
+      const shortName = (tds[1]?.textContent || '').trim();
+      // 設定時間: td[2] 内の span 2つ (開始/終了)
+      const spans = Array.from(tds[2]?.querySelectorAll('span') || []).map((s) => (s.textContent || '').trim());
+      const timeText = spans.join(' ');
+      out.push({ id, name, shortName, timeText });
+    }
+    return out;
+  }).catch(() => []);
+  diag.count = rows.length;
+
   const parseRange = (text) => {
-    const m = /(\d{1,2})[:時](\d{2})\s*[〜~～\-－ー]\s*(\d{1,2})[:時](\d{2})/.exec(String(text || ''));
+    const m = /(\d{1,2})[:時](\d{2})[\s\S]*?(\d{1,2})[:時](\d{2})/.exec(String(text || ''));
     if (!m) return null;
     return {
       start: `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`,
@@ -2373,104 +2423,28 @@ async function scrapeShiftPatterns(page, baseUrl) {
     };
   };
 
-  const diag = { tried: [] };
-  // 1ヶ月分の shiftSetup を開いてパターンを取得。到達できなければ null を返す。
-  const tryMonth = async (month) => {
-    const rec = { month };
-    diag.tried.push(rec);
-    // (a) 直接 goto
-    try {
-      const u = new URL('/KLP/set/shiftSetup/', base);
-      u.searchParams.set('date', month);
-      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    } catch (e) {
-      rec.gotoError = String(e?.message ?? e).slice(0, 80);
-    }
-    let reached = (await page.locator('#batchSetLabel').count().catch(() => 0)) > 0;
-    // (b) 直接で出なければ monthlySetup のリンク経由で開く
-    if (!reached) {
-      try {
-        await page.goto(new URL('/KLP/set/monthlySetup/', base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-        const link = page.locator(`a[href*="shiftSetup/?date=${month}"]`).first();
-        if ((await link.count().catch(() => 0)) > 0) {
-          await Promise.all([
-            page.waitForSelector('#batchSetLabel', { timeout: 15_000 }).catch(() => {}),
-            link.click({ timeout: 10_000 }).catch(() => {}),
-          ]);
-        } else {
-          rec.noMonthlyLink = true;
-        }
-      } catch (e) {
-        rec.monthlyError = String(e?.message ?? e).slice(0, 80);
-      }
-      reached = (await page.locator('#batchSetLabel').count().catch(() => 0)) > 0;
-    }
-    rec.url = page.url().replace('https://salonboard.com', '');
-    rec.reached = reached;
-    if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
-      rec.recaptcha = true;
-      const err = new Error('reCAPTCHA が表示されました');
-      err.code = 'RECAPTCHA_REQUIRED';
-      throw err;
-    }
-    if (!reached) return null;
+  const patterns = rows.map((r) => {
+    const tr = parseRange(r.timeText);
+    return {
+      external_id: r.id,
+      name: r.name || r.shortName || r.id,
+      start_time: tr?.start ?? '',
+      end_time: tr?.end ?? '',
+    };
+  });
 
-    // 一括入力パネルを開く
-    const panel = page.locator('#batchSetPanel');
-    if (!(await panel.isVisible().catch(() => false))) {
-      await page.locator('#batchSetLabel').click({ timeout: 8_000 }).catch(() => {});
-      await panel.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
-    }
-    const hasSelect = (await page.locator('#shiftIdBatch').count().catch(() => 0)) > 0;
-    rec.hasSelect = hasSelect;
-    if (!hasSelect) return null;
-    const patterns = (await page.evaluate(() => {
-      const sel = document.querySelector('#shiftIdBatch');
-      if (!sel) return [];
-      return Array.from(sel.options)
-        .filter((o) => o.value)
-        .map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
-    }).catch(() => [])) || [];
-    rec.optCount = patterns.length;
-    if (patterns.length === 0) return null;
-    for (const pat of patterns) {
-      await page.evaluate((id) => {
-        const sel = document.querySelector('#shiftIdBatch');
-        if (!sel) return;
-        sel.value = id;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-      }, pat.id).catch(() => {});
-      await page.waitForTimeout(250);
-      const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
-      const tr = parseRange(txt);
-      if (tr) { pat.start = tr.start; pat.end = tr.end; }
-    }
-    await page.locator('#batchSetClose').click({ timeout: 3_000 }).catch(() => {});
-    rec.success = true;
-    return patterns.map((x) => ({
-      external_id: x.id,
-      name: x.name,
-      start_time: x.start ?? '',
-      end_time: x.end ?? '',
-    }));
-  };
-
-  for (const month of months) {
-    const rows = await tryMonth(month); // reCAPTCHA は throw
-    if (rows && rows.length > 0) {
-      return { patterns: rows, sourceMonth: month, diag };
-    }
+  if (patterns.length === 0) {
+    // 登録済みパターンが本当に0件 (まだ1つも作っていない)。これは「失敗」ではないが
+    // 反映に使えないので、ユーザーに分かるよう専用コードで知らせる。
+    const err = new Error(
+      'SalonBoardに勤務パターンが1つも登録されていません。SalonBoardの「スタッフ設定 > 勤務パターン登録」でパターン（早番・遅番など）を登録してください。',
+    );
+    err.code = 'SHIFT_PATTERNS_NONE';
+    err.diag = diag;
+    throw err;
   }
-  // どの月でも取得できなかった → 理由を投げる (worker が失敗として扱う)
-  const reachedAny = diag.tried.some((t) => t.reached);
-  const err = new Error(
-    reachedAny
-      ? `勤務パターンが取得できませんでした。シフト設定画面は開けましたが勤務パターンの一覧が空でした。SalonBoardの「毎月の受付設定」でシフト設定が完了しているか確認してください (試行月: ${months.join('/')})`
-      : `シフト設定画面を開けませんでした。SalonBoardの「毎月の受付設定」でこの月のシフト設定が未設定の可能性があります (試行月: ${months.join('/')}, 最終URL: ${diag.tried.map((t) => t.url).filter(Boolean).pop() ?? '?'})`,
-  );
-  err.code = 'SHIFT_PATTERNS_EMPTY';
-  err.diag = diag;
-  throw err;
+
+  return { patterns, sourceMonth: null, diag };
 }
 
 async function pushShiftsViaForm(page, payload, opts = {}) {

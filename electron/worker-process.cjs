@@ -2915,8 +2915,9 @@ async function runPushJobs({ showBrowser } = {}) {
           }
         } catch (e) {
           const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
-          // 「画面は開けたが空/未設定」は再試行しても直らないので manual_required。
-          const noRetry = isCaptcha || e?.code === 'SHIFT_PATTERNS_EMPTY' || exhausted;
+          // 「パターン未登録」は再試行しても直らないので manual_required。
+          // 「画面未到達」は一時的なログイン切れ等の可能性があるので retryable。
+          const noRetry = isCaptcha || e?.code === 'SHIFT_PATTERNS_NONE' || e?.code === 'SHIFT_PATTERNS_EMPTY' || exhausted;
           await postCallback({
             job_id: job.id, job_type: 'fetch_shift_patterns',
             status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
