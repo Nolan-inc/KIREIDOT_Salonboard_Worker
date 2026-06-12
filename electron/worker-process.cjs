@@ -39,6 +39,7 @@ const {
   pushScheduleViaForm,
   deleteScheduleViaForm,
   pushShiftsViaForm,
+  scrapeShiftPatterns,
   cancelBookingViaForm,
   changeBookingViaForm,
   postBlogViaForm,
@@ -1660,6 +1661,21 @@ async function processShop(target, channels, runId, opts = {}) {
           at: new Date().toISOString(),
         });
       }
+      // 勤務パターン (全日/土日祝早 等) も取得して DB へ。
+      // Admin のシフトパターン紐付けUIのデータソースになる。失敗しても同期は続行。
+      try {
+        const pats = await scrapeShiftPatterns(page, baseUrl);
+        if (pats.length > 0) {
+          await sendShiftPatterns(shopId, pats);
+          emit('shop:progress', { shopId, step: 'shifts', msg: `勤務パターン ${pats.length} 件保存` });
+        }
+      } catch (e) {
+        emit('log', {
+          level: 'warn',
+          msg: `[${shopId.slice(0, 8)}] shift patterns scrape error: ${e instanceof Error ? e.message : e}`,
+          at: new Date().toISOString(),
+        });
+      }
     }
 
     await markCredentialSuccess(shopId);
@@ -2476,6 +2492,27 @@ async function sendShifts(shopId, rows) {
   return valid.length;
 }
 
+// SalonBoard の勤務パターン (S…/名前/時間帯) を DB へ upsert する。
+// 紐付け (matched_preset_id) は DB 側で保持される。
+async function sendShiftPatterns(shopId, rows) {
+  if (!supabase || !rows || rows.length === 0) return 0;
+  const valid = rows.filter((r) => r.external_id);
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_shift_patterns', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'warn',
+      msg: `bulk_upsert_shift_patterns: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
 async function markCredentialSuccess(shopId) {
   try {
     await supabase
@@ -2869,6 +2906,10 @@ async function runPushJobs({ showBrowser } = {}) {
       } else if (isShifts) {
         // ---- シフト反映 (KIREIDOT shifts → SalonBoard シフト設定) ----
         const result = await pushShiftsViaForm(page, payload, { baseUrl, enablePush });
+        // 読み取った勤務パターンを DB へ (紐付けUIのデータソース。失敗しても続行)
+        if (Array.isArray(result.patterns) && result.patterns.length > 0) {
+          await sendShiftPatterns(job.shop_id, result.patterns).catch(() => {});
+        }
         const unmapped = Array.isArray(payload.unmapped_staff) && payload.unmapped_staff.length > 0
           ? ` / 未紐付けスタッフ: ${payload.unmapped_staff.join(', ')}`
           : '';
