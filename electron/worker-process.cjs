@@ -2482,9 +2482,10 @@ async function sendShifts(shopId, rows) {
 // SalonBoard の勤務パターン (S…/名前/時間帯) を DB へ upsert する。
 // 紐付け (matched_preset_id) は DB 側で保持される。
 async function sendShiftPatterns(shopId, rows) {
-  if (!supabase || !rows || rows.length === 0) return 0;
+  if (!supabase) return { sent: 0, error: 'supabase 未初期化' };
+  if (!rows || rows.length === 0) return { sent: 0, error: null };
   const valid = rows.filter((r) => r.external_id);
-  if (valid.length === 0) return 0;
+  if (valid.length === 0) return { sent: 0, error: 'external_id を持つ行がありません' };
   const { error } = await supabase.rpc('salonboard_bulk_upsert_shift_patterns', {
     p_shop_id: shopId,
     p_rows: valid,
@@ -2495,9 +2496,9 @@ async function sendShiftPatterns(shopId, rows) {
       msg: `bulk_upsert_shift_patterns: ${error.message}`,
       at: new Date().toISOString(),
     });
-    return 0;
+    return { sent: 0, error: error.message };
   }
-  return valid.length;
+  return { sent: valid.length, error: null };
 }
 
 async function markCredentialSuccess(shopId) {
@@ -2896,22 +2897,28 @@ async function runPushJobs({ showBrowser } = {}) {
         try {
           const res = await scrapeShiftPatterns(page, baseUrl); // 取得できなければ throw
           const pats = res.patterns || [];
-          const sent = await sendShiftPatterns(job.shop_id, pats);
+          const { sent, error: upsertError } = await sendShiftPatterns(job.shop_id, pats);
           if (sent === 0) {
-            // 取得は0件だがthrowされなかった (理論上ここには来ないが保険)
+            // scrape は成功(throwされず)だが DB 保存が 0 件。
+            // pats が空なら scrape の不整合、upsertError があれば DB エラー。
+            const why = pats.length === 0
+              ? '読み取り結果が0件でした'
+              : upsertError
+                ? `DB保存エラー: ${upsertError}`
+                : '保存対象が0件でした';
             await postCallback({
               job_id: job.id, job_type: 'fetch_shift_patterns', status: 'manual_required',
-              error_code: 'SHIFT_PATTERNS_EMPTY',
-              error: '勤務パターンが0件でした。SalonBoardの「毎月の受付設定」でシフト設定が完了しているか確認してください。',
+              error_code: 'SHIFT_PATTERNS_SAVE_FAILED',
+              error: `勤務パターンを保存できませんでした (読取${pats.length}件 / ${why})。`,
               manual_required: true,
             });
-            emit('log', { level: 'warn', msg: `[${tag}] 🟡 勤務パターン 0 件`, at: new Date().toISOString() });
+            emit('log', { level: 'warn', msg: `[${tag}] 🟡 勤務パターン保存0件 (読取${pats.length}件, ${why})`, at: new Date().toISOString() });
           } else {
             await postCallback({
               job_id: job.id, job_type: 'fetch_shift_patterns', status: 'succeeded',
-              summary: `勤務パターン ${sent} 件取得 (${res.sourceMonth})`,
+              summary: `勤務パターン ${sent} 件取得`,
             });
-            emit('log', { level: 'info', msg: `[${tag}] ✅ 勤務パターン ${sent} 件取得 (${res.sourceMonth})`, at: new Date().toISOString() });
+            emit('log', { level: 'info', msg: `[${tag}] ✅ 勤務パターン ${sent} 件取得`, at: new Date().toISOString() });
           }
         } catch (e) {
           const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
