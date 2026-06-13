@@ -53,17 +53,23 @@ resource "aws_ecs_task_definition" "worker" {
       { name = "KIREIDOT_API_URL", value = var.kireidot_api_url },
       { name = "WORKER_MODE", value = "central-dev" },
       { name = "POLL_INTERVAL_MS", value = tostring(var.poll_interval_ms) },
-      { name = "WORKER_CAPABILITIES", value = "headless_chromium" },
+      { name = "WORKER_CAPABILITIES", value = "real_chrome" },
       { name = "SALONBOARD_ENABLE_PUSH", value = var.enable_push ? "1" : "false" },
       { name = "SALONBOARD_DEBUG_CAPTURE", value = "1" },
+      # headful 実 Chrome (headless は Akamai に弾かれる実測あり)。entrypoint が Xvfb を用意。
+      { name = "SB_BROWSER_CHANNEL", value = "chrome" },
+      { name = "SB_HEADLESS", value = "0" },
+      # 単一店舗フェーズ: 出口 IP は global proxy env で指定 (複数店は credentials.proxy 優先)
+      { name = "SB_PROXY_SERVER", value = var.proxy_server },
       { name = "STATE_S3_BUCKET", value = aws_s3_bucket.state.bucket },
       { name = "DEBUG_S3_BUCKET", value = aws_s3_bucket.debug.bucket },
     ]
 
-    secrets = [{
-      name      = "SALONBOARD_WORKER_TOKEN"
-      valueFrom = aws_ssm_parameter.worker_token.arn
-    }]
+    secrets = [
+      { name = "SALONBOARD_WORKER_TOKEN", valueFrom = aws_ssm_parameter.worker_token.arn },
+      { name = "SB_PROXY_USERNAME", valueFrom = aws_ssm_parameter.proxy_username.arn },
+      { name = "SB_PROXY_PASSWORD", valueFrom = aws_ssm_parameter.proxy_password.arn },
+    ]
 
     linuxParameters = { initProcessEnabled = false } # entrypoint が exec node で PID1 を渡す
 
@@ -73,50 +79,6 @@ resource "aws_ecs_task_definition" "worker" {
         awslogs-group         = aws_cloudwatch_log_group.worker.name
         awslogs-region        = var.region
         awslogs-stream-prefix = "worker"
-      }
-    }
-  }])
-}
-
-# Akamai カナリア (Phase 0): Admin/ジョブキューに触れない読み取り専用ループ。
-# Service は作らず `aws ecs run-task` で 1 個だけ手動起動する (docs/aws-migration.md)。
-resource "aws_ecs_task_definition" "canary" {
-  family                   = "${var.name}-canary"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.worker_cpu
-  memory                   = var.worker_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = "X86_64"
-  }
-
-  container_definitions = jsonencode([{
-    name        = "canary"
-    image       = "${aws_ecr_repository.worker.repository_url}:latest"
-    essential   = true
-    stopTimeout = 120
-
-    environment = [
-      { name = "CANARY_MODE", value = "1" },
-      { name = "CANARY_INTERVAL_MS", value = "300000" },
-      { name = "CANARY_SHOP_LABEL", value = "phase0-canary" },
-    ]
-
-    secrets = [
-      { name = "SALONBOARD_LOGIN_ID", valueFrom = aws_ssm_parameter.canary_login_id.arn },
-      { name = "SALONBOARD_PASSWORD", valueFrom = aws_ssm_parameter.canary_password.arn },
-    ]
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        awslogs-group         = aws_cloudwatch_log_group.worker.name
-        awslogs-region        = var.region
-        awslogs-stream-prefix = "canary"
       }
     }
   }])
@@ -138,10 +100,11 @@ resource "aws_ecs_service" "worker" {
     weight            = 4
   }
 
+  # public subnet + public IP (NAT GW 無し)。出口 IP はプロキシが担うので問題なし。
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.worker.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
 
   # CI が update-service するため task_definition の差分は無視

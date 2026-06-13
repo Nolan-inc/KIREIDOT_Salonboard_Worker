@@ -206,6 +206,13 @@ type Job = {
     login_id: string;
     password: string;
     base_url: string | null;
+    // クラウド worker 用: 店舗ごとの住宅/ISP プロキシ (Admin が復号して同梱)。
+    // 省略時は env SB_PROXY_* / direct にフォールバック (resolveLaunchOptions 参照)。
+    proxy?: {
+      server: string;
+      username?: string | null;
+      password?: string | null;
+    } | null;
   };
 };
 
@@ -436,11 +443,24 @@ async function handleJob(job: Job): Promise<void> {
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy);
+    if (launch.proxy) {
+      console.log(
+        `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
+      );
+    }
+    browser = await chromium.launch(launch);
     ctx = await browser.newContext({
       storageState: readStorageState(ssPath),
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      // 実 Chrome (channel=chrome) のときは UA を偽装しない。Linux 実 Chrome に
+      // Mac UA を被せると Sec-CH-UA-Platform と矛盾し、かえって bot シグナルになる。
+      // bundled chromium (channel 未指定 = 既存 PC 経路) のときは従来どおり Mac UA。
+      ...(realChrome
+        ? {}
+        : {
+            userAgent:
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+          }),
       locale: "ja-JP",
       timezoneId: "Asia/Tokyo",
     });
@@ -641,6 +661,35 @@ async function handleJob(job: Job): Promise<void> {
 //
 // 重要: storageState はサーバへ送らない。Admin 側 API もこのファイルを受け取らない。
 // ------------------------------------------------------------
+type ResolvedLaunch = {
+  launch: Parameters<typeof chromium.launch>[0];
+  realChrome: boolean;
+};
+
+/**
+ * ブラウザ起動オプションを env + ジョブ単位プロキシ設定から組み立てる。
+ *  - SB_BROWSER_CHANNEL=chrome … 実 Chrome (クラウドの Akamai 対策)。未設定なら bundled chromium。
+ *  - SB_HEADLESS=0 … ヘッドフル (クラウドは entrypoint の xvfb 経由)。既定 headless。
+ *  - プロキシは「ジョブの credentials.proxy」優先、無ければ env SB_PROXY_* にフォールバック。
+ *    どちらも無ければ direct = 現状と完全に同じ挙動 (既存 PC / Electron 無影響)。
+ */
+function resolveLaunchOptions(
+  credProxy?: { server: string; username?: string | null; password?: string | null } | null
+): ResolvedLaunch {
+  const channel = process.env.SB_BROWSER_CHANNEL || undefined;
+  const headless = process.env.SB_HEADLESS !== "0";
+  const rawServer = credProxy?.server || process.env.SB_PROXY_SERVER || "";
+  const proxy = rawServer
+    ? {
+        // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
+        server: /:\/\//.test(rawServer) ? rawServer : `http://${rawServer}`,
+        username: credProxy?.username ?? process.env.SB_PROXY_USERNAME ?? undefined,
+        password: credProxy?.password ?? process.env.SB_PROXY_PASSWORD ?? undefined,
+      }
+    : undefined;
+  return { launch: { headless, channel, proxy }, realChrome: !!channel };
+}
+
 function storageStatePathFor(shopId: string): string {
   const dir = join(homedir(), ".kireidot", "salonboard-auth");
   try {
@@ -1277,6 +1326,18 @@ function requestShutdown(): void {
 function isShutdownRequested(): boolean {
   return shutdownRequested;
 }
+
+/**
+ * SalonBoard アクセス時のブラウザコンテキスト共通設定。
+ * Akamai が UA "HeadlessChrome" を即時 flag するため、worker 本体と同じ UA 偽装を
+ * canary / test-rescan 等の再利用側でも必ず適用すること。
+ */
+const SB_CONTEXT_OPTIONS = {
+  userAgent:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+  locale: "ja-JP",
+  timezoneId: "Asia/Tokyo",
+} as const;
 
 async function pushBooking(
   page: Page,
@@ -1921,6 +1982,7 @@ const IS_WORKER_ENTRYPOINT = (() => {
     // esbuild バンドルでは import.meta.url が出力ファイルと一致してしまうため、
     // entrypoint 判定より先に明示的に除外する (ポーリングループを起動しない)。
     if (process.env.CANARY_MODE === "1") return false;
+    if (process.env.WORKER_DISABLE_MAIN === "1") return false;
     const entry = process.argv[1];
     if (!entry) return true; // 判定材料が無ければ従来どおり起動 (後方互換)
     const entryUrl = new URL(`file://${resolve(entry)}`).href;
@@ -1955,6 +2017,7 @@ export {
   parseJstParts,
   requestShutdown,
   isShutdownRequested,
+  SB_CONTEXT_OPTIONS,
   ENABLE_PUSH,
   DRY_RUN,
 };
