@@ -3003,6 +3003,34 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
 
+  // --- 二重登録防止プリフライト (§6.4) ---
+  // payload.preflight_required (孤児再enqueue / 手動リトライ時に Admin が付与) の場合のみ、
+  // 登録フォームを開く前に予約一覧を再照合する。既に同予約が存在すれば登録せず
+  // 「既登録」として成功を返す (= 再試行による二重登録を防ぐ)。
+  // 通常の新規 push では走らないので速度に影響しない。
+  if (p.preflight_required) {
+    const existing = await findReserveIdForBooking(page, {
+      yyyymmdd: when.yyyymmdd,
+      hhmm: when.hhmm,
+      staffExt: p.salonboard_staff_external_id,
+      customerName: p.customer_name,
+    }, { baseUrl }).catch(() => null);
+    if (existing) {
+      return {
+        status: 'ok',
+        externalId: existing,
+        detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${existing}`,
+        confirmed: {
+          confirmed_customer_name: p.customer_name ?? null,
+          confirmed_staff_name: p.staff_name ?? null,
+          confirmed_menu_name: menuTarget,
+          confirmed_scheduled_at: p.scheduled_at,
+        },
+        alreadyExists: true,
+      };
+    }
+  }
+
   // --- 重要 ---
   // 登録フォームは rlastupdate (スケジュール画面に埋め込まれたタイムスタンプ) を
   // 付けないと "情報が一部失われています (KPCL017V01)" エラーになる。
@@ -3370,6 +3398,29 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const looksDone = !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
   if (!looksDone) {
+    // 完了サインが出なかった。ただし確認ダイアログは受理済み (= 送信はされた) なので、
+    // 実際には登録できている可能性が高い。ここで予約一覧を再照合し、対象予約が
+    // 見つかれば「登録成功」として扱う。これにより:
+    //   (1) 実際は登録済みなのに manual_required に倒れていた誤fail (≒最多失敗) を成功に転換
+    //   (2) 成功扱い → 再試行されない → 二重登録を防止
+    // (失敗パスでのみ実行するので正常時の速度には影響しない)
+    if (dialogAccepted) {
+      const recovered = await findReserveIdForBooking(page, {
+        yyyymmdd: when.yyyymmdd,
+        hhmm: when.hhmm,
+        staffExt: p.salonboard_staff_external_id,
+        customerName: p.customer_name,
+      }, { baseUrl }).catch(() => null);
+      if (recovered) {
+        return {
+          status: 'ok',
+          externalId: recovered,
+          detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          confirmed,
+          recovered: true,
+        };
+      }
+    }
     return fail(
       `登録ボタンは押しましたが完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl})。SalonBoard で登録状況を確認してください。`,
       'UNKNOWN_ERROR',
@@ -3653,8 +3704,29 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     .locator('a#change:visible, a.mod_btn_50:has-text("確定する"), a#regist, a:has-text("登録する")')
     .first();
   if ((await submitBtn.count().catch(() => 0)) === 0) {
-    const cap = await captureScrapeDebug(page, 'change', `no_submit_${reserveId}`, { diagnostics: { reserveId, url: page.url() } });
-    return fail(`変更の確定ボタンが見つかりませんでした (reserveId=${reserveId}${cap ? `, capture=${cap}` : ''})`, 'UNKNOWN_ERROR', true);
+    // ★診断強化: 確定ボタンが見つからない原因を特定できるよう、ページ上の
+    //   操作要素 (a/button/input) を id/class/テキスト/可視つきで列挙する。
+    //   これによりセレクタ修正に必要な実DOM情報がエラー文と capture に残る。
+    const btns = await page.evaluate(() => {
+      const pick = (el) => {
+        const r = el.getBoundingClientRect();
+        const visible = !!(r.width || r.height) && getComputedStyle(el).visibility !== 'hidden'
+          && getComputedStyle(el).display !== 'none';
+        const txt = (el.textContent || el.value || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+        const id = el.id ? `#${el.id}` : '';
+        const cls = el.className && typeof el.className === 'string'
+          ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+        return `${el.tagName.toLowerCase()}${id}${cls}${visible ? '' : '(hidden)'}「${txt}」`;
+      };
+      return Array.from(document.querySelectorAll('a, button, input[type="button"], input[type="submit"]'))
+        .map(pick).slice(0, 30).join(' / ');
+    }).catch(() => '(取得失敗)');
+    const cap = await captureScrapeDebug(page, 'change', `no_submit_${reserveId}`, { diagnostics: { reserveId, url: page.url(), buttons: btns } });
+    return fail(
+      `変更の確定ボタンが見つかりませんでした (reserveId=${reserveId}${cap ? `, capture=${cap}` : ''})。画面上のボタン: ${btns.slice(0, 400)}`,
+      'UNKNOWN_ERROR',
+      true,
+    );
   }
 
   let nativeDialogAccepted = false;
