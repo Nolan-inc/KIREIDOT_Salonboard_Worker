@@ -438,3 +438,36 @@ VITE_WORKER_ID=銀座本店-mac-01
   - `salonboard_credentials.enabled = true`, `blocked_until` が過去
   - `salonboard_consents.revoked_at IS NULL` (有効な同意あり)
 - credentials が満たされない場合は **何が原因か** が個別エラーコードで返る (`credentials_not_set` / `credentials_disabled` / `blocked` / `consent_missing` / `shop_not_allowed`)
+
+---
+
+## 複数店舗の worker セットアップ（マルチテナント運用）
+
+worker は **店舗ごとの Mac（推奨: 専用 Mac mini）に同一の `予約同期くん.app` を入れ、その店舗の実回線で動かす**構成です。なぜ各店舗の実回線が必要か・全体フローは `docs/multitenant-worker-flow.html`（PDF 同梱）を参照。
+
+> **重要:** SalonBoard は Akamai のボット対策で **データセンター IP（AWS / さくら / カゴヤ等）からのアクセスを遮断**します。クラウドに worker を置く完全集約は不可。各店舗の実回線（住宅/事業者 IP）からの実 Chrome アクセスだけが通るため、**手足（worker）は各店舗の Mac に置く**のが必須です（頭脳=Admin/Supabase はクラウド）。
+
+### 推奨構成
+
+- **店舗ごとに専用 Mac mini**（常駐・スリープ無効・有線推奨）。業務用 PC との同居は事故の元（スリープ/終了/アカウント競合）。
+- **店舗ごとに 1 デバイストークン**（`/admin/salonboard/devices` で発行し、その店舗に紐付け）。1 店舗 = 1 デバイス = 1 回線 が Akamai 的に最も自然。
+
+### キッティング手順（新規店舗の追加）
+
+1. **Admin**: 組織・店舗 + SalonBoard 認証情報を登録（`/admin/salonboard`）
+2. **Admin**: `/admin/salonboard/devices` でデバイストークンを発行 → その店舗に紐付け
+3. **店舗 Mac**: 下記スクリプトを 1 回流す（インストール + 設定 + 常時稼働化 + 起動）
+
+```bash
+scripts/setup-store-worker.sh \
+  --token  <Admin で発行したデバイストークン> \
+  --api    https://admin.kireidot.jp \
+  --worker 銀座本店-mac-01 \
+  --dmg    https://github.com/Nolan-inc/KIREIDOT_Salonboard_Worker/releases/latest/download/salonboard-sync-mac-arm64.dmg
+```
+
+スクリプトは `~/Library/Application Support/予約同期くん/salonboard-device.json` にデバイス設定を書き込み（手動で「設定」画面に入力する代わり）、`pmset` でスリープを無効化してアプリを起動します。完了後、アプリ上部のバナーが「表示なし（正常）」になれば稼働中。
+
+> 手動でやる場合は README の「SalonBoard Device 設定手順」のとおり、アプリの **設定** 画面で API URL + トークンを入力。
+>
+> ⚠️ スクリプトは初回検証前のドラフト扱い。実機 1 台で「設定ファイルのみで worker がポーリングを開始するか」を確認してから横展開すること。
