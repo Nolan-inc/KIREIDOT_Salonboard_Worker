@@ -1,6 +1,8 @@
 node_modules
 dist
 electron
+# クラウド worker (Dockerfile.worker) は scrapers.cjs を共有するため例外で含める
+!electron/scrapers.cjs
 renderer
 build-resources
 kireidot-salonboard-extension
