@@ -62,6 +62,15 @@ type ScrapersModule = {
   postPhotoGalleryViaForm: ScraperFn;
   deleteBlogViaForm: ScraperFn;
   postReviewReplyViaForm: ScraperFn;
+  // fetch 系 (status ではなく rows/patterns を返す)
+  scrapeBookings: (
+    page: Page,
+    opts: Record<string, unknown>,
+  ) => Promise<{ rows: unknown[]; debug?: unknown }>;
+  scrapeShiftPatterns: (
+    page: Page,
+    baseUrl: string,
+  ) => Promise<{ patterns?: unknown[] }>;
 };
 const scrapers = scrapersDefault as unknown as ScrapersModule;
 
@@ -811,9 +820,57 @@ async function handleJob(job: Job): Promise<void> {
       return;
     }
 
+    if (job.job_type === "fetch_bookings") {
+      // genre / shop_name は Admin がジョブ top-level に同梱済み (jobs/route.ts)。
+      // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
+      const genre =
+        (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      const { rows } = await scrapers.scrapeBookings(page, { baseUrl, genre });
+      const bookings = rows ?? [];
+      // Admin callback (job_type=fetch_bookings) が bookings[] を
+      // salonboard_bulk_upsert_bookings RPC で upsert する。PC の定期ループと同 RPC。
+      await report({
+        job_id: job.id,
+        job_type: "fetch_bookings",
+        status: "succeeded",
+        bookings,
+        summary: `fetch_bookings: ${bookings.length}件取得 (genre=${genre})`,
+      } as unknown as CallbackBody);
+      console.log(`[job] done  ${tag} (fetch_bookings ${bookings.length}件)`);
+      return;
+    }
+
+    if (job.job_type === "fetch_shift_patterns") {
+      // scrapeShiftPatterns は取得不可で throw する (handleJob の catch が retryable 化)。
+      // patterns を callback に載せ、Admin 側で既存 RPC salonboard_bulk_upsert_shift_patterns
+      // に渡す (PC は supabase 直呼びだが、クラウドは Admin callback 経由)。
+      const res = await scrapers.scrapeShiftPatterns(page, baseUrl);
+      const patterns = (res?.patterns ?? []) as unknown[];
+      if (patterns.length === 0) {
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shift_patterns",
+          status: "manual_required",
+          error_code: "SHIFT_PATTERNS_EMPTY",
+          error: "勤務パターンの読み取り結果が0件でした。",
+          manual_required: true,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_shift_patterns 0件 -> manual_required)`);
+        return;
+      }
+      await report({
+        job_id: job.id,
+        job_type: "fetch_shift_patterns",
+        status: "succeeded",
+        shift_patterns: patterns,
+        summary: `fetch_shift_patterns: ${patterns.length}件取得`,
+      } as unknown as CallbackBody);
+      console.log(`[job] done  ${tag} (fetch_shift_patterns ${patterns.length}件)`);
+      return;
+    }
+
     // 未実装ジョブ: succeeded ではなく not_implemented
-    // (残: fetch_bookings / fetch_sales / fetch_shift_patterns — genre や
-    //  パターン配送など追加整合が必要なため次バッチ)
+    // (残: fetch_sales = scrapers.cjs に scraper 未実装のためスキップ。PC にも無い)
     await report({
       job_id: job.id,
       status: "not_implemented",
