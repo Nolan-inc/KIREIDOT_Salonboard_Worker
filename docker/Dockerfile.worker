@@ -23,6 +23,7 @@ RUN npm install --no-save --no-audit --no-fund esbuild@0.25.5 \
  && npx esbuild worker.ts \
       --bundle --platform=node --format=esm --target=node22 \
       --external:playwright \
+      --banner:js="import { createRequire as __cjsRequire } from 'node:module'; const require = __cjsRequire(import.meta.url);" \
       --outfile=dist/worker.mjs
 
 # --- runtime: 実 Chrome + Xvfb ------------------------------------------------
