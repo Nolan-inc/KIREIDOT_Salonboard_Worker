@@ -24,4 +24,4 @@ fi
 # worker 本体 (poll ループ) を PID1 として起動。
 # KIREIDOT_API_URL / SALONBOARD_WORKER_TOKEN / SB_PROXY_* 等は
 # タスク定義 (SSM 経由) で注入する。CANARY_MODE / WORKER_DISABLE_MAIN は設定しない。
-exec node /app/worker.mjs "$@"
+exec node /app/worker.cjs "$@"
