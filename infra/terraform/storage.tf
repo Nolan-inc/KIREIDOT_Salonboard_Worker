@@ -92,11 +92,11 @@ resource "aws_ssm_parameter" "worker_token" {
   }
 }
 
-# Akamai カナリア用: テスト店舗の SalonBoard 認証情報 (Admin/ジョブキュー非依存)。
-#   aws ssm put-parameter --name /kireidot/worker/CANARY_LOGIN_ID --type SecureString --value '<id>' --overwrite
-#   aws ssm put-parameter --name /kireidot/worker/CANARY_PASSWORD --type SecureString --value '<pw>' --overwrite
-resource "aws_ssm_parameter" "canary_login_id" {
-  name  = "/kireidot/worker/CANARY_LOGIN_ID"
+# 住宅/ISP プロキシの認証情報 (単一店舗フェーズ: global)。値は terraform 管理外:
+#   aws ssm put-parameter --name /kireidot/worker/SB_PROXY_USERNAME --type SecureString --value '<user>' --overwrite
+#   aws ssm put-parameter --name /kireidot/worker/SB_PROXY_PASSWORD --type SecureString --value '<pass>' --overwrite
+resource "aws_ssm_parameter" "proxy_username" {
+  name  = "/kireidot/worker/SB_PROXY_USERNAME"
   type  = "SecureString"
   value = "CHANGE_ME"
 
@@ -105,8 +105,8 @@ resource "aws_ssm_parameter" "canary_login_id" {
   }
 }
 
-resource "aws_ssm_parameter" "canary_password" {
-  name  = "/kireidot/worker/CANARY_PASSWORD"
+resource "aws_ssm_parameter" "proxy_password" {
+  name  = "/kireidot/worker/SB_PROXY_PASSWORD"
   type  = "SecureString"
   value = "CHANGE_ME"
 

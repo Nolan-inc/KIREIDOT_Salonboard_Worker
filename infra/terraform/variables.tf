@@ -25,10 +25,10 @@ variable "poll_interval_ms" {
   default = 15000
 }
 
-variable "spare_eip_count" {
-  description = "Tier3 IP ローテーション用の予備 EIP 数 (NAT GW 付け替え用)"
-  type        = number
-  default     = 2
+variable "proxy_server" {
+  description = "住宅/ISP プロキシのエンドポイント host:port (SB_PROXY_SERVER)。例: isp.decodo.com:10001。認証情報 (user/pass) は SSM SecureString 経由"
+  type        = string
+  default     = "CHANGE-ME:0"
 }
 
 variable "worker_cpu" {

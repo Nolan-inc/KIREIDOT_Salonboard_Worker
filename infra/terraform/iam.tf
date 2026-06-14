@@ -26,8 +26,8 @@ resource "aws_iam_role_policy" "task_execution_ssm" {
       Action = ["ssm:GetParameters"]
       Resource = [
         aws_ssm_parameter.worker_token.arn,
-        aws_ssm_parameter.canary_login_id.arn,
-        aws_ssm_parameter.canary_password.arn,
+        aws_ssm_parameter.proxy_username.arn,
+        aws_ssm_parameter.proxy_password.arn,
       ]
     }]
   })

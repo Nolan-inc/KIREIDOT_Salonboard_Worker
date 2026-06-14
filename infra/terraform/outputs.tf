@@ -14,26 +14,12 @@ output "task_definition_family" {
   value = aws_ecs_task_definition.worker.family
 }
 
-output "canary_task_definition_family" {
-  value = aws_ecs_task_definition.canary.family
-}
-
-output "private_subnet_ids" {
-  value = aws_subnet.private[*].id
+output "public_subnet_ids" {
+  value = aws_subnet.public[*].id
 }
 
 output "worker_security_group_id" {
   value = aws_security_group.worker.id
-}
-
-output "nat_egress_ip" {
-  description = "SalonBoard から見える固定 egress IP"
-  value       = aws_eip.nat.public_ip
-}
-
-output "spare_eips" {
-  description = "Tier3 IP ローテーション用予備 EIP"
-  value       = aws_eip.spare[*].public_ip
 }
 
 output "github_deploy_role_arn" {

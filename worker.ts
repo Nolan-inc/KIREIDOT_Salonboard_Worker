@@ -35,6 +35,45 @@ import {
   staffOptionValue,
 } from "./salonboard-selectors";
 
+// 本番スクレイパー (scrapers.cjs) を共有。PC 版 worker-process.cjs と同じ実装を
+// クラウド worker でも再利用する。electron 非依存 (node:fs/os/path のみ) なので
+// esbuild でそのままバンドル可能。Dockerfile.worker が electron/scrapers.cjs を COPY する。
+import scrapersDefault from "./electron/scrapers.cjs";
+
+type ScraperResult = {
+  status: "ok" | "confirm_only" | "failed";
+  externalId?: string | null;
+  recoveredReserveId?: string | null;
+  errorCode?: string;
+  reason?: string;
+  manualRequired?: boolean;
+  summary?: string;
+  alreadyAbsent?: boolean;
+};
+type ScraperFn = (
+  page: Page,
+  payload: unknown,
+  opts: Record<string, unknown>,
+) => Promise<ScraperResult>;
+type ScrapersModule = {
+  cancelBookingViaForm: ScraperFn;
+  deleteScheduleViaForm: ScraperFn;
+  pushShiftsViaForm: ScraperFn;
+  postPhotoGalleryViaForm: ScraperFn;
+  deleteBlogViaForm: ScraperFn;
+  postReviewReplyViaForm: ScraperFn;
+  // fetch 系 (status ではなく rows/patterns を返す)
+  scrapeBookings: (
+    page: Page,
+    opts: Record<string, unknown>,
+  ) => Promise<{ rows: unknown[]; debug?: unknown }>;
+  scrapeShiftPatterns: (
+    page: Page,
+    baseUrl: string,
+  ) => Promise<{ patterns?: unknown[] }>;
+};
+const scrapers = scrapersDefault as unknown as ScrapersModule;
+
 // package.json の "version" を実行時に読む。失敗しても起動を止めない。
 function readPkgVersion(): string {
   try {
@@ -192,7 +231,12 @@ type JobType =
   | "fetch_sales"
   | "push_booking"
   | "cancel_booking"
-  | "push_blog";
+  | "push_blog"
+  | "push_shifts"
+  | "push_photo_gallery"
+  | "delete_blog"
+  | "push_review_reply"
+  | "fetch_shift_patterns";
 
 type Job = {
   id: string;
@@ -206,6 +250,13 @@ type Job = {
     login_id: string;
     password: string;
     base_url: string | null;
+    // クラウド worker 用: 店舗ごとの住宅/ISP プロキシ (Admin が復号して同梱)。
+    // 省略時は env SB_PROXY_* / direct にフォールバック (resolveLaunchOptions 参照)。
+    proxy?: {
+      server: string;
+      username?: string | null;
+      password?: string | null;
+    } | null;
   };
 };
 
@@ -383,6 +434,75 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
+/**
+ * scrapers.cjs の push/cancel 系結果 (status: ok|confirm_only|failed) を
+ * Admin callback ステータスへマップする共通処理 (worker-process.cjs と同じ分類)。
+ *  - ok          → succeeded
+ *  - confirm_only → manual_required (PUSH_DISABLED: ENABLE_PUSH=false で実書込していない)
+ *  - failed      → captcha_detected / manual_required (上限到達 or manualRequired) / retryable_failed
+ */
+async function reportScraperResult(
+  job: Job,
+  jobType: string,
+  result: ScraperResult,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const tag = `${jobType} ${job.id.slice(0, 8)}`;
+  if (result.status === "ok") {
+    await report({
+      job_id: job.id,
+      job_type: jobType,
+      status: "succeeded",
+      external_id: result.externalId ?? result.recoveredReserveId ?? null,
+      summary: result.summary ?? `${jobType} 完了`,
+      ...extra,
+    } as unknown as CallbackBody);
+    console.log(`[job] done  ${tag} (ok)`);
+    return;
+  }
+  if (result.status === "confirm_only") {
+    await report({
+      job_id: job.id,
+      job_type: jobType,
+      status: "manual_required",
+      error_code: "PUSH_DISABLED",
+      error:
+        "入力/照合まで成功しましたが、自動登録 (実書込) が無効 (SALONBOARD_ENABLE_PUSH=未設定) のため反映していません。SalonBoard で確認のうえ手動対応してください。",
+      manual_required: true,
+      ...extra,
+    } as unknown as CallbackBody);
+    console.log(`[job] done  ${tag} (confirm_only -> manual_required)`);
+    return;
+  }
+  // failed
+  const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
+  const exhausted = job.attempts + 1 >= cap;
+  const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
+  const toManual = !!result.manualRequired || exhausted;
+  await report({
+    job_id: job.id,
+    job_type: jobType,
+    status: isCaptcha
+      ? "captcha_detected"
+      : toManual
+        ? "manual_required"
+        : "retryable_failed",
+    error_code: result.errorCode,
+    error: result.reason,
+    manual_required: toManual,
+    ...(isCaptcha
+      ? {
+          block: {
+            until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+            reason: `reCAPTCHA during ${jobType}`,
+          },
+        }
+      : {}),
+    ...extra,
+  } as unknown as CallbackBody);
+  console.log(`[job] done  ${tag} (${result.errorCode}: ${result.reason})`);
+}
+
 // ------------------------------------------------------------
 // ジョブ処理
 // ------------------------------------------------------------
@@ -436,11 +556,24 @@ async function handleJob(job: Job): Promise<void> {
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy);
+    if (launch.proxy) {
+      console.log(
+        `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
+      );
+    }
+    browser = await chromium.launch(launch);
     ctx = await browser.newContext({
       storageState: readStorageState(ssPath),
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      // 実 Chrome (channel=chrome) のときは UA を偽装しない。Linux 実 Chrome に
+      // Mac UA を被せると Sec-CH-UA-Platform と矛盾し、かえって bot シグナルになる。
+      // bundled chromium (channel 未指定 = 既存 PC 経路) のときは従来どおり Mac UA。
+      ...(realChrome
+        ? {}
+        : {
+            userAgent:
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+          }),
       locale: "ja-JP",
       timezoneId: "Asia/Tokyo",
     });
@@ -615,7 +748,175 @@ async function handleJob(job: Job): Promise<void> {
       return;
     }
 
+    // ---- Phase 2: scrapers.cjs 再利用ハンドラ群 ----------------------------
+    // salon_id / shop_name は worker.ts の job/credentials には現状無いため null
+    // フォールバック (単一サロン店舗は問題なし。複数サロン店舗の正確な選択には
+    // Admin 側で credentials.salon_id / shop_name を同梱する必要がある)。
+    const salonId = (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+    const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+
+    if (job.job_type === "cancel_booking") {
+      const p = job.payload as Record<string, unknown>;
+      // 休憩・業務 (booking_type='block') は SalonBoard 上「予定」なので
+      // 予約キャンセルではなくスケジュール画面から予定を削除する。
+      const result =
+        p.booking_type === "block"
+          ? await scrapers.deleteScheduleViaForm(page, p, {
+              baseUrl,
+              enableDelete: ENABLE_PUSH,
+            })
+          : await scrapers.cancelBookingViaForm(page, p, {
+              baseUrl,
+              enableCancel: ENABLE_PUSH,
+              salonId,
+              shopName,
+            });
+      await reportScraperResult(job, "cancel_booking", result, {
+        booking_id: p.booking_id ?? null,
+      });
+      return;
+    }
+
+    if (job.job_type === "push_shifts") {
+      // 注: PC 版は読み取った勤務パターンを Supabase に直接保存するが、クラウドは
+      // Admin callback のみ。push_shifts は status 報告で足りるため、パターン保存は
+      // fetch_shift_patterns 側に委ねる (ここではスキップ)。
+      const result = await scrapers.pushShiftsViaForm(page, job.payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "push_shifts", result);
+      return;
+    }
+
+    if (job.job_type === "push_photo_gallery") {
+      const result = await scrapers.postPhotoGalleryViaForm(page, job.payload, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+        salonId,
+        shopName,
+      });
+      await reportScraperResult(job, "push_photo_gallery", result);
+      return;
+    }
+
+    if (job.job_type === "delete_blog") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.deleteBlogViaForm(page, p, {
+        baseUrl,
+        enableDelete: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "delete_blog", result, {
+        content_post_id: p.content_post_id ?? null,
+        // external_id は ok 時のみ。confirm_only/failed で送ると Admin が
+        // 早期に削除済みと誤判定しうる (PC worker-process.cjs と同じ)。
+        ...(result.status === "ok"
+          ? { external_id: result.externalId ?? p.external_blog_id ?? null }
+          : {}),
+      });
+      return;
+    }
+
+    if (job.job_type === "push_review_reply") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.postReviewReplyViaForm(page, p, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "push_review_reply", result, {
+        review_import_id: p.review_import_id ?? null,
+      });
+      return;
+    }
+
+    if (job.job_type === "fetch_bookings") {
+      // genre / shop_name は Admin がジョブ top-level に同梱済み (jobs/route.ts)。
+      // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
+      const genre =
+        (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
+      const { rows, debug } = await scrapers.scrapeBookings(page, {
+        baseUrl,
+        genre,
+        loginId: job.credentials.login_id,
+        password: job.credentials.password,
+      });
+      // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
+      // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
+      if ((debug as { loggedOut?: boolean } | undefined)?.loggedOut) {
+        await report({
+          job_id: job.id,
+          job_type: "fetch_bookings",
+          status: "retryable_failed",
+          error: `session lost during bookings scrape (landedOn=${
+            (debug as { landedOn?: string })?.landedOn ?? "?"
+          })`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_bookings session lost -> retryable)`);
+        return;
+      }
+      const bookings = rows ?? [];
+      // Admin callback (job_type=fetch_bookings) が bookings[] を
+      // salonboard_bulk_upsert_bookings RPC で upsert する。PC の定期ループと同 RPC。
+      await report({
+        job_id: job.id,
+        job_type: "fetch_bookings",
+        status: "succeeded",
+        bookings,
+        summary: `fetch_bookings: ${bookings.length}件取得 (genre=${genre})`,
+      } as unknown as CallbackBody);
+      console.log(`[job] done  ${tag} (fetch_bookings ${bookings.length}件)`);
+      return;
+    }
+
+    if (job.job_type === "fetch_shift_patterns") {
+      // patterns を callback に載せ、Admin 側で既存 RPC salonboard_bulk_upsert_shift_patterns
+      // に渡す (PC は supabase 直呼びだが、クラウドは Admin callback 経由)。
+      // scrapeShiftPatterns は取得不可時に code 付きで throw する (空配列は返さない)。
+      // SHIFT_PATTERNS_NONE/PARSE は再試行しても直らないので manual_required に倒す
+      // (PC worker-process.cjs と同じ分類)。
+      try {
+        const res = await scrapers.scrapeShiftPatterns(page, baseUrl);
+        const patterns = (res?.patterns ?? []) as unknown[];
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shift_patterns",
+          status: "succeeded",
+          shift_patterns: patterns,
+          summary: `fetch_shift_patterns: ${patterns.length}件取得`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_shift_patterns ${patterns.length}件)`);
+      } catch (e) {
+        const err = e as { code?: string; message?: string };
+        const code = err?.code ?? "UNKNOWN_ERROR";
+        const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
+        const exhausted = job.attempts + 1 >= cap;
+        const isCaptcha = code === "RECAPTCHA_REQUIRED";
+        const noRetry =
+          isCaptcha ||
+          code === "SHIFT_PATTERNS_NONE" ||
+          code === "SHIFT_PATTERNS_PARSE" ||
+          code === "SHIFT_PATTERNS_EMPTY" ||
+          exhausted;
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shift_patterns",
+          status: isCaptcha
+            ? "captcha_detected"
+            : noRetry
+              ? "manual_required"
+              : "retryable_failed",
+          error_code: code,
+          error: String(err?.message ?? e).slice(0, 500),
+          manual_required: noRetry,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_shift_patterns ${code})`);
+      }
+      return;
+    }
+
     // 未実装ジョブ: succeeded ではなく not_implemented
+    // (残: fetch_sales = scrapers.cjs に scraper 未実装のためスキップ。PC にも無い)
     await report({
       job_id: job.id,
       status: "not_implemented",
@@ -641,6 +942,35 @@ async function handleJob(job: Job): Promise<void> {
 //
 // 重要: storageState はサーバへ送らない。Admin 側 API もこのファイルを受け取らない。
 // ------------------------------------------------------------
+type ResolvedLaunch = {
+  launch: Parameters<typeof chromium.launch>[0];
+  realChrome: boolean;
+};
+
+/**
+ * ブラウザ起動オプションを env + ジョブ単位プロキシ設定から組み立てる。
+ *  - SB_BROWSER_CHANNEL=chrome … 実 Chrome (クラウドの Akamai 対策)。未設定なら bundled chromium。
+ *  - SB_HEADLESS=0 … ヘッドフル (クラウドは entrypoint の xvfb 経由)。既定 headless。
+ *  - プロキシは「ジョブの credentials.proxy」優先、無ければ env SB_PROXY_* にフォールバック。
+ *    どちらも無ければ direct = 現状と完全に同じ挙動 (既存 PC / Electron 無影響)。
+ */
+function resolveLaunchOptions(
+  credProxy?: { server: string; username?: string | null; password?: string | null } | null
+): ResolvedLaunch {
+  const channel = process.env.SB_BROWSER_CHANNEL || undefined;
+  const headless = process.env.SB_HEADLESS !== "0";
+  const rawServer = credProxy?.server || process.env.SB_PROXY_SERVER || "";
+  const proxy = rawServer
+    ? {
+        // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
+        server: /:\/\//.test(rawServer) ? rawServer : `http://${rawServer}`,
+        username: credProxy?.username ?? process.env.SB_PROXY_USERNAME ?? undefined,
+        password: credProxy?.password ?? process.env.SB_PROXY_PASSWORD ?? undefined,
+      }
+    : undefined;
+  return { launch: { headless, channel, proxy }, realChrome: !!channel };
+}
+
 function storageStatePathFor(shopId: string): string {
   const dir = join(homedir(), ".kireidot", "salonboard-auth");
   try {
@@ -1277,6 +1607,18 @@ function requestShutdown(): void {
 function isShutdownRequested(): boolean {
   return shutdownRequested;
 }
+
+/**
+ * SalonBoard アクセス時のブラウザコンテキスト共通設定。
+ * Akamai が UA "HeadlessChrome" を即時 flag するため、worker 本体と同じ UA 偽装を
+ * canary / test-rescan 等の再利用側でも必ず適用すること。
+ */
+const SB_CONTEXT_OPTIONS = {
+  userAgent:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+  locale: "ja-JP",
+  timezoneId: "Asia/Tokyo",
+} as const;
 
 async function pushBooking(
   page: Page,
@@ -1921,6 +2263,7 @@ const IS_WORKER_ENTRYPOINT = (() => {
     // esbuild バンドルでは import.meta.url が出力ファイルと一致してしまうため、
     // entrypoint 判定より先に明示的に除外する (ポーリングループを起動しない)。
     if (process.env.CANARY_MODE === "1") return false;
+    if (process.env.WORKER_DISABLE_MAIN === "1") return false;
     const entry = process.argv[1];
     if (!entry) return true; // 判定材料が無ければ従来どおり起動 (後方互換)
     const entryUrl = new URL(`file://${resolve(entry)}`).href;
@@ -1955,6 +2298,7 @@ export {
   parseJstParts,
   requestShutdown,
   isShutdownRequested,
+  SB_CONTEXT_OPTIONS,
   ENABLE_PUSH,
   DRY_RUN,
 };
