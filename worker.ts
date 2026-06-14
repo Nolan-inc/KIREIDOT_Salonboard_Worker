@@ -35,6 +35,36 @@ import {
   staffOptionValue,
 } from "./salonboard-selectors";
 
+// 本番スクレイパー (scrapers.cjs) を共有。PC 版 worker-process.cjs と同じ実装を
+// クラウド worker でも再利用する。electron 非依存 (node:fs/os/path のみ) なので
+// esbuild でそのままバンドル可能。Dockerfile.worker が electron/scrapers.cjs を COPY する。
+import scrapersDefault from "./electron/scrapers.cjs";
+
+type ScraperResult = {
+  status: "ok" | "confirm_only" | "failed";
+  externalId?: string | null;
+  recoveredReserveId?: string | null;
+  errorCode?: string;
+  reason?: string;
+  manualRequired?: boolean;
+  summary?: string;
+  alreadyAbsent?: boolean;
+};
+type ScraperFn = (
+  page: Page,
+  payload: unknown,
+  opts: Record<string, unknown>,
+) => Promise<ScraperResult>;
+type ScrapersModule = {
+  cancelBookingViaForm: ScraperFn;
+  deleteScheduleViaForm: ScraperFn;
+  pushShiftsViaForm: ScraperFn;
+  postPhotoGalleryViaForm: ScraperFn;
+  deleteBlogViaForm: ScraperFn;
+  postReviewReplyViaForm: ScraperFn;
+};
+const scrapers = scrapersDefault as unknown as ScrapersModule;
+
 // package.json の "version" を実行時に読む。失敗しても起動を止めない。
 function readPkgVersion(): string {
   try {
@@ -390,6 +420,75 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
+/**
+ * scrapers.cjs の push/cancel 系結果 (status: ok|confirm_only|failed) を
+ * Admin callback ステータスへマップする共通処理 (worker-process.cjs と同じ分類)。
+ *  - ok          → succeeded
+ *  - confirm_only → manual_required (PUSH_DISABLED: ENABLE_PUSH=false で実書込していない)
+ *  - failed      → captcha_detected / manual_required (上限到達 or manualRequired) / retryable_failed
+ */
+async function reportScraperResult(
+  job: Job,
+  jobType: string,
+  result: ScraperResult,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const tag = `${jobType} ${job.id.slice(0, 8)}`;
+  if (result.status === "ok") {
+    await report({
+      job_id: job.id,
+      job_type: jobType,
+      status: "succeeded",
+      external_id: result.externalId ?? result.recoveredReserveId ?? null,
+      summary: result.summary ?? `${jobType} 完了`,
+      ...extra,
+    } as unknown as CallbackBody);
+    console.log(`[job] done  ${tag} (ok)`);
+    return;
+  }
+  if (result.status === "confirm_only") {
+    await report({
+      job_id: job.id,
+      job_type: jobType,
+      status: "manual_required",
+      error_code: "PUSH_DISABLED",
+      error:
+        "入力/照合まで成功しましたが、自動登録 (実書込) が無効 (SALONBOARD_ENABLE_PUSH=未設定) のため反映していません。SalonBoard で確認のうえ手動対応してください。",
+      manual_required: true,
+      ...extra,
+    } as unknown as CallbackBody);
+    console.log(`[job] done  ${tag} (confirm_only -> manual_required)`);
+    return;
+  }
+  // failed
+  const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
+  const exhausted = job.attempts + 1 >= cap;
+  const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
+  const toManual = !!result.manualRequired || exhausted;
+  await report({
+    job_id: job.id,
+    job_type: jobType,
+    status: isCaptcha
+      ? "captcha_detected"
+      : toManual
+        ? "manual_required"
+        : "retryable_failed",
+    error_code: result.errorCode,
+    error: result.reason,
+    manual_required: toManual,
+    ...(isCaptcha
+      ? {
+          block: {
+            until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+            reason: `reCAPTCHA during ${jobType}`,
+          },
+        }
+      : {}),
+    ...extra,
+  } as unknown as CallbackBody);
+  console.log(`[job] done  ${tag} (${result.errorCode}: ${result.reason})`);
+}
+
 // ------------------------------------------------------------
 // ジョブ処理
 // ------------------------------------------------------------
@@ -635,7 +734,86 @@ async function handleJob(job: Job): Promise<void> {
       return;
     }
 
+    // ---- Phase 2: scrapers.cjs 再利用ハンドラ群 ----------------------------
+    // salon_id / shop_name は worker.ts の job/credentials には現状無いため null
+    // フォールバック (単一サロン店舗は問題なし。複数サロン店舗の正確な選択には
+    // Admin 側で credentials.salon_id / shop_name を同梱する必要がある)。
+    const salonId = (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+    const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+
+    if (job.job_type === "cancel_booking") {
+      const p = job.payload as Record<string, unknown>;
+      // 休憩・業務 (booking_type='block') は SalonBoard 上「予定」なので
+      // 予約キャンセルではなくスケジュール画面から予定を削除する。
+      const result =
+        p.booking_type === "block"
+          ? await scrapers.deleteScheduleViaForm(page, p, {
+              baseUrl,
+              enableDelete: ENABLE_PUSH,
+            })
+          : await scrapers.cancelBookingViaForm(page, p, {
+              baseUrl,
+              enableCancel: ENABLE_PUSH,
+              salonId,
+              shopName,
+            });
+      await reportScraperResult(job, "cancel_booking", result, {
+        booking_id: p.booking_id ?? null,
+      });
+      return;
+    }
+
+    if (job.job_type === "push_shifts") {
+      // 注: PC 版は読み取った勤務パターンを Supabase に直接保存するが、クラウドは
+      // Admin callback のみ。push_shifts は status 報告で足りるため、パターン保存は
+      // fetch_shift_patterns 側に委ねる (ここではスキップ)。
+      const result = await scrapers.pushShiftsViaForm(page, job.payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "push_shifts", result);
+      return;
+    }
+
+    if (job.job_type === "push_photo_gallery") {
+      const result = await scrapers.postPhotoGalleryViaForm(page, job.payload, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+        salonId,
+        shopName,
+      });
+      await reportScraperResult(job, "push_photo_gallery", result);
+      return;
+    }
+
+    if (job.job_type === "delete_blog") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.deleteBlogViaForm(page, p, {
+        baseUrl,
+        enableDelete: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "delete_blog", result, {
+        content_post_id: p.content_post_id ?? null,
+        external_id: result.externalId ?? p.external_blog_id ?? null,
+      });
+      return;
+    }
+
+    if (job.job_type === "push_review_reply") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.postReviewReplyViaForm(page, p, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+      });
+      await reportScraperResult(job, "push_review_reply", result, {
+        review_import_id: p.review_import_id ?? null,
+      });
+      return;
+    }
+
     // 未実装ジョブ: succeeded ではなく not_implemented
+    // (残: fetch_bookings / fetch_sales / fetch_shift_patterns — genre や
+    //  パターン配送など追加整合が必要なため次バッチ)
     await report({
       job_id: job.id,
       status: "not_implemented",
