@@ -231,7 +231,12 @@ type JobType =
   | "fetch_sales"
   | "push_booking"
   | "cancel_booking"
-  | "push_blog";
+  | "push_blog"
+  | "push_shifts"
+  | "push_photo_gallery"
+  | "delete_blog"
+  | "push_review_reply"
+  | "fetch_shift_patterns";
 
 type Job = {
   id: string;
@@ -803,7 +808,11 @@ async function handleJob(job: Job): Promise<void> {
       });
       await reportScraperResult(job, "delete_blog", result, {
         content_post_id: p.content_post_id ?? null,
-        external_id: result.externalId ?? p.external_blog_id ?? null,
+        // external_id は ok 時のみ。confirm_only/failed で送ると Admin が
+        // 早期に削除済みと誤判定しうる (PC worker-process.cjs と同じ)。
+        ...(result.status === "ok"
+          ? { external_id: result.externalId ?? p.external_blog_id ?? null }
+          : {}),
       });
       return;
     }
@@ -825,7 +834,27 @@ async function handleJob(job: Job): Promise<void> {
       // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
       const genre =
         (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
-      const { rows } = await scrapers.scrapeBookings(page, { baseUrl, genre });
+      // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
+      const { rows, debug } = await scrapers.scrapeBookings(page, {
+        baseUrl,
+        genre,
+        loginId: job.credentials.login_id,
+        password: job.credentials.password,
+      });
+      // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
+      // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
+      if ((debug as { loggedOut?: boolean } | undefined)?.loggedOut) {
+        await report({
+          job_id: job.id,
+          job_type: "fetch_bookings",
+          status: "retryable_failed",
+          error: `session lost during bookings scrape (landedOn=${
+            (debug as { landedOn?: string })?.landedOn ?? "?"
+          })`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_bookings session lost -> retryable)`);
+        return;
+      }
       const bookings = rows ?? [];
       // Admin callback (job_type=fetch_bookings) が bookings[] を
       // salonboard_bulk_upsert_bookings RPC で upsert する。PC の定期ループと同 RPC。
@@ -841,31 +870,48 @@ async function handleJob(job: Job): Promise<void> {
     }
 
     if (job.job_type === "fetch_shift_patterns") {
-      // scrapeShiftPatterns は取得不可で throw する (handleJob の catch が retryable 化)。
       // patterns を callback に載せ、Admin 側で既存 RPC salonboard_bulk_upsert_shift_patterns
       // に渡す (PC は supabase 直呼びだが、クラウドは Admin callback 経由)。
-      const res = await scrapers.scrapeShiftPatterns(page, baseUrl);
-      const patterns = (res?.patterns ?? []) as unknown[];
-      if (patterns.length === 0) {
+      // scrapeShiftPatterns は取得不可時に code 付きで throw する (空配列は返さない)。
+      // SHIFT_PATTERNS_NONE/PARSE は再試行しても直らないので manual_required に倒す
+      // (PC worker-process.cjs と同じ分類)。
+      try {
+        const res = await scrapers.scrapeShiftPatterns(page, baseUrl);
+        const patterns = (res?.patterns ?? []) as unknown[];
         await report({
           job_id: job.id,
           job_type: "fetch_shift_patterns",
-          status: "manual_required",
-          error_code: "SHIFT_PATTERNS_EMPTY",
-          error: "勤務パターンの読み取り結果が0件でした。",
-          manual_required: true,
+          status: "succeeded",
+          shift_patterns: patterns,
+          summary: `fetch_shift_patterns: ${patterns.length}件取得`,
         } as unknown as CallbackBody);
-        console.log(`[job] done  ${tag} (fetch_shift_patterns 0件 -> manual_required)`);
-        return;
+        console.log(`[job] done  ${tag} (fetch_shift_patterns ${patterns.length}件)`);
+      } catch (e) {
+        const err = e as { code?: string; message?: string };
+        const code = err?.code ?? "UNKNOWN_ERROR";
+        const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
+        const exhausted = job.attempts + 1 >= cap;
+        const isCaptcha = code === "RECAPTCHA_REQUIRED";
+        const noRetry =
+          isCaptcha ||
+          code === "SHIFT_PATTERNS_NONE" ||
+          code === "SHIFT_PATTERNS_PARSE" ||
+          code === "SHIFT_PATTERNS_EMPTY" ||
+          exhausted;
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shift_patterns",
+          status: isCaptcha
+            ? "captcha_detected"
+            : noRetry
+              ? "manual_required"
+              : "retryable_failed",
+          error_code: code,
+          error: String(err?.message ?? e).slice(0, 500),
+          manual_required: noRetry,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_shift_patterns ${code})`);
       }
-      await report({
-        job_id: job.id,
-        job_type: "fetch_shift_patterns",
-        status: "succeeded",
-        shift_patterns: patterns,
-        summary: `fetch_shift_patterns: ${patterns.length}件取得`,
-      } as unknown as CallbackBody);
-      console.log(`[job] done  ${tag} (fetch_shift_patterns ${patterns.length}件)`);
       return;
     }
 
