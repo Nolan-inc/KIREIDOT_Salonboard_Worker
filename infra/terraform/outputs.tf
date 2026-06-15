@@ -26,6 +26,15 @@ output "github_deploy_role_arn" {
   value = var.github_repo == "" ? null : aws_iam_role.github_deploy[0].arn
 }
 
+output "ec2_worker_eip" {
+  description = "Decodo の Whitelisted IPs に登録する固定 egress IP"
+  value       = aws_eip.ec2_worker.public_ip
+}
+
+output "ec2_worker_instance_id" {
+  value = aws_instance.worker.id
+}
+
 output "state_bucket" {
   value = aws_s3_bucket.state.bucket
 }

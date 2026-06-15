@@ -41,6 +41,12 @@ variable "worker_memory" {
   default = 2048
 }
 
+variable "ec2_worker_instance_type" {
+  description = "静的IP worker ホストの EC2 インスタンスタイプ (実Chrome+Xvfb で 2GB 目安。x86_64)"
+  type        = string
+  default     = "t3.small"
+}
+
 variable "service_desired_count" {
   description = "ECS Service の希望タスク数。Phase 0 カナリアでは 0 のまま run-task で手動起動する"
   type        = number

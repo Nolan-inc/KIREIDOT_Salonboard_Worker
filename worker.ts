@@ -597,10 +597,31 @@ async function handleJob(job: Job): Promise<void> {
 
     if (auth !== "logged_in") {
       const loginUrl = new URL("/login/", baseUrl).toString();
-      const loginResult = await tryLogin(page, loginUrl, {
+      let loginResult = await tryLogin(page, loginUrl, {
         loginId: job.credentials.login_id,
         password: job.credentials.password,
       });
+      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / doLogin 未完了 / submit) は
+      // プロキシの瞬断であることが多い。最大3回までログインをやり直す。認証拒否
+      // (still on login form) や captcha はリトライしない (reason で判定)。
+      for (
+        let lt = 1;
+        lt < 3 &&
+        loginResult.status === "failed" &&
+        /did not complete|chrome-error|ERR_|navigation|submit|net::/i.test(
+          loginResult.reason ?? ""
+        );
+        lt++
+      ) {
+        console.log(
+          `[job] ${tag} login retry ${lt} (${(loginResult.reason ?? "").slice(0, 50)})`
+        );
+        await page.waitForTimeout(2500);
+        loginResult = await tryLogin(page, loginUrl, {
+          loginId: job.credentials.login_id,
+          password: job.credentials.password,
+        });
+      }
 
       if (loginResult.status === "captcha") {
         await report({
@@ -834,6 +855,41 @@ async function handleJob(job: Job): Promise<void> {
       // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
       const genre =
         (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      // Akamai 深層ページ対策ウォームアップ: クラウドのフレッシュプロファイルは
+      // ログイン後の深い認証ページ (予約一覧等) で tarpit される。直接 deep URL へ
+      // 飛ぶ前に管理 TOP を読み込み + 人間らしいマウス/スクロール/待機で Akamai
+      // センサーにテレメトリを送り、_abck の信頼を立ててから scrape に入る。
+      try {
+        await page
+          .goto(new URL("/KLP/top/", baseUrl).toString(), {
+            waitUntil: "domcontentloaded",
+            timeout: 30_000,
+          })
+          .catch(() => {});
+        await page.waitForTimeout(2500);
+        await page.mouse.move(240, 220).catch(() => {});
+        await page.mouse.move(640, 440, { steps: 12 }).catch(() => {});
+        await page.mouse.wheel(0, 700).catch(() => {});
+        await page.waitForTimeout(1800);
+        await page.mouse.wheel(0, -300).catch(() => {});
+        await page.waitForTimeout(1200);
+        // ログイン直後のセッション有効性を判定 (深いページで session 切れになる原因の切り分け)。
+        const topState = await page
+          .evaluate(() => {
+            const txt =
+              document.body && document.body.innerText
+                ? document.body.innerText
+                : "";
+            if (/予約管理|掲載管理/.test(txt)) return "LOGGED_IN";
+            if (/有効期限|再度ログイン|操作されなかった/.test(txt.replace(/\s+/g, "")))
+              return "SESSION_EXPIRED";
+            return "UNKNOWN(" + (document.title || "").slice(0, 30) + ")";
+          })
+          .catch(() => "?");
+        console.log(`[scrape] warmup /KLP/top/ state=${topState} url=${page.url()}`);
+      } catch {
+        /* warmup is best-effort */
+      }
       // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
       const { rows, debug } = await scrapers.scrapeBookings(page, {
         baseUrl,
@@ -1026,9 +1082,14 @@ async function isLoggedIn(
   page: Page,
   baseUrl: string
 ): Promise<"logged_in" | "needs_login" | "captcha" | "unknown"> {
+  // 注意: "/KLP/" (末尾スラッシュのみ) は 404「指定されたURLは存在しません」
+  // エラー画面を返す。ログインフォームが無く URL も /login を含まないため、旧実装は
+  // これを logged_in と誤判定し、無効セッションのまま scrape して常に 0 件になっていた。
+  // → 管理 TOP (/KLP/top/) を開き、グローバルナビ「予約管理」の有無で **肯定的に**
+  //   ログイン判定する。判定できない画面 (404 / セッション切れ / 不明) は安全側に倒して
+  //   再ログインする (誤って scrape に進ませない)。
   const candidates = [
-    new URL("/KLP/", baseUrl).toString(),
-    new URL("/CNF/", baseUrl).toString(),
+    new URL("/KLP/top/", baseUrl).toString(),
     baseUrl,
   ];
   for (const url of candidates) {
@@ -1040,30 +1101,27 @@ async function isLoggedIn(
     if ((await page.locator('iframe[src*="recaptcha"]').count()) > 0) {
       return "captcha";
     }
-    // ログインフォームの input が見えていれば未ログイン
+    // 肯定的判定: 管理画面のグローバルナビ(予約管理)が見えていれば logged_in。
+    const mgmtNav = await page
+      .locator('text=予約管理')
+      .count()
+      .catch(() => 0);
+    if (mgmtNav > 0) {
+      return "logged_in";
+    }
+    // ログインフォームの input / /login リダイレクト → 未ログイン。
     const loginInputCount = await page
       .locator(
         'input[name="userId"], input[name="loginId"], input[name="password"], input[type="password"]'
       )
       .count();
-    if (loginInputCount > 0) {
+    if (loginInputCount > 0 || /login/i.test(page.url())) {
       return "needs_login";
     }
-    // URL が /login にリダイレクトされている場合も未ログイン
-    if (/login/i.test(page.url())) {
-      return "needs_login";
-    }
-    // 「セッション切れ」等の文言を簡易チェック
-    const expiredText = await page
-      .locator('text=/再ログイン|セッション|タイムアウト|ログインしてください/')
-      .first()
-      .count();
-    if (expiredText > 0) {
-      return "needs_login";
-    }
-    return "logged_in";
+    // それ以外 (エラー画面 / 404 / セッション切れ / 不明) は安全側に倒して再ログイン。
+    return "needs_login";
   }
-  return "unknown";
+  return "needs_login";
 }
 
 async function tryLogin(
@@ -1082,21 +1140,79 @@ async function tryLogin(
   }
 
   // セレクタはサロンボードの実画面に合わせて後で微調整する
-  const idInput = page.locator('input[name="userId"], input[name="loginId"], input[type="text"]').first();
-  const pwInput = page.locator('input[name="password"], input[type="password"]').first();
+  // ID 欄は input[name="userId"]。描画が遅いことがあるので明示的に待つ。
+  const idInput = page
+    .locator(
+      'input[name="userId"], input[name="loginId"], input[name="loginCd"], input[id*="login" i], input[type="email"], input[type="text"]'
+    )
+    .first();
+  const pwInput = page
+    .locator('input[name="password"], input[type="password"]')
+    .first();
+  await idInput.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
 
-  try {
-    await idInput.fill(c.loginId, { timeout: 10_000 });
-    await pwInput.fill(c.password, { timeout: 10_000 });
-  } catch (e) {
-    return { status: "failed", reason: `cannot find login inputs: ${e instanceof Error ? e.message : e}` };
+  // bot 検知を避けるため 1 文字ずつ入力 (失敗したら fill にフォールバック)。PC と同じ。
+  const typeInto = async (
+    loc: ReturnType<typeof page.locator>,
+    value: string
+  ): Promise<boolean> => {
+    try {
+      await loc.click({ timeout: 8_000 }).catch(() => {});
+      await loc.pressSequentially(value, { delay: 90, timeout: 8_000 });
+      const got = await loc.inputValue().catch(() => "");
+      if (got && got.length >= Math.min(value.length, 1)) return true;
+    } catch {
+      /* fall through to fill */
+    }
+    try {
+      await loc.fill(value, { timeout: 8_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const okId = await typeInto(idInput, c.loginId);
+  const okPw = await typeInto(pwInput, c.password);
+  if (!okId || !okPw) {
+    return {
+      status: "failed",
+      reason: `cannot find login inputs (id=${okId}, pw=${okPw})`,
+    };
   }
 
+  // SalonBoard のログインボタンは <a class="common-CNCcommon__primaryBtn"
+  // onclick="dologin(event)"> で実装されている (button[type="submit"] は存在しない)。
+  // 候補を順に試し、どれも無ければ最後の手段として password 欄で Enter を送る
+  // (onkeypress="enterActionLogin")。PC worker-process.cjs と同じセレクタ。
   try {
-    await Promise.all([
-      page.waitForLoadState("networkidle", { timeout: 20_000 }).catch(() => {}),
-      page.locator('button[type="submit"], input[type="submit"]').first().click({ timeout: 10_000 }),
-    ]);
+    const submitCandidates = [
+      "a.common-CNCcommon__primaryBtn",
+      "a.loginBtnSize",
+      'a:has-text("ログイン"):not(:has-text("ログインできない"))',
+      'button[type="submit"]',
+      'input[type="submit"]',
+    ];
+    // 1) 最初に見つかったログインボタン候補をクリック。click はログイン遷移と
+    //    競合して reject することがある (locator.click が "navigation to finish"
+    //    待ちで throw) ので throw は握り潰す。成否は後段の URL/フォーム残存で判定。
+    for (const sel of submitCandidates) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count().catch(() => 0)) === 0) continue;
+      await loc.click({ timeout: 5_000 }).catch(() => {});
+      break;
+    }
+    await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+    // 2) クリックで遷移しなかった (まだログインフォームに居る) 場合は、password 欄で
+    //    Enter (onkeypress="enterActionLogin") を送る。両方試すことで、ボタンの
+    //    onclick が効かない / Enter が効かない どちらの環境でもログインを通す。
+    if (
+      (await pwInput.count().catch(() => 0)) > 0 &&
+      /login/i.test(page.url())
+    ) {
+      await pwInput.press("Enter").catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+    }
   } catch (e) {
     return { status: "failed", reason: `submit: ${e instanceof Error ? e.message : e}` };
   }
@@ -1105,13 +1221,49 @@ async function tryLogin(
     return { status: "captcha" };
   }
 
-  // ログイン画面にまだ残っていたら失敗とみなす
-  const stillOnLogin =
-    (await pwInput.count()) > 0 || /login/i.test(page.url());
-  if (stillOnLogin) {
-    return { status: "failed", reason: "still on login page" };
+  // doLogin は POST 処理の中間 URL。成功時は /KLP/top/ へ、失敗時は /login/ へ
+  // リダイレクトする。networkidle が早期に返って doLogin の空ページで誤判定するのを
+  // 防ぐため、doLogin を離れる (= リダイレクト完了) まで明示的に待つ。
+  await page
+    .waitForURL((u) => !/doLogin/i.test(u.toString()), { timeout: 15_000 })
+    .catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+
+  // 肯定的なログイン成否判定:
+  //  - password 欄が再表示 → 認証拒否
+  //  - 管理ナビ「予約管理」or /KLP/ 配下 (かつセッション切れ文言が無い) → logged_in
+  //  - それ以外 (doLogin で停止 / 空ページ / エラー) → 未完了 (診断付きで failed)
+  if ((await pwInput.count().catch(() => 0)) > 0) {
+    return { status: "failed", reason: "still on login form (password field shown)" };
   }
-  return { status: "ok" };
+  const pageInfo = await page
+    .evaluate(() => {
+      const txt =
+        document.body && document.body.innerText ? document.body.innerText : "";
+      return {
+        url: location.href,
+        title: (document.title || "").slice(0, 40),
+        len: txt.length,
+        hasMgmt: /予約管理|掲載管理/.test(txt),
+        expired: /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(
+          txt.replace(/\s+/g, "")
+        ),
+      };
+    })
+    .catch(() => null);
+  if (pageInfo && pageInfo.expired) {
+    return {
+      status: "failed",
+      reason: `session-expired page after login (url=${pageInfo.url})`,
+    };
+  }
+  if ((pageInfo && pageInfo.hasMgmt) || /\/KLP\//i.test(page.url())) {
+    return { status: "ok" };
+  }
+  return {
+    status: "failed",
+    reason: `login did not complete: ${JSON.stringify(pageInfo)}`,
+  };
 }
 
 /**
