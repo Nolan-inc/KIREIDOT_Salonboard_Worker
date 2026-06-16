@@ -29,6 +29,7 @@ const WebSocket = require('ws');
 const {
   scrapeBookings,
   scrapeStaff,
+  scrapeEquipment,
   scrapeMenus,
   scrapeCoupons,
   scrapeBlogs,
@@ -654,6 +655,13 @@ async function initSupabase({
   // どの Mac がどのバージョン/拡張状態で動いているかを Admin から把握できるよう、
   // 起動時+5分ごとにハートビートを送る (失敗は非致命)。
   startHeartbeat();
+
+  // SalonBoard のアイドルタイムアウトでセッションが切れて毎回ログインし直すのを防ぐため、
+  // 稼働時間帯 (6:00〜24:00) に 10 分ごとにセッションを延命する (v0.2.183)。
+  startKeepAlive();
+
+  // KIREIDOT にあって SalonBoard に無い予約を 10 分ごとに探査し、自動で push し直す。
+  startUnpushedSweep();
 }
 
 // ---- Worker ハートビート (どのPCがどのバージョンで動いているかの可視化) ----
@@ -767,17 +775,20 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns' && jt !== 'fetch_staff' && jt !== 'fetch_equipment') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
             pushTriggerTimer = null;
-            // 全体同期中は runPushJobs を呼ばない (runSync 末尾で処理されるため二重実行回避)。
-            if (running) return;
+            // 自動取得(sync)中でも push を即時開始する。runPushJobs は店舗ごとに
+            //   tryAcquireShopLock で直列化されるため、取得中の店舗だけ待ち、
+            //   それ以外の店舗の書き込みはすぐ進む。これで「取得中に予約すると
+            //   sync 完了まで(最大十数分)待たされる」遅延を解消する。
+            //   pushJobsRunning による二重起動防止は runPushJobs 内で行う。
             runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch((e) =>
               log(`Realtime トリガーの push 処理でエラー: ${e?.message ?? e}`, 'warn'),
             );
-          }, 1500);
+          }, 600);
         },
       )
       .subscribe((status) => {
@@ -801,16 +812,18 @@ function subscribeToPushJobs() {
 }
 
 let pushJobPollTimer = null;
-const PUSH_JOB_POLL_MS = 45_000;
+const PUSH_JOB_POLL_MS = 20_000;
 function startPushJobPoller() {
   if (pushJobPollTimer) return; // 多重起動防止
   pushJobPollTimer = setInterval(async () => {
     try {
-      if (!supabase || running || pushJobsRunning) return;
+      // 二重起動だけ防ぐ。sync(running)中でも push を起動してよい
+      //   (runPushJobs は店舗ごとに直列化されるため取得中の店舗のみ待つ)。
+      if (!supabase || pushJobsRunning) return;
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts', 'fetch_shift_patterns'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -819,6 +832,214 @@ function startPushJobPoller() {
       }
     } catch (_e) { /* noop */ }
   }, PUSH_JOB_POLL_MS);
+}
+
+// ---- セッション キープアライブ (v0.2.183) ----
+// SalonBoard は「一定時間操作されなかったため、ログインの有効期限が切れました」という
+// アイドルタイムアウト (経験上およそ30分) を持つ。予約取得は数十分間隔 + 夜間停止のため、
+// 間が空くとサーバ側セッションが失効し、次のジョブで毎回ログインし直すことになる。
+// (再ログインは bot 検知/reCAPTCHA を誘発しやすく、所要も増える)
+//
+// 対策: 稼働時間帯 (6:00〜24:00) に 10 分ごとに各店舗の TOP を軽く開いて
+//   (a) アイドルタイマーをリセットしてセッションを延命し、
+//   (b) Cookie ローテーションに追従して storageState を保存し直す。
+//   切れていれば 1 回だけ再ログインして storageState を保存する。
+// これにより「次のジョブ時には既にログイン済み」を維持し、再ログイン頻度を下げる。
+//
+// 競合回避が肝:
+//   - workerActive な端末のみ (待機端末が同時ログインして後勝ちで奪い合わない)
+//   - running / pushJobsRunning 中はスキップ (取得/書込と同時にブラウザを立てない)
+//   - 店舗ごとに tryAcquireShopLock で取得/書込と相互排他
+//   - storageState が無い (一度もログインしていない) 店舗はスキップ (初回は取得時に任せる)
+let keepAliveTimer = null;
+let keepAliveRunning = false;
+const KEEPALIVE_INTERVAL_MS = 10 * 60_000; // 10 分
+const KEEPALIVE_ACTIVE_HOUR_START = 6; // 6:00
+const KEEPALIVE_ACTIVE_HOUR_END = 24; // 24:00 (= 0:00 まで)
+
+/** 現在が稼働時間帯 (6:00〜24:00) か。夜間はセッション維持も止める。 */
+function isWithinKeepAliveHours() {
+  const h = new Date().getHours();
+  return h >= KEEPALIVE_ACTIVE_HOUR_START && h < KEEPALIVE_ACTIVE_HOUR_END;
+}
+
+/**
+ * 1 店舗のセッションを延命する。logged_in ならアクセスのみ (延命) + storageState 再保存。
+ * needs_login なら 1 回だけ再ログイン。captcha は触らずスキップ (6h ブロックは取得側に任せる)。
+ */
+async function keepAliveShop(target) {
+  const shopId = target.shop_id;
+  const genre = target.genre || 'esthetic';
+  const ssPath = storageStatePathFor(shopId);
+  const initialStorage = readStorageStatePath(ssPath);
+  // 一度もログインしていない店舗は対象外 (初回ログインは取得時に行う)。
+  if (!initialStorage) return { shopId, skipped: 'no_session' };
+
+  // 取得/書込と相互排他。ロックが取れない (処理中) ならスキップ。
+  const label = `${deviceAuth?.workerId ?? 'electron-worker'}:keepalive`;
+  const lock = tryAcquireShopLock(shopId, label);
+  if (!lock.ok) return { shopId, skipped: 'locked' };
+
+  let browser = null;
+  try {
+    let creds;
+    try {
+      creds = await revealCredentials(shopId);
+    } catch (_e) {
+      return { shopId, skipped: 'no_credentials' };
+    }
+
+    const launchBase = {
+      headless: true, // キープアライブは常に裏で (画面を出さない)
+      slowMo: 0,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-features=IsolateOrigins,site-per-process',
+      ],
+    };
+    try {
+      browser = await chromium.launch(browserLaunchOptions(launchBase));
+    } catch (_e) {
+      browser = await chromium.launch(launchBase);
+    }
+    const ctx = await browser.newContext({
+      storageState: initialStorage,
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      locale: 'ja-JP',
+      timezoneId: 'Asia/Tokyo',
+      viewport: { width: 1366, height: 900 },
+    });
+    await ctx.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
+    const page = await ctx.newPage();
+
+    const state = await isLoggedIn(page, creds.baseUrl, genre);
+    if (state === 'logged_in') {
+      // セッション有効: TOP を開いたこと自体でアイドルタイマーがリセットされる。
+      // Cookie ローテーションに追従して storageState を保存し直す。
+      await saveStorageState(ctx, ssPath).catch(() => {});
+      return { shopId, result: 'alive' };
+    }
+    if (state === 'captcha') {
+      // captcha はここでは触らない (再ログイン連打しない)。取得側の処理に委ねる。
+      return { shopId, result: 'captcha' };
+    }
+    // needs_login / unknown: セッション切れ → 1 回だけ再ログイン。
+    clearStorageState(ssPath);
+    const r = await tryLogin(page, { ...creds, slow: true });
+    if (r.status === 'ok') {
+      await saveStorageState(ctx, ssPath).catch(() => {});
+      return { shopId, result: 'relogin' };
+    }
+    return { shopId, result: `relogin_failed:${r.status}` };
+  } catch (e) {
+    return { shopId, error: e?.message ?? String(e) };
+  } finally {
+    await browser?.close().catch(() => {});
+    releaseShopLock(shopId);
+  }
+}
+
+/** 全店舗のセッションを順番に延命する (店舗間は直列。1 アカウント=1 セッションの競合を避ける)。 */
+async function keepSessionsAlive() {
+  if (!supabase || keepAliveRunning) return;
+  if (!workerActive) return; // 待機端末は触らない (後勝ち競合を避ける)
+  if (running || pushJobsRunning) return; // 取得/書込中はブラウザを立てない
+  if (!isWithinKeepAliveHours()) return; // 夜間は停止
+  if (!buildDeviceHeaders()) return; // device 未設定
+
+  keepAliveRunning = true;
+  try {
+    let targets = [];
+    try {
+      targets = await fetchTargets(null);
+    } catch (_e) {
+      return; // device 未設定/ネットワーク断などは黙ってスキップ
+    }
+    if (!targets.length) return;
+
+    let alive = 0;
+    let relogin = 0;
+    for (const t of targets) {
+      // ループ中に取得/書込が始まったら中断 (優先度を譲る)。
+      if (running || pushJobsRunning || !workerActive) break;
+      const res = await keepAliveShop(t).catch((e) => ({ error: e?.message ?? e }));
+      if (res?.result === 'alive') alive++;
+      else if (res?.result === 'relogin') relogin++;
+    }
+    if (alive || relogin) {
+      log(`セッション維持: 継続 ${alive} 店舗 / 再ログイン ${relogin} 店舗`, 'info');
+    }
+  } finally {
+    keepAliveRunning = false;
+  }
+}
+
+function startKeepAlive() {
+  if (keepAliveTimer) return; // 多重起動防止
+  keepAliveTimer = setInterval(() => {
+    void keepSessionsAlive();
+  }, KEEPALIVE_INTERVAL_MS);
+  if (typeof keepAliveTimer.unref === 'function') keepAliveTimer.unref();
+}
+
+// ---- 未反映予約スイープ (v0.2.183) ----
+// KIREIDOT にあって SalonBoard にまだ無い予約 (push が failed / manual_required /
+// 未送信のまま残ったもの) を 10 分ごとに探査し、自動で push し直す。
+//
+// DBトリガー (bookings_autoenqueue_salonboard_push) は「予約作成時」に 1 度だけ
+// ジョブを積むため、一度 push に失敗した予約は再ジョブ化されず、差分監視の Slack に
+// 出続けるだけだった。ここで RPC salonboard_sweep_reenqueue_unpushed を叩いて
+// 最大 10 件まで push_booking ジョブ (preflight_required=true) を再 enqueue する。
+// preflight により Worker は登録前に SB 予約一覧を照合し、既にあれば二重登録しない。
+// 「スタッフ/メニュー未紐付け」など再試行で直らないエラーは RPC 側で除外済み
+// (Admin の予約画面に manual_required として残り、手動対応を促す)。
+let sweepTimer = null;
+let sweepRunning = false;
+const SWEEP_INTERVAL_MS = 10 * 60_000; // 10 分
+const SWEEP_LIMIT = 10; // 1 回あたり最大 10 件
+
+async function sweepUnpushedBookings() {
+  if (!supabase || sweepRunning) return;
+  if (!workerActive) return; // 待機端末は触らない
+  if (!isWithinKeepAliveHours()) return; // 夜間は停止 (取得と同じ 6:00〜24:00)
+  if (!buildDeviceHeaders()) return; // device 未設定
+  sweepRunning = true;
+  try {
+    const { data, error } = await supabase.rpc('salonboard_sweep_reenqueue_unpushed', {
+      p_limit: SWEEP_LIMIT,
+      p_machine: machineId(),
+    });
+    if (error) {
+      log(`未反映予約スイープ: RPC エラー ${error.message}`, 'warn');
+      return;
+    }
+    const enqueued = Number(data ?? 0);
+    if (enqueued > 0) {
+      log(`未反映予約スイープ: SalonBoard 未反映の予約 ${enqueued} 件を再 push キューに投入`, 'info');
+      // 実行中でなければ即 push 処理を起動 (Realtime/保険ポーリングでも拾われる)。
+      if (!running && !pushJobsRunning) {
+        runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch((e) =>
+          log(`スイープ後の push 処理でエラー: ${e?.message ?? e}`, 'warn'),
+        );
+      }
+    }
+  } catch (e) {
+    log(`未反映予約スイープでエラー: ${e?.message ?? e}`, 'warn');
+  } finally {
+    sweepRunning = false;
+  }
+}
+
+function startUnpushedSweep() {
+  if (sweepTimer) return; // 多重起動防止
+  sweepTimer = setInterval(() => {
+    void sweepUnpushedBookings();
+  }, SWEEP_INTERVAL_MS);
+  if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
 }
 
 /** Supabase client が確実に使える状態になるまで待つ */
@@ -1665,6 +1886,23 @@ async function processShop(target, channels, runId, opts = {}) {
       // 「SalonBoardから同期」ボタン = fetch_shift_patterns ジョブでのみ取得)。
     }
 
+    if (channelSet.has('equipment')) {
+      try {
+        emit('shop:progress', { shopId, step: 'equipment', msg: '設備一覧を取得中…' });
+        const { rows, debug } = await scrapeEquipment(page, { salonId: creds.salonId ?? null, shopName });
+        const sent = await sendEquipment(shopId, rows);
+        counts.equipment = sent;
+        summary.push(`設備 ${sent} 件 (検出${rows.length})`);
+        emit('shop:progress', { shopId, step: 'equipment', msg: `設備 ${sent} 件保存` });
+      } catch (e) {
+        emit('log', {
+          level: 'warn',
+          msg: `[${shopId.slice(0, 8)}] equipment scrape error: ${e instanceof Error ? e.message : e}`,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
     await markCredentialSuccess(shopId);
     const summaryStr = summary.length > 0 ? summary.join(' / ') : 'login ok';
     emit('shop:end', { shopId, ok: true, summary: summaryStr });
@@ -2282,6 +2520,25 @@ async function sendStaff(shopId, rows) {
   return valid.length;
 }
 
+async function sendEquipment(shopId, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const valid = rows.filter((r) => r.external_id && r.name);
+  if (valid.length === 0) return 0;
+  const { error } = await supabase.rpc('salonboard_bulk_upsert_equipment', {
+    p_shop_id: shopId,
+    p_rows: valid,
+  });
+  if (error) {
+    emit('log', {
+      level: 'error',
+      msg: `bulk_upsert_equipment: ${error.message}`,
+      at: new Date().toISOString(),
+    });
+    return 0;
+  }
+  return valid.length;
+}
+
 async function sendMenus(shopId, rows) {
   if (!rows || rows.length === 0) return 0;
   const valid = rows.filter((r) => r.external_id && r.name);
@@ -2774,6 +3031,8 @@ async function runPushJobs({ showBrowser } = {}) {
       const isReviewReply = job.job_type === 'push_review_reply';
       const isShifts = job.job_type === 'push_shifts';
       const isFetchShiftPatterns = job.job_type === 'fetch_shift_patterns';
+      const isFetchStaff = job.job_type === 'fetch_staff';
+      const isFetchEquipment = job.job_type === 'fetch_equipment';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -2933,6 +3192,84 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🔴 勤務パターン取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
+      } else if (isFetchStaff) {
+        // ---- スタッフ/スタイリスト一覧取得 (Admin の /admin/staff 「SalonBoardから取得」ボタン) ----
+        // 通常の同期 (channels=['staff']) と同じ scrapeStaff → sendStaff を使うが、
+        // Admin から手動でジョブとして起動できるようにした経路。
+        const staffLabel = jobGenre === 'hair' ? 'スタイリスト' : 'スタッフ';
+        try {
+          const { rows, debug } = await scrapeStaff(page, {
+            genre: jobGenre,
+            salonId: creds.salon_id ?? null,
+            shopName: job.shop_name ?? null,
+          });
+          const sent = await sendStaff(job.shop_id, rows);
+          if (sent === 0) {
+            // scrape は成功 (throw されず) だが保存 0 件。
+            // 読取結果が空なら DOM 不整合 / ログイン切れの可能性。
+            const found = debug?.itemsFound ?? (Array.isArray(rows) ? rows.length : 0);
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_staff', status: 'manual_required',
+              error_code: 'STAFF_SAVE_FAILED',
+              error: `${staffLabel}を保存できませんでした (読取${found}件)。SalonBoardのログイン状態や掲載スタッフの有無を確認してください。`,
+              manual_required: true,
+            });
+            emit('log', { level: 'warn', msg: `[${tag}] 🟡 ${staffLabel}保存0件 (読取${found}件)`, at: new Date().toISOString() });
+          } else {
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_staff', status: 'succeeded',
+              summary: `${staffLabel} ${sent} 件取得`,
+            });
+            emit('log', { level: 'info', msg: `[${tag}] ✅ ${staffLabel} ${sent} 件取得`, at: new Date().toISOString() });
+          }
+        } catch (e) {
+          const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
+          const noRetry = isCaptcha || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_staff',
+            status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
+            error_code: e?.code || 'UNKNOWN_ERROR', error: `${e?.message ?? e}`.slice(0, 500),
+            manual_required: noRetry,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 ${staffLabel}取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
+        }
+      } else if (isFetchEquipment) {
+        // ---- 設備(ベッド/席)一覧取得 (Admin の店舗管理「SalonBoardから取得」ボタン) ----
+        // /CNK/set/equipList/ の設備設定を scrapeEquipment で読み取り、
+        // salonboard_equipment_imports に保存する (scrapeStaff と同じ方式)。
+        try {
+          const { rows, debug } = await scrapeEquipment(page, {
+            salonId: creds.salon_id ?? null,
+            shopName: job.shop_name ?? null,
+          });
+          const sent = await sendEquipment(job.shop_id, rows);
+          if (sent === 0) {
+            const found = debug?.itemsFound ?? (Array.isArray(rows) ? rows.length : 0);
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_equipment', status: 'manual_required',
+              error_code: 'EQUIPMENT_SAVE_FAILED',
+              error: `設備を保存できませんでした (読取${found}件)。SalonBoardのログイン状態や設備設定の有無を確認してください。`,
+              manual_required: true,
+            });
+            emit('log', { level: 'warn', msg: `[${tag}] 🟡 設備保存0件 (読取${found}件)`, at: new Date().toISOString() });
+          } else {
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_equipment', status: 'succeeded',
+              summary: `設備 ${sent} 件取得`,
+            });
+            emit('log', { level: 'info', msg: `[${tag}] ✅ 設備 ${sent} 件取得`, at: new Date().toISOString() });
+          }
+        } catch (e) {
+          const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
+          const noRetry = isCaptcha || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_equipment',
+            status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
+            error_code: e?.code || 'UNKNOWN_ERROR', error: `${e?.message ?? e}`.slice(0, 500),
+            manual_required: noRetry,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 設備取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
+        }
       } else if (isShifts) {
         // ---- シフト反映 (KIREIDOT shifts → SalonBoard シフト設定) ----
         const result = await pushShiftsViaForm(page, payload, { baseUrl, enablePush });
@@ -3047,10 +3384,13 @@ async function runPushJobs({ showBrowser } = {}) {
             booking_id: payload.booking_id,
             external_booking_id: result.externalId ?? null,
             salonboard_detail_url: result.detailUrl ?? null,
+            // preflight で既に SalonBoard にあった (新規登録ではない) ことを Admin に伝える。
+            // スイープの「自動で入れた」Slack 通知は新規登録のみを対象にするため、ここを見て分岐する。
+            already_exists: result.alreadyExists === true,
             result_payload: result.confirmed,
-            summary: `push_booking 登録完了 (external_id=${result.externalId ?? '?'})`,
+            summary: `push_booking ${result.alreadyExists ? '既存確認 (登録済み)' : '登録完了'} (external_id=${result.externalId ?? '?'})`,
           });
-          emit('log', { level: 'info', msg: `[${tag}] ✅ 登録完了 external_id=${result.externalId ?? '?'}${result.confirmed?.equip_assigned ? ` / 設備:${result.confirmed.equip_assigned}` : ''}`, at: new Date().toISOString() });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ ${result.alreadyExists ? '既存確認(登録済み)' : '登録完了'} external_id=${result.externalId ?? '?'}${result.confirmed?.equip_assigned ? ` / 設備:${result.confirmed.equip_assigned}` : ''}`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
         } else if (result.status === 'confirm_only') {
           await postCallback({
