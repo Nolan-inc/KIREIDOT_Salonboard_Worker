@@ -2528,6 +2528,17 @@ async function directScrape(shopId: string): Promise<void> {
         return;
       }
     }
+    // 検証する scrape 種別 (既定 bookings)。クラウド横展開の検証用。
+    const type = (process.env.SALONBOARD_DIRECT_SCRAPE_TYPE || "bookings").toLowerCase();
+    if (type === "shift_patterns") {
+      const sp = (await scrapers.scrapeShiftPatterns(page, baseUrl)) as {
+        patterns?: unknown[];
+      };
+      const patterns = sp?.patterns ?? [];
+      console.log(`[direct] ✅ scrapeShiftPatterns => ${patterns.length} 件`);
+      console.log(`[direct] sample:`, JSON.stringify(patterns.slice(0, 3)).slice(0, 400));
+      return;
+    }
     const genre =
       process.env.SALONBOARD_DIRECT_SCRAPE_GENRE === "hair" ? "hair" : "esthetic";
     const { rows, debug } = await scrapers.scrapeBookings(page, {
