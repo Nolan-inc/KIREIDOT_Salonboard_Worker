@@ -1194,6 +1194,8 @@ async function scrapeBookings(page, opts = {}) {
       status,
       staff_name: cleanText(it.staff_raw),
       staff_external_id: it.staff_external_id ?? null,
+      equipment_external_id: it.equipment_external_id ?? null,
+      equipment_name: cleanText(it.equipment_name) || null,
       reservation_route: cleanText(it.route_raw) || null,
       payment_method_label: cleanText(it.payment_raw) || null,
       coupon_name: cleanText(it.coupon_raw) || null,
@@ -1463,6 +1465,7 @@ async function extractBookingItemsFromCurrentPage(page) {
       route: findCol('予約経路', '経路'),
       coupon: findCol('クーポン'),
       payment: findCol('支払'),
+      equip: findCol('設備', 'ベッド', '席'),
     };
 
     // ヘッダーに「日時」列が見つからない場合、データ行を全部走査して
@@ -1563,6 +1566,23 @@ async function extractBookingItemsFromCurrentPage(page) {
           if (m) staffExtId = m[1].toUpperCase();
         }
 
+        // 設備(ベッド/席): 一覧に設備列がある店舗のみ拾える(無い店舗が大半)。
+        //   セル内リンクの EQ... を最優先、無ければ表示名を拾う。
+        let equipExtId = null;
+        let equipName = '';
+        if (idx.equip >= 0 && tds[idx.equip]) {
+          equipName = cells[idx.equip] || '';
+          const eqLinks = Array.from(tds[idx.equip].querySelectorAll('a[href]'));
+          for (const el of eqLinks) {
+            const m = (el.getAttribute('href') || '').match(/(EQ\d{6,})/i);
+            if (m) { equipExtId = m[1].toUpperCase(); break; }
+          }
+          if (!equipExtId) {
+            const m = (tds[idx.equip].innerHTML || '').match(/(EQ\d{6,})/i);
+            if (m) equipExtId = m[1].toUpperCase();
+          }
+        }
+
         return {
           datetime_raw: datetimeRaw,
           customer_raw: customerRaw,
@@ -1575,6 +1595,8 @@ async function extractBookingItemsFromCurrentPage(page) {
           route_raw: idx.route >= 0 ? cells[idx.route] : '',
           coupon_raw: idx.coupon >= 0 ? cells[idx.coupon] : '',
           payment_raw: idx.payment >= 0 ? cells[idx.payment] : '',
+          equipment_external_id: equipExtId,
+          equipment_name: equipName,
           link_href: attr(link, 'href'),
           row_text: rowText,
           headers_debug: headers,
@@ -3232,13 +3254,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     await page.locator('textarea#rsvEtc').first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
-  // 設備にデフォルトで「ベッド」を割り当てる。
-  // 予約登録フォームに設備セクション (#equipArea / select[name="equipIdList"]) があれば、
-  //   - 設備行が未選択なら「ベッド」を含む option を選ぶ
-  //   - 設備行自体が無ければ「追加する」(#equipAdd) を押してから選ぶ
-  // セクションが存在しないフォーム構成でも壊れないよう、全工程を try で保護し
-  // 失敗しても予約登録は続行する (設備は必須でない店舗もあるため)。
-  let equipResult = 'なし'; // 'ベッド設定' / '既存維持' / 'ベッドoption無し' / 'なし' / 'エラー'
+  // 設備(ベッド/席)を割り当てる。
+  //   優先順位:
+  //     1) payload の salonboard_equipment_external_id (EQ...) に一致する option
+  //        = KIREIDOT で紐付けた設備を優先順位ベースで解決した結果
+  //     2) payload の salonboard_equipment_name に一致する option (名前一致)
+  //     3) 「ベッド」を含む option (従来のフォールバック)
+  //   予約登録フォームに設備セクション (#equipArea / select[name="equipIdList"]) があれば、
+  //   設備行が無ければ「追加する」(#equipAdd) を押してから選ぶ。
+  //   セクションが存在しないフォーム構成でも壊れないよう全工程を try で保護し、
+  //   失敗しても予約登録は続行する (設備は必須でない店舗もあるため)。
+  const wantedEquipExtId = (p.salonboard_equipment_external_id || '').trim() || null; // EQ...
+  const wantedEquipName = (p.salonboard_equipment_name || '').trim() || null;
+  let equipResult = 'なし'; // 'EQ指定' / 'name一致' / 'ベッド設定' / '既存維持' / 'option無し' / 'なし' / 'エラー'
   try {
     // 新規予約フォーム(booking_create)の #equipArea は既定で設備行が無く、
     // 「追加する」(#equipAdd) を押すと equipIdList セレクトを持つ行が生成される。
@@ -3255,41 +3283,77 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
         }
       }
-      // 各設備行セレクトについて、未選択(空)なら「ベッド」を含む option を選ぶ。
-      // 既に何か選ばれている行は尊重して上書きしない。
+      // 各設備行セレクトについて、payload の指定設備(EQ/名前)→ベッドの順で選ぶ。
+      //   payload で設備が指定されている場合は、既に何か選ばれていても
+      //   「正しい設備」へ上書きする (KIREIDOT の割り当てを SB に反映するため)。
+      //   payload 指定が無い場合のみ、空行に「ベッド」を入れる従来動作。
       const equipSelects = page.locator(equipSelector);
       const n = await equipSelects.count().catch(() => 0);
+      let setBy = null; // 'EQ' / 'name' / 'bed'
       let setCount = 0;
       let keptCount = 0;
-      let noBedOption = false;
+      let noOption = false;
       for (let i = 0; i < n; i++) {
         const sel = equipSelects.nth(i);
+        // option を value(EQ...) と表示名で評価し、希望に最も合う value を選ぶ。
+        const pick = await sel.evaluate(
+          (el, args) => {
+            const { wantId, wantName } = args;
+            const opts = Array.from(el.options);
+            const norm = (s) => (s || '').replace(/[○×\s]/g, '');
+            // 1) EQ完全一致
+            if (wantId) {
+              const o = opts.find((o) => o.value === wantId);
+              if (o) return { value: o.value, by: 'EQ' };
+            }
+            // 2) 設備名一致
+            if (wantName) {
+              const o = opts.find((o) => norm(o.textContent) === norm(wantName));
+              if (o) return { value: o.value, by: 'name' };
+            }
+            return null;
+          },
+          { wantId: wantedEquipExtId, wantName: wantedEquipName },
+        ).catch(() => null);
+
+        if (pick && pick.value) {
+          await sel.selectOption({ value: pick.value }).catch(() => {});
+          await sel.evaluate((el) => {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }).catch(() => {});
+          setBy = pick.by;
+          setCount++;
+          continue;
+        }
+
+        // payload 指定が解決できない場合: 空行のみ「ベッド」を入れる従来動作
         const needsSet = await sel.evaluate((el) => {
           const cur = el.options[el.selectedIndex];
           const curText = (cur?.textContent || '').replace(/[○×\s]/g, '');
-          // 未選択 (value 空) または現在値が空表示なら設定対象
           return !el.value || curText === '';
         }).catch(() => false);
         if (!needsSet) { keptCount++; continue; }
-        // 「ベッド」を含む option の value を探して選択
         const bedVal = await sel.evaluate((el) => {
           const opt = Array.from(el.options).find((o) => (o.textContent || '').includes('ベッド'));
           return opt ? opt.value : null;
         }).catch(() => null);
         if (bedVal) {
           await sel.selectOption({ value: bedVal }).catch(() => {});
-          // change を発火して SB 側ハンドラ (時間欄の表示等) を起こす
           await sel.evaluate((el) => {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
           }).catch(() => {});
+          setBy = setBy || 'bed';
           setCount++;
         } else {
-          noBedOption = true;
+          noOption = true;
         }
       }
       equipResult =
-        setCount > 0 ? `ベッド設定(${setCount}行)` : noBedOption ? 'ベッドoption無し' : keptCount > 0 ? '既存維持' : '行なし';
+        setCount > 0
+          ? (setBy === 'EQ' ? `EQ指定(${setCount}行)` : setBy === 'name' ? `name一致(${setCount}行)` : `ベッド設定(${setCount}行)`)
+          : noOption ? 'option無し' : keptCount > 0 ? '既存維持' : '行なし';
     }
   } catch (_e) {
     equipResult = 'エラー';
@@ -3776,6 +3840,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
 // ----------------- スタッフ一覧 (staffList) -----------------
 
 const STAFF_LIST_URL = 'https://salonboard.com/CNK/draft/staffList';
+// 設備設定 (ベッド/席などの物理リソース)。設定系は美容室/エステ共通で /CNK/set/ 配下。
+const EQUIP_LIST_URL = 'https://salonboard.com/CNK/set/equipList/';
 
 // ===================== 美容室 (hair) 専用 =====================
 // 美容室はエステ(/CNK/...)と URL/DOM が異なり、/CNB/... 配下を使う。
@@ -4097,6 +4163,78 @@ async function scrapePhotoGallery(page, opts = {}) {
     });
 
   return { rows, debug: { itemsFound: rows.length, genre: 'esthetic', source: 'photoGalleryEdit', max: MAX_ITEMS } };
+}
+
+/**
+ * SalonBoard 設備設定 (/CNK/set/equipList/) から設備一覧を取得する。
+ * 出力 row 形は sendEquipment / salonboard_bulk_upsert_equipment 互換:
+ *   { external_id: 'EQ...', name, max_rsv_num, priority, sort_no }
+ *
+ * DOM 仕様 (確認済み):
+ *   各設備は <table id="TagTR_EQUIPMENT_TBL_N"> 内に 1 行。登録済みは
+ *   style="display:block"、空枠は display:none。一意 ID は hidden input:
+ *     <input type="hidden" name="frmEquipListDtoList[N].equipmentId" value="EQ...">
+ *   設備名/受付可能数/振り分け順/並び順も同じ配列名で露出:
+ *     frmEquipListDtoList[N].equipmentName (text)
+ *     frmEquipListDtoList[N].maxRsvNum     (select, selectedの値)
+ *     frmEquipListDtoList[N].priority      (text)
+ *     frmEquipListDtoList[N].sortNo        (text) ※1件目は固定で省略されることがある
+ *   equipmentId が空の行 (display:none の追加枠) は捨てる。
+ */
+async function scrapeEquipment(page, opts = {}) {
+  await page.goto(EQUIP_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+
+  const raw = await page.evaluate(() => {
+    function val(el) {
+      return el && typeof el.value === 'string' ? el.value.trim() : '';
+    }
+    function indexFromName(name) {
+      const m = String(name || '').match(/\[(\d+)\]\.equipmentId$/);
+      return m ? Number(m[1]) : -1;
+    }
+    // 全 equipmentId 入力を起点に巡回 (= N の全配列)
+    const idInputs = Array.from(
+      document.querySelectorAll(
+        'input[name^="frmEquipListDtoList["][name$=".equipmentId"]'
+      )
+    );
+    const items = [];
+    for (const idInput of idInputs) {
+      const ext = val(idInput);
+      if (!ext) continue; // 空枠 (display:none の追加用) は捨てる
+      const idx = indexFromName(idInput.getAttribute('name'));
+      if (idx < 0) continue;
+      const base = `frmEquipListDtoList[${idx}].`;
+      const nameEl = document.querySelector(`input[name="${base}equipmentName"]`);
+      const maxEl = document.querySelector(`select[name="${base}maxRsvNum"]`);
+      const prioEl = document.querySelector(`input[name="${base}priority"]`);
+      const sortEl = document.querySelector(`input[name="${base}sortNo"]`);
+      items.push({
+        external_id: ext,
+        name: val(nameEl),
+        max_rsv_num: maxEl ? maxEl.value : '',
+        priority: val(prioEl),
+        sort_no: val(sortEl),
+      });
+    }
+    return { items, idInputsCount: idInputs.length };
+  });
+
+  const rows = (raw.items || [])
+    .filter((it) => it.external_id && it.name)
+    .map((it) => ({
+      external_id: it.external_id,
+      name: it.name,
+      max_rsv_num: it.max_rsv_num !== '' ? Number(it.max_rsv_num) : null,
+      priority: it.priority !== '' ? Number(it.priority) : null,
+      sort_no: it.sort_no !== '' ? Number(it.sort_no) : null,
+    }));
+
+  return {
+    rows,
+    debug: { itemsFound: (raw.items || []).length, parsed: rows.length, idInputs: raw.idInputsCount },
+  };
 }
 
 async function scrapeStaff(page, opts = {}) {
@@ -6855,9 +6993,85 @@ async function uploadHairStyleFrontImage(page, file) {
  *
  * @returns { rows, debug }
  */
+// 口コミの詳細ページ(返信入力/詳細画面)を開いて、口コミ本文の全文 + 投稿済み返信本文を取得する。
+// 一覧では本文が省略される & 返信本文は出ないため、全文/返信が必要な場合のみ呼ぶ。
+// 返り値: { body_full, reply_body, reply_from_posted } (取れなかった項目は null)。
+async function scrapeReviewDetail(page, reviewId, genre, baseUrl) {
+  const base = baseUrl || 'https://salonboard.com/';
+  const url =
+    genre === 'hair'
+      ? new URL(`/CLP/bt/review/reviewReply/${encodeURIComponent(reviewId)}`, base).toString()
+      : new URL(`/KLP/review/reviewReply/?reviewId=${encodeURIComponent(reviewId)}`, base).toString();
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('table.mod_table01, table.mod_table03, textarea, .mod_box', { timeout: 8_000 }).catch(() => {});
+  } catch (_e) {
+    return { body_full: null, reply_body: null, reply_from_posted: null };
+  }
+  return await page.evaluate(() => {
+    const norm = (s) => (s || '').replace(/ /g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    // <br>/<p>/<div> を改行に変換してテキスト化
+    const htmlToText = (el) => {
+      if (!el) return '';
+      const html = (el.innerHTML || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li|h[1-6])>/gi, '\n');
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      return norm(tmp.textContent || '');
+    };
+
+    // 口コミ本文: ラベル「口コミ」「ご投稿内容」等を含む行の値セル、無ければ最長の本文ブロック
+    let bodyFull = '';
+    let replyBody = '';
+    let replyFrom = '';
+
+    const rows = Array.from(document.querySelectorAll('tr'));
+    for (const tr of rows) {
+      const th = tr.querySelector('th, .mod_th, td.head');
+      const label = norm(th?.textContent || '');
+      const valCell = th ? tr.querySelector('td') : null;
+      if (!label || !valCell) continue;
+      if (/口コミ|ご投稿|投稿内容|コメント|本文/.test(label) && !/返信/.test(label) && !bodyFull) {
+        bodyFull = htmlToText(valCell);
+      } else if (/返信(内容|本文|コメント)?/.test(label) && !/返信状況|返信日/.test(label)) {
+        const t = htmlToText(valCell);
+        if (t) replyBody = t;
+      } else if (/返信者|お名前|担当(者)?名/.test(label) && !replyFrom) {
+        replyFrom = norm(valCell.textContent || '');
+      }
+    }
+
+    // 既存返信の表示エリア (フォーム以外の確定済み返信) のフォールバック
+    if (!replyBody) {
+      const repEl = document.querySelector('.replyContents, .mod_reply, [class*="reply"][class*="contents" i]');
+      if (repEl) replyBody = htmlToText(repEl);
+    }
+    // textarea に既存返信が入っているケース (返信済みの再編集画面)
+    if (!replyBody) {
+      const ta = document.querySelector('textarea[name="replyContents"], textarea#replyContents, textarea[name="reply"]');
+      if (ta && ta.value) replyBody = norm(ta.value);
+    }
+    if (!replyFrom) {
+      const fromInput = document.querySelector('input#replyFrom, input[name="replyFrom"]');
+      if (fromInput && fromInput.value) replyFrom = norm(fromInput.value);
+    }
+
+    return {
+      body_full: bodyFull || null,
+      reply_body: replyBody || null,
+      reply_from_posted: replyFrom || null,
+    };
+  }).catch(() => ({ body_full: null, reply_body: null, reply_from_posted: null }));
+}
+
 async function scrapeReviews(page, opts = {}) {
   const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
   const maxPages = Number.isFinite(opts.maxPages) ? opts.maxPages : 5;
+  // withDetail=true のとき、各口コミの詳細ページを開いて全文+返信本文も取得する(遅い)。
+  const withDetail = opts.withDetail === true;
+  const detailLimit = Number.isFinite(opts.detailLimit) ? opts.detailLimit : 60;
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const listUrl =
     genre === 'hair'
       ? 'https://salonboard.com/CLP/bt/review/reviewList/'
@@ -6952,12 +7166,34 @@ async function scrapeReviews(page, opts = {}) {
     rows.push(it);
   }
 
+  // 詳細巡回: 全文 + 返信本文を取得する (withDetail=true 時のみ)。
+  //   全口コミの詳細ページを開くので時間がかかる → detailLimit 件まで。
+  //   返信済み(replied)を優先して巡回する(返信本文が必要なため)。
+  let detailFetched = 0;
+  if (withDetail && rows.length > 0) {
+    const ordered = [...rows].sort((a, b) => {
+      // replied を先に、その中で新しい順(配列は既に新しい順)
+      const ar = a.reply_status === 'replied' ? 0 : 1;
+      const br = b.reply_status === 'replied' ? 0 : 1;
+      return ar - br;
+    });
+    for (const it of ordered) {
+      if (detailFetched >= detailLimit) break;
+      const d = await scrapeReviewDetail(page, it.external_id, genre, baseUrl);
+      if (d.body_full) it.body_full = d.body_full;
+      if (d.reply_body) it.reply_body = d.reply_body;
+      if (d.reply_from_posted) it.reply_from_posted = d.reply_from_posted;
+      detailFetched++;
+    }
+  }
+
   return {
     rows,
     debug: {
       itemsFound: rows.length,
       pagesVisited: visited,
       totalPages: pageInfo.total,
+      detailFetched,
       genre,
       url: listUrl,
     },
@@ -6967,6 +7203,7 @@ async function scrapeReviews(page, opts = {}) {
 module.exports = {
   scrapeBookings,
   scrapeStaff,
+  scrapeEquipment,
   scrapeMenus,
   scrapeCoupons,
   scrapeBlogs,

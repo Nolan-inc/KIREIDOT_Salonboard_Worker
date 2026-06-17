@@ -775,7 +775,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns' && jt !== 'fetch_staff' && jt !== 'fetch_equipment') return;
+          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns' && jt !== 'fetch_staff' && jt !== 'fetch_equipment' && jt !== 'fetch_reviews') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -823,7 +823,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_review_reply', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_review_reply', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment', 'fetch_reviews'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -3033,6 +3033,7 @@ async function runPushJobs({ showBrowser } = {}) {
       const isFetchShiftPatterns = job.job_type === 'fetch_shift_patterns';
       const isFetchStaff = job.job_type === 'fetch_staff';
       const isFetchEquipment = job.job_type === 'fetch_equipment';
+      const isFetchReviews = job.job_type === 'fetch_reviews';
       const isCancel = job.job_type === 'cancel_booking';
       const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
 
@@ -3270,6 +3271,44 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🔴 設備取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
+      } else if (isFetchReviews) {
+        // ---- 口コミ一覧取得 (Admin の口コミ画面「SalonBoardから取得」ボタン) ----
+        // 一覧 + 詳細(全文/返信本文)を取得して salonboard_review_imports に保存する。
+        const jobGenre = job.genre === 'hair' ? 'hair' : 'esthetic';
+        try {
+          const { rows, debug } = await scrapeReviews(page, {
+            genre: jobGenre,
+            withDetail: true, // 返信本文・口コミ全文も取得
+            baseUrl,
+          });
+          const sent = await sendReviews(job.shop_id, rows);
+          if (sent === 0) {
+            const found = debug?.itemsFound ?? (Array.isArray(rows) ? rows.length : 0);
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_reviews', status: 'manual_required',
+              error_code: 'REVIEWS_SAVE_FAILED',
+              error: `口コミを保存できませんでした (読取${found}件)。SalonBoardのログイン状態や掲載口コミの有無を確認してください。`,
+              manual_required: true,
+            });
+            emit('log', { level: 'warn', msg: `[${tag}] 🟡 口コミ保存0件 (読取${found}件)`, at: new Date().toISOString() });
+          } else {
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_reviews', status: 'succeeded',
+              summary: `口コミ ${sent} 件取得${debug?.detailFetched ? ` (詳細${debug.detailFetched}件)` : ''}`,
+            });
+            emit('log', { level: 'info', msg: `[${tag}] ✅ 口コミ ${sent} 件取得${debug?.detailFetched ? ` (詳細${debug.detailFetched}件)` : ''}`, at: new Date().toISOString() });
+          }
+        } catch (e) {
+          const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
+          const noRetry = isCaptcha || exhausted;
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_reviews',
+            status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
+            error_code: e?.code || 'UNKNOWN_ERROR', error: `${e?.message ?? e}`.slice(0, 500),
+            manual_required: noRetry,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 口コミ取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
+        }
       } else if (isShifts) {
         // ---- シフト反映 (KIREIDOT shifts → SalonBoard シフト設定) ----
         const result = await pushShiftsViaForm(page, payload, { baseUrl, enablePush });
@@ -3494,7 +3533,7 @@ async function runPushJobs({ showBrowser } = {}) {
     const HANDLED_JOB_TYPES = new Set([
       'push_booking', 'cancel_booking', 'push_blog', 'delete_blog',
       'push_photo_gallery', 'push_review_reply', 'push_shifts',
-      'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment',
+      'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment', 'fetch_reviews',
     ]);
     const handled = [];
     for (const j of claimedJobs) {
