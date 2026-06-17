@@ -823,7 +823,7 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment'])
+        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_review_reply', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment'])
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -3485,10 +3485,20 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 扱わない種別は整理して除外。push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery / push_shifts を処理する。
+    // 扱わない種別は整理して除外。
+    // push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery /
+    // push_review_reply(口コミ返信投稿) / push_shifts / fetch_shift_patterns /
+    // fetch_staff / fetch_equipment を処理する。
+    // ★ push_review_reply / fetch_staff / fetch_equipment がこのリストから漏れていたため、
+    //   claim したジョブが「処理しません」で cancelled になり、口コミ返信が投稿されなかった。
+    const HANDLED_JOB_TYPES = new Set([
+      'push_booking', 'cancel_booking', 'push_blog', 'delete_blog',
+      'push_photo_gallery', 'push_review_reply', 'push_shifts',
+      'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment',
+    ]);
     const handled = [];
     for (const j of claimedJobs) {
-      if (j.job_type !== 'push_booking' && j.job_type !== 'cancel_booking' && j.job_type !== 'push_blog' && j.job_type !== 'delete_blog' && j.job_type !== 'push_photo_gallery' && j.job_type !== 'push_shifts' && j.job_type !== 'fetch_shift_patterns') {
+      if (!HANDLED_JOB_TYPES.has(j.job_type)) {
         await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
         drainedOther++;
       } else {
