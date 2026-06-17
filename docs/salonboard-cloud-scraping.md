@@ -126,3 +126,24 @@ docker run --rm --cap-add=SYS_ADMIN \
 - 専用ISP **¥1,500/月**(3IP・帯域無制限・既契約)。1IP で複数店舗共有可(上限は Akamai の「1IP×多アカウント」検知で実測チューニング)。
 - EC2 t3.small **~$20/月**(常時起動時。待機時 stop で節約・EIP 保持)。
 - **モバイルプロキシ不要**。
+
+---
+
+## A① 本番移行(クラウド fetch ルーティング)の設計 — 2026-06-17 prep
+
+`fetch_bookings` を EC2 に流し、PC に横取り(掴んで cancel)させないための設計。Admin リポジトリ `KireidotAdimn` の claim RPC を精読した結果。
+
+**現状の claim(精読済):**
+- `salonboard_claim_next_job`(central-dev = **EC2 が使用**、`029_salonboard_integration.sql:279`): フィルタ無しで **全 queued ジョブを claim**(`status='queued' and run_at<=now() and 未locked`、priority/run_at 順、`FOR UPDATE SKIP LOCKED`)。
+- `salonboard_claim_next_job_for_device`(**PC** = device、`118_salonboard_drop_consent_check.sql:18`): 自 device 許可店舗の **全種別を claim**(同店 5分以内 running は除外する shop 排他あり)。→ **PC が fetch_bookings も掴む → 処理せず cancel → EC2 をブロック**(= A① の障害の正体)。
+- 既存 hook: `executor` 列(`175_salonboard_jobs_executor_column.sql`、既定 `'playwright'`、CHECK `playwright/openclaw`、**routing/claim フィルタ未実装**)。
+- 別機構: アクティブ/スタンバイ機(`X-Machine-Id` + `salonboard_worker_heartbeats.is_active`、`jobs/route.ts:50`)。
+
+**設計(executor ルーティング):**
+1. `executor` CHECK に `'playwright_cloud'` を追加。
+2. `fetch_bookings`(+将来の fetch 系)を **`executor='playwright_cloud'`** で enqueue(pg_cron 定期 enqueue / autoenqueue 側)。
+3. PC claim(`_for_device`)の candidates WHERE に **`and j.executor <> 'playwright_cloud'`** 追加 → PC は cloud ジョブを掴まない。
+4. EC2 claim(`salonboard_claim_next_job`)に **`p_executor text default null`** 引数追加 + picked WHERE に `and (p_executor is null or executor = p_executor)`。`jobs/route.ts`(central-dev)は `p_executor='playwright_cloud'` を渡す(or worker の `WORKER_CAPABILITIES` から導出)。
+5. callback / データ反映は既存実証済みコード(`callback/route.ts`)をそのまま使用。
+
+**⚠️ 本番影響 + テスト必須**: PC の claim 変更 = 稼働中 PC に影響。**Supabase ブランチ(MCP `create_branch`・課金)で適用 → 結合テスト**(設計§12: 二重 claim 無し / lease 失効→reaper / 一意制約)→ 本番。worker 側 capability param(`WORKER_CAPABILITIES`)は実装済(`93e1c37`)。
