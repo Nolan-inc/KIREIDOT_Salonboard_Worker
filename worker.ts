@@ -165,6 +165,9 @@ if (WORKER_MODE === "device") {
 }
 
 const WORKER_ID = (process.env.WORKER_ID ?? "local-dev").slice(0, 64);
+// クラウドworkerが申告する capability(カンマ区切り)。Admin claim が「required ⊆ worker」で
+// 絞り込む想定。未指定の旧クライアント(PC)は Admin 側で全capability保有とみなす(後方互換)。
+const WORKER_CAPABILITIES = (process.env.WORKER_CAPABILITIES ?? "").trim();
 const APP_VERSION = process.env.APP_VERSION ?? readPkgVersion();
 const PLATFORM = process.platform;
 const POLL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
@@ -399,7 +402,11 @@ type PushBookingResult =
 // HTTP
 // ------------------------------------------------------------
 async function fetchJobs(limit = 1): Promise<Job[]> {
-  const res = await fetch(`${API}/api/salonboard/jobs?limit=${limit}`, {
+  // 申告capabilityを poll に載せる(Admin が「required ⊆ worker」で絞り込む想定)。
+  const capParam = WORKER_CAPABILITIES
+    ? `&capabilities=${encodeURIComponent(WORKER_CAPABILITIES)}`
+    : "";
+  const res = await fetch(`${API}/api/salonboard/jobs?limit=${limit}${capParam}`, {
     headers: buildAuthHeaders(),
   });
   if (!res.ok) {
