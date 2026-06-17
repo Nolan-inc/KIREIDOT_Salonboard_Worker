@@ -33,6 +33,7 @@ import {
   storageStatePathFor,
   readStorageState,
   saveStorageState,
+  SB_CONTEXT_OPTIONS,
 } from "./worker";
 import { SB_PATHS } from "./salonboard-selectors";
 
@@ -113,13 +114,44 @@ async function runOnce(): Promise<RunResult> {
 
   let browser: Browser | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    // SB_BROWSER_CHANNEL=chrome で本物の Google Chrome を使う (Chromium ではなく)。
+    // SB_HEADLESS=0 でヘッドフル (entrypoint が xvfb-run で仮想ディスプレイを用意)。
+    const channel = process.env.SB_BROWSER_CHANNEL || undefined;
+    const headless = process.env.SB_HEADLESS !== "0";
+    // SB_PROXY_SERVER=http://host:port を指定すると、住宅系プロキシ経由でアクセスする
+    // (Akamai に見える egress IP をプロキシの出口 IP にする = IP 起因かの切り分け)。
+    // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う
+    // (Decodo の jp.decodo.com:30001 のような指定をそのまま受け付けるため)。
+    const rawProxy = process.env.SB_PROXY_SERVER;
+    const proxy = rawProxy
+      ? {
+          server: /:\/\//.test(rawProxy) ? rawProxy : `http://${rawProxy}`,
+          username: process.env.SB_PROXY_USERNAME || undefined,
+          password: process.env.SB_PROXY_PASSWORD || undefined,
+        }
+      : undefined;
+    if (proxy) r.detail += `proxy=${proxy.server}; `;
+    browser = await chromium.launch({ headless, channel, proxy });
     const ssPath = storageStatePathFor(`canary-${LABEL}`);
+    // 本物の Chrome を使うときは UA を偽装しない (Linux実Chromeに Mac UA を被せると
+    // Sec-CH-UA-Platform と矛盾し、かえって検知シグナルになる)。
     const ctx = await browser.newContext({
-      locale: "ja-JP",
-      timezoneId: "Asia/Tokyo",
+      ...(channel ? { locale: "ja-JP", timezoneId: "Asia/Tokyo" } : SB_CONTEXT_OPTIONS),
       storageState: readStorageState(ssPath),
     });
+
+    // 帯域節約 (従量プロキシの 1GB を守る): 画像・メディア・フォントを遮断する。
+    // Akamai の bot 判定 JS / CSS / XHR は通すので合否判定には影響しない。
+    if (process.env.CANARY_BLOCK_ASSETS !== "0") {
+      await ctx.route("**/*", (route) => {
+        const type = route.request().resourceType();
+        if (type === "image" || type === "media" || type === "font") {
+          return route.abort();
+        }
+        return route.continue();
+      });
+    }
+
     const page = await ctx.newPage();
 
     // HTTP レベルの block (403/429) を観測する
@@ -129,6 +161,24 @@ async function runOnce(): Promise<RunResult> {
         r.detail += `http_${res.status()} ${res.url().slice(0, 120)}; `;
       }
     });
+
+    // 高速プローブ (CANARY_PROBE_MS, 既定12秒): ログインページに 1 回だけ短時間で
+    // アクセスし、応答が来ない (Akamai tarpit) なら即 blocked を返す。
+    // 本番フロー (isLoggedIn→tryLogin) は失敗時に 30s×複数で ~90s かかるため、
+    // 「弾かれた」の判定をここで早期に確定させて実験サイクルを短縮する。
+    const probeMs = Number(process.env.CANARY_PROBE_MS ?? 12_000);
+    try {
+      const t0 = Date.now();
+      await page.goto(new URL("/login/", BASE_URL).toString(), {
+        waitUntil: "domcontentloaded",
+        timeout: probeMs,
+      });
+      r.detail += `probe_ok ${Date.now() - t0}ms; `;
+    } catch {
+      r.blocked = true;
+      r.detail += `probe_timeout ${probeMs}ms (Akamai tarpit suspected); `;
+      return r;
+    }
 
     let state = await isLoggedIn(page, BASE_URL);
     if (state === "captcha") {
@@ -188,7 +238,8 @@ process.on("SIGINT", () => {
 
 async function main() {
   log(
-    `start label=${LABEL} base=${BASE_URL} interval=${INTERVAL_MS}ms worker=${WORKER_ID}`,
+    `start label=${LABEL} base=${BASE_URL} interval=${INTERVAL_MS}ms worker=${WORKER_ID} ` +
+      `channel=${process.env.SB_BROWSER_CHANNEL || "chromium"} headless=${process.env.SB_HEADLESS !== "0"}`,
   );
   while (!stopping) {
     const r = await runOnce();
@@ -197,7 +248,7 @@ async function main() {
         `blocked=${r.blocked} schedule=${r.scheduleOk} ${r.durationMs}ms ${r.detail}`,
     );
     emitMetrics(r);
-    if (stopping) break;
+    if (stopping || process.env.CANARY_ONCE === "1") break;
     await new Promise((res) => setTimeout(res, INTERVAL_MS));
   }
   log("bye");

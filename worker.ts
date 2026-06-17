@@ -21,8 +21,8 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync } from "node:fs";
+import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
   SCHEDULE,
@@ -562,22 +562,11 @@ async function handleJob(job: Job): Promise<void> {
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
       );
     }
-    browser = await chromium.launch(launch);
-    ctx = await browser.newContext({
-      storageState: readStorageState(ssPath),
-      // 実 Chrome (channel=chrome) のときは UA を偽装しない。Linux 実 Chrome に
-      // Mac UA を被せると Sec-CH-UA-Platform と矛盾し、かえって bot シグナルになる。
-      // bundled chromium (channel 未指定 = 既存 PC 経路) のときは従来どおり Mac UA。
-      ...(realChrome
-        ? {}
-        : {
-            userAgent:
-              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-          }),
-      locale: "ja-JP",
-      timezoneId: "Asia/Tokyo",
-    });
-    const page = await ctx.newPage();
+    // 自動化指紋を隠した永続コンテキストで起動 (PC と同じステルス)。session は
+    // userDataDir に永続するため storageState は使わない (蓄積で Akamai 信頼を育てる)。
+    ctx = await launchStealthContext({ launch, realChrome, shopId: job.shop_id });
+    browser = ctx.browser();
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
 
     // 1) ログイン済み判定 → 必要時のみ tryLogin
     let auth = await isLoggedIn(page, baseUrl);
@@ -1025,6 +1014,136 @@ function resolveLaunchOptions(
       }
     : undefined;
   return { launch: { headless, channel, proxy }, realChrome: !!channel };
+}
+
+/**
+ * ユーザーの普段使い Chrome プロファイルの「cookie / Akamai 信頼状態」を worker 専用
+ * userDataDir に seed する (PC worker-process.cjs と同じ)。同一 Mac・同一ユーザーなら
+ * Keychain の鍵で cookie を復号でき、手動と同じ Akamai 信頼状態で起動できる。
+ * SALONBOARD_USE_USER_PROFILE=1 のときのみ実行 (既定 OFF)。.seeded マーカーで初回のみ。
+ * パスワード DB (Login Data) / 自動入力 (Web Data) はコピーしない (cookie/信頼状態のみ)。
+ */
+function seedUserChromeProfile(userDataDir: string): {
+  seeded: boolean;
+  reason?: string;
+  copied?: number;
+} {
+  if (existsSync(join(userDataDir, ".seeded"))) return { seeded: false, reason: "already" };
+  const srcRoot =
+    process.env.SALONBOARD_CHROME_SOURCE_DIR ||
+    join(homedir(), "Library", "Application Support", "Google", "Chrome");
+  const srcProfile = process.env.SALONBOARD_CHROME_SOURCE_PROFILE || "Default";
+  if (!existsSync(join(srcRoot, srcProfile)))
+    return { seeded: false, reason: "source_not_found" };
+  try {
+    mkdirSync(join(userDataDir, srcProfile), { recursive: true, mode: 0o700 });
+    try {
+      copyFileSync(join(srcRoot, "Local State"), join(userDataDir, "Local State"));
+    } catch {
+      /* 鍵がコピーできなくても続行 */
+    }
+    // session cookie + Akamai 信頼状態のみ (パスワード/自動入力は除外)。
+    const files = [
+      "Cookies",
+      "Cookies-journal",
+      "Network/Cookies",
+      "Network/Cookies-journal",
+      "Preferences",
+      "Local Storage",
+    ];
+    let copied = 0;
+    for (const rel of files) {
+      const s = join(srcRoot, srcProfile, rel);
+      const d = join(userDataDir, srcProfile, rel);
+      try {
+        if (!existsSync(s)) continue;
+        mkdirSync(dirname(d), { recursive: true });
+        if (statSync(s).isDirectory()) cpSync(s, d, { recursive: true });
+        else copyFileSync(s, d);
+        copied++;
+      } catch {
+        /* 個別失敗は無視 */
+      }
+    }
+    try {
+      writeFileSync(join(userDataDir, ".seeded"), new Date().toISOString());
+    } catch {
+      /* noop */
+    }
+    return { seeded: true, copied };
+  } catch (e) {
+    return { seeded: false, reason: `copy_error: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+/**
+ * 自動化指紋を隠した永続コンテキストで Chrome を起動する (PC worker-process.cjs と同じステルス)。
+ * Akamai Bot Manager は navigator.webdriver / --enable-automation /
+ * AutomationControlled / --no-sandbox 警告 などの「自動化指紋」を見てボット判定し、
+ * login POST (doLogin) を無応答ホールドする。これらを付けない/隠すことで人間の Chrome に
+ * 近づける。launchPersistentContext で shop ごとに userDataDir を持ち、Akamai のセンサー
+ * cookie を回またぎで蓄積して信頼を育てる。SALONBOARD_USE_USER_PROFILE=1 のときは初回に
+ * ユーザー Chrome の cookie/信頼状態を seed する (ローカル運用向け / クラウドは既定 OFF)。
+ */
+async function launchStealthContext(opts: {
+  launch: ResolvedLaunch["launch"];
+  realChrome: boolean;
+  shopId: string;
+}): Promise<BrowserContext> {
+  const userDataDir = join(
+    homedir(),
+    ".kireidot",
+    "salonboard-chrome-profile",
+    opts.shopId
+  );
+  try {
+    mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+  } catch {
+    /* 作れない環境では Playwright が一時 dir を使う */
+  }
+  if (/^(1|true|yes)$/i.test(process.env.SALONBOARD_USE_USER_PROFILE ?? "")) {
+    console.log(
+      `[cfg] Chrome profile seed: ${JSON.stringify(seedUserChromeProfile(userDataDir))}`
+    );
+  }
+  const ctx = await chromium.launchPersistentContext(userDataDir, {
+    headless: opts.launch.headless,
+    channel: opts.launch.channel,
+    proxy: opts.launch.proxy,
+    // Playwright が付ける自動化フラグを除去 (Akamai 検知シグナル)。
+    ignoreDefaultArgs: [
+      "--enable-automation",
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+    ],
+    args: ["--disable-features=IsolateOrigins,site-per-process"],
+    viewport: { width: 1366, height: 900 },
+    locale: "ja-JP",
+    timezoneId: "Asia/Tokyo",
+    // 実 Chrome は本物 UA を使う。bundled chromium のみ従来の Mac UA 偽装。
+    ...(opts.realChrome
+      ? {}
+      : {
+          userAgent:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        }),
+  });
+  await ctx
+    .addInitScript(() => {
+      try {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      } catch {
+        /* noop */
+      }
+      try {
+        const w = window as unknown as { chrome?: unknown };
+        w.chrome = w.chrome || { runtime: {} };
+      } catch {
+        /* noop */
+      }
+    })
+    .catch(() => {});
+  return ctx;
 }
 
 function storageStatePathFor(shopId: string): string {
@@ -2364,12 +2483,83 @@ async function pollOnce(): Promise<number> {
   return jobs.length;
 }
 
+// 直接スクレイプモード (検証用): ジョブキューを経由せず、seed 済み (= ログイン済み)
+// セッションで指定 shop の予約一覧を直接 scrape して件数を出す。desktop worker が
+// fetch_bookings を先取り cancel する環境でも、キュー非依存で worker.ts の scrape +
+// seed の効果を確認できる。SALONBOARD_DIRECT_SCRAPE_SHOP=<shop_id> で起動。
+async function directScrape(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[direct] shop=${shopId} channel=${launch.channel ?? "chromium"} headless=${launch.headless} (キュー非依存・seed流用)`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    console.log(`[direct] isLoggedIn=${auth}`);
+    if (auth !== "logged_in") {
+      // creds が env で渡されていれば新規ログイン (クラウド/seed 無し検証用)。
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[direct] 未ログイン → 渡された認証情報で新規ログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(
+          `[direct] tryLogin => ${lr.status}${"reason" in lr ? ` (${lr.reason})` : ""}`
+        );
+        auth = await isLoggedIn(page, baseUrl);
+        console.log(`[direct] isLoggedIn(after login)=${auth}`);
+      }
+      if (auth !== "logged_in") {
+        console.log(
+          `[direct] 未ログイン (auth=${auth})。seed 流用なら Chrome がログイン済みか確認 / クラウドなら SALONBOARD_DIRECT_LOGIN_ID・SALONBOARD_DIRECT_PASSWORD を渡してください。`
+        );
+        return;
+      }
+    }
+    const genre =
+      process.env.SALONBOARD_DIRECT_SCRAPE_GENRE === "hair" ? "hair" : "esthetic";
+    const { rows, debug } = await scrapers.scrapeBookings(page, {
+      baseUrl,
+      genre,
+      loginId: "",
+      password: "",
+    });
+    const list = (rows ?? []) as Array<Record<string, unknown>>;
+    console.log(`[direct] ✅ scrapeBookings => ${list.length} 件 (genre=${genre})`);
+    console.log(
+      `[direct] sample:`,
+      JSON.stringify(
+        list.slice(0, 3).map((o) => ({
+          external_id: o.external_id,
+          scheduled_at: o.scheduled_at,
+          status: o.status,
+        }))
+      )
+    );
+    if (debug) console.log(`[direct] debug:`, JSON.stringify(debug).slice(0, 400));
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
       WORKER_MODE === "device" ? DEVICE_ID.slice(0, 8) : "-"
     } version=${APP_VERSION} platform=${PLATFORM} dry_run=${DRY_RUN} once=${RUN_ONCE} poll=${POLL_MS}ms`
   );
+
+  // 直接スクレイプモード (キュー非依存・検証用)。
+  const directShop = process.env.SALONBOARD_DIRECT_SCRAPE_SHOP;
+  if (directShop) {
+    await directScrape(directShop);
+    return;
+  }
 
   if (RUN_ONCE) {
     const n = await pollOnce();

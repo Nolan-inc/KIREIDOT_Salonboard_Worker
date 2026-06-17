@@ -32,7 +32,7 @@ import { chromium, type Browser } from "playwright";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { tryLogin, isLoggedIn } from "./worker";
+import { tryLogin, isLoggedIn, SB_CONTEXT_OPTIONS } from "./worker";
 import { rescanForMarker } from "./salonboard-rescan";
 
 // --- env (.env.local / .env) — test-push-booking.ts と同じ軽量ローダ ---
@@ -70,6 +70,20 @@ const headless = args.has("headless");
 const keepOpen = args.has("keep-open");
 
 async function main() {
+  // --- 認証情報の取得 ---
+  // 方式1 (env 直渡し): SALONBOARD_LOGIN_ID/PASSWORD があれば Admin API に
+  //   一切触れず実行する (本番ジョブキューを汚さない。スパイク推奨)。
+  // 方式2 (Admin claim): 無ければ test-push-booking.ts と同じくジョブを借りる。
+  if (process.env.SALONBOARD_LOGIN_ID && process.env.SALONBOARD_PASSWORD) {
+    const baseUrl = process.env.SALONBOARD_BASE_URL ?? "https://salonboard.com/";
+    log(`env 認証情報モード (Admin 非接続, base_url=${baseUrl})`);
+    await runRescan(baseUrl, {
+      login_id: process.env.SALONBOARD_LOGIN_ID,
+      password: process.env.SALONBOARD_PASSWORD,
+    });
+    return;
+  }
+
   const API = must("KIREIDOT_API_URL");
   const TOKEN = must("SALONBOARD_WORKER_TOKEN");
 
@@ -117,14 +131,22 @@ async function main() {
     process.exit(130);
   });
 
-  // --- ブラウザ起動 + ログイン (worker.ts のフローを再利用) ---
+  try {
+    await runRescan(baseUrl, claimed.credentials);
+  } finally {
+    await returnJob();
+  }
+}
+
+// --- ブラウザ起動 + ログイン (worker.ts のフローを再利用) + 再スキャン本体 ---
+async function runRescan(
+  baseUrl: string,
+  credentials: { login_id: string; password: string },
+): Promise<void> {
   let browser: Browser | null = null;
   try {
     browser = await chromium.launch({ headless });
-    const ctx = await browser.newContext({
-      locale: "ja-JP",
-      timezoneId: "Asia/Tokyo",
-    });
+    const ctx = await browser.newContext({ ...SB_CONTEXT_OPTIONS });
     const page = await ctx.newPage();
 
     log("ログイン状態を確認します...");
@@ -134,8 +156,8 @@ async function main() {
       log("ログインします...");
       const loginUrl = new URL("/login/", baseUrl).toString();
       const lr = await tryLogin(page, loginUrl, {
-        loginId: claimed.credentials.login_id,
-        password: claimed.credentials.password,
+        loginId: credentials.login_id,
+        password: credentials.password,
       });
       if (lr.status === "captcha")
         fatal("ログイン中に reCAPTCHA が出ました。自動突破はしません。");
@@ -174,7 +196,6 @@ async function main() {
       await new Promise(() => {});
     }
   } finally {
-    await returnJob();
     await browser?.close().catch(() => {});
   }
 }
