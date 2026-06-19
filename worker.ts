@@ -2528,45 +2528,55 @@ async function directScrape(shopId: string): Promise<void> {
         return;
       }
     }
-    // 検証する scrape 種別 (既定 bookings)。クラウド横展開の検証用。
-    const type = (process.env.SALONBOARD_DIRECT_SCRAPE_TYPE || "bookings").toLowerCase();
-    if (type === "shift_patterns") {
-      const sp = (await scrapers.scrapeShiftPatterns(page, baseUrl)) as {
-        patterns?: unknown[];
-      };
-      const patterns = sp?.patterns ?? [];
-      console.log(`[direct] ✅ scrapeShiftPatterns => ${patterns.length} 件`);
-      console.log(`[direct] sample:`, JSON.stringify(patterns.slice(0, 3)).slice(0, 400));
-      return;
-    }
+    // 検証する scrape 種別。カンマ区切りで複数種別を1ログインで連続スクレイプ(横展開検証)。
+    // staff/menus/coupons/blogs/reviews/photo_gallery を汎用 dispatch で扱う。
+    const typesRaw = (process.env.SALONBOARD_DIRECT_SCRAPE_TYPE || "bookings").toLowerCase();
+    const types = typesRaw.split(",").map((t) => t.trim()).filter(Boolean);
     const genre =
       process.env.SALONBOARD_DIRECT_SCRAPE_GENRE === "hair" ? "hair" : "esthetic";
-    const { rows, debug } = await scrapers.scrapeBookings(page, {
-      baseUrl,
-      genre,
-      loginId: "",
-      password: "",
-    });
-    const list = (rows ?? []) as Array<Record<string, unknown>>;
-    console.log(`[direct] ✅ scrapeBookings => ${list.length} 件 (genre=${genre})`);
-    console.log(
-      `[direct] sample:`,
-      JSON.stringify(
-        list.slice(0, 3).map((o) => ({
-          external_id: o.external_id,
-          scheduled_at: o.scheduled_at,
-          status: o.status,
-        }))
-      )
-    );
-    // 検証用: 全行を全フィールドでファイル出力 (fetch→DB同期テストで dev RPC に流すため)
+    const s = scrapers as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const fnByType: Record<string, string> = {
+      bookings: "scrapeBookings", staff: "scrapeStaff",
+      menu: "scrapeMenus", menus: "scrapeMenus",
+      coupon: "scrapeCoupons", coupons: "scrapeCoupons",
+      blog: "scrapeBlogs", blogs: "scrapeBlogs",
+      review: "scrapeReviews", reviews: "scrapeReviews",
+      photo_gallery: "scrapePhotoGallery", photogallery: "scrapePhotoGallery",
+    };
+    const dumpDir = process.env.SALONBOARD_DIRECT_DUMP_DIR;
     const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
-    if (dumpFile) {
-      const fs = await import("node:fs/promises");
-      await fs.writeFile(dumpFile, JSON.stringify(list));
-      console.log(`[direct] rows dumped => ${dumpFile} (${list.length} 件)`);
+    const fsp = dumpDir || dumpFile ? await import("node:fs/promises") : null;
+    if (dumpDir && fsp) await fsp.mkdir(dumpDir, { recursive: true }).catch(() => {});
+    for (const type of types) {
+      let list: Array<Record<string, unknown>> = [];
+      let debug: unknown;
+      try {
+        if (type === "shift_patterns") {
+          const sp = (await s.scrapeShiftPatterns(page, baseUrl)) as { patterns?: unknown[] };
+          list = (sp?.patterns ?? []) as Array<Record<string, unknown>>;
+        } else {
+          const fn = fnByType[type] ?? "scrapeBookings";
+          const res = (await s[fn](page, {
+            baseUrl, genre, loginId: "", password: "", maxDetails: 10,
+          })) as { rows?: unknown[]; debug?: unknown };
+          list = (res?.rows ?? []) as Array<Record<string, unknown>>;
+          debug = res?.debug;
+        }
+      } catch (e) {
+        console.log(`[direct] ❌ ${type} 失敗:`, String(e).slice(0, 200));
+        continue;
+      }
+      console.log(`[direct] ✅ ${type} => ${list.length} 件 (genre=${genre})`);
+      console.log(`[direct] ${type} sample:`, JSON.stringify(list.slice(0, 2)).slice(0, 500));
+      if (dumpDir && fsp) {
+        await fsp.writeFile(`${dumpDir}/${type}.json`, JSON.stringify(list));
+        console.log(`[direct] dumped ${type} => ${dumpDir}/${type}.json (${list.length})`);
+      } else if (dumpFile && fsp) {
+        await fsp.writeFile(dumpFile, JSON.stringify(list));
+        console.log(`[direct] dumped ${type} => ${dumpFile} (${list.length})`);
+      }
+      if (debug) console.log(`[direct] ${type} debug:`, JSON.stringify(debug).slice(0, 300));
     }
-    if (debug) console.log(`[direct] debug:`, JSON.stringify(debug).slice(0, 400));
   } finally {
     await ctx.close().catch(() => {});
   }
