@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1
+#
+# Akamai カナリア (実 Google Chrome 版 / Phase 0 切り分け実験)
+# ============================================================
+# headless Chromium が Akamai に弾かれる原因が「Chromium の指紋」なのかを
+# 切り分けるため、本物の Google Chrome (channel:chrome) を入れて検証する。
+# SB_HEADLESS=0 のときは Xvfb 仮想ディスプレイ上でヘッドフル起動する
+# (現行 PC が channel:'chrome' + ヘッドフルで Akamai を通している条件に近づける)。
+ARG PLAYWRIGHT_VERSION=1.59.1
+
+FROM node:22-bookworm-slim AS build
+WORKDIR /build
+COPY worker.ts salonboard-selectors.ts salonboard-rescan.ts canary.ts ./
+RUN npm install --no-save --no-audit --no-fund esbuild@0.25.5 \
+ && npx esbuild canary.ts \
+      --bundle --platform=node --format=esm --target=node22 \
+      --external:playwright \
+      --outfile=dist/canary.mjs
+
+FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble
+ARG APP_VERSION=0.0.0-realchrome
+ENV NODE_ENV=production APP_VERSION=${APP_VERSION} HOME=/home/pwuser
+WORKDIR /app
+
+# 本物の Google Chrome (channel:chrome) と Xvfb を入れる。
+# playwright の install chrome は google-chrome-stable を OS パッケージで入れる。
+USER root
+RUN npx -y playwright@${PLAYWRIGHT_VERSION} install --with-deps chrome \
+ && apt-get update && apt-get install -y --no-install-recommends xvfb \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY docker/package.json ./package.json
+RUN npm install --omit=dev --no-audit --no-fund \
+ && chown -R pwuser:pwuser /app /home/pwuser
+
+COPY --from=build /build/dist/canary.mjs ./canary.mjs
+COPY --chmod=755 docker/entrypoint-realchrome.sh /entrypoint.sh
+
+USER pwuser
+ENTRYPOINT ["/entrypoint.sh"]

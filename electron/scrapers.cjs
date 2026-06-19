@@ -954,7 +954,31 @@ async function scrapeBookings(page, opts = {}) {
 
   // ===== ここから下はエステ等(非hair)の従来フロー。変更しないこと =====
   // (美容室(hair)は関数冒頭で scrapeHairBookings に分岐済み)
-  await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  // reserveList/init はクラウド(プロキシ経由)だと、住宅IPの一時的なドロップで
+  // ERR_TUNNEL_CONNECTION_FAILED、または Level3 IP だと Akamai tarpit(無応答)に
+  // なることがある。トンネル切れ/タイムアウトは一過性のことが多いので最大5回張り直す
+  // (1〜2回目は domcontentloaded、3回目以降は応答ヘッダ受信で足る commit に緩める)。
+  // 全滅したら throw(ジョブはさらに上位でリトライされる)。
+  {
+    let _ok = false;
+    let _lastErr = '';
+    for (let _try = 1; _try <= 5 && !_ok; _try++) {
+      const _t0 = Date.now();
+      try {
+        await page.goto(RESERVE_LIST_URL, {
+          waitUntil: _try >= 3 ? 'commit' : 'domcontentloaded',
+          timeout: 30_000,
+        });
+        _ok = true;
+        console.log(`[scrape] reserveList ok try ${_try} ${Date.now() - _t0}ms url=${page.url()}`);
+      } catch (e) {
+        _lastErr = String((e && e.message) || e).split('\n')[0];
+        console.log(`[scrape] reserveList try ${_try} FAIL ${Date.now() - _t0}ms: ${_lastErr.slice(0, 90)}`);
+        await page.waitForTimeout(3000);
+      }
+    }
+    if (!_ok) throw new Error(`reserveList unreachable after 5 tries: ${_lastErr}`);
+  }
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
   // 予約一覧に到達できているかの即時診断 (検出0 の原因切り分け用)。
