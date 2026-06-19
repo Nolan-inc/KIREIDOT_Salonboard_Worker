@@ -2559,6 +2559,13 @@ async function directScrape(shopId: string): Promise<void> {
         }))
       )
     );
+    // 検証用: 全行を全フィールドでファイル出力 (fetch→DB同期テストで dev RPC に流すため)
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(list));
+      console.log(`[direct] rows dumped => ${dumpFile} (${list.length} 件)`);
+    }
     if (debug) console.log(`[direct] debug:`, JSON.stringify(debug).slice(0, 400));
   } finally {
     await ctx.close().catch(() => {});
