@@ -81,8 +81,22 @@ export function reserveRegistUrl(
 
 /** 予約スケジュール画面のセレクタ群 (確定)。 */
 export const SCHEDULE = {
-  /** グリッド全体。data-time-interval="5" / is5min。 */
-  grid: { selector: "#schedule.jscScheduleMain", state: "confirmed" } as Sel,
+  /**
+   * グリッド/スケジュール画面が描画されたことを示す指標 (readiness ゲート)。
+   * ⚠️ SalonBoard はタイミング/状況で予約スケジュールの DOM 構造が変わる。
+   * 2026-05-30 版は `#schedule.jscScheduleMain` だったが、2026-06-21 の実機では
+   * グリッド本体が `table.schedule` / `.jscScheduleTimeTable`(#timeFrameHeaderArea) /
+   * `#showSchedule` に変わっていた。新旧どちらでも「スケジュール画面に到達した」と
+   * 判定できるよう多候補にする (このゲートの役割はログイン切れ/エラー画面との切り分けのみ。
+   * 対象スタッフの存在は staffPresenceSelector() で別途判定する)。
+   * 末尾の `select#stockNameList` はスタッフ絞り込みセレクトで、DOM 改訂をまたいで
+   * 安定して存在するため最後の保険として含める。
+   */
+  grid: {
+    selector:
+      "#schedule.jscScheduleMain, table.schedule, .jscScheduleTimeTable, #showSchedule, select#stockNameList",
+    state: "confirmed",
+  } as Sel,
 
   /**
    * スケジュール画面に埋め込まれた更新タイムスタンプ
@@ -95,7 +109,9 @@ export const SCHEDULE = {
 
   /**
    * スタッフ列(行)ヘッダ。id="STAFF_<externalId>_<YYYYMMDD>"、title=表示名。
-   * 特定スタッフは staffHeadById() で組み立てる。
+   * ⚠️ 2026-06-21 の実機ではこの列ヘッダ要素が消え、スタッフは
+   * `select#stockNameList` の option として表現されるよう DOM が変わっていた。
+   * 対象スタッフの存在判定は staffPresenceSelector()(新旧両対応) を使うこと。
    */
   staffHeadAll: {
     selector: "li.jscScheduleMainHead[id^='STAFF_']",
@@ -111,9 +127,15 @@ export const SCHEDULE = {
     state: "confirmed",
   } as Sel,
 
-  /** 既存予約ブロック (重複チェックに使う)。 */
+  /**
+   * 既存予約ブロック (重複チェックに使う)。
+   * 2026-05-30 版は `div.scheduleReservation.jscScheduleReservation`。
+   * 2026-06-21 実機では内側ラッパ `div.scheduleReservationInner` 構造に変わっていたため
+   * 新旧両対応にする (内部の時間帯 JSON は reservationTimeZone で読む)。
+   */
   reservationBlock: {
-    selector: "div.scheduleReservation.jscScheduleReservation",
+    selector:
+      "div.scheduleReservation.jscScheduleReservation, div.scheduleReservationInner",
     state: "confirmed",
   } as Sel,
 
@@ -154,6 +176,21 @@ export function staffHeadId(externalId: string, yyyymmdd: string): string {
 /** stockNameList の option value。 */
 export function staffOptionValue(externalId: string, yyyymmdd: string): string {
   return `STAFF_${externalId}_${yyyymmdd}`;
+}
+
+/**
+ * 対象スタッフがその日のスケジュールに存在する(=シフト内/登録対象)かを判定する
+ * 複合セレクタ。SalonBoard の DOM 改訂をまたいで効くよう新旧両方を OR で並べる:
+ *   - 新 DOM: `select#stockNameList option[value="STAFF_<ext>_<date>"]`
+ *   - 旧 DOM: 列ヘッダ `#STAFF_<ext>_<date>`
+ * どちらかが存在すれば「その日そのスタッフの枠がある」とみなす。
+ */
+export function staffPresenceSelector(
+  externalId: string,
+  yyyymmdd: string,
+): string {
+  const token = staffOptionValue(externalId, yyyymmdd);
+  return `${staffHeadId(externalId, yyyymmdd)}, select#stockNameList option[value="${token}"]`;
 }
 
 /** 予約一覧画面のセレクタ群 (確定)。重複チェック補助に使う。 */

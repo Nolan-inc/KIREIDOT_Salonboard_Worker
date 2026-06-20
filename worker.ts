@@ -31,8 +31,8 @@ import {
   RESERVE_ID_RE,
   scheduleUrl,
   reserveRegistUrl,
-  staffHeadId,
   staffOptionValue,
+  staffPresenceSelector,
 } from "./salonboard-selectors";
 
 // 本番スクレイパー (scrapers.cjs) を共有。PC 版 worker-process.cjs と同じ実装を
@@ -1970,9 +1970,17 @@ async function pushBooking(
   }
 
   // グリッドが描画されるまで待つ。
+  // クラウド(EC2+プロキシ)ではログイン後の深い認証ページ(スケジュール)が
+  // domcontentloaded 直後にはグリッド未描画のことがある。proven な scrapeBookings と
+  // 同様に networkidle を待ち、さらにグリッド要素の出現を明示的に待ってから判定する
+  // (即 count()===0 だと一時的な未描画を「グリッドなし」と誤判定する)。
+  await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
   const grid = page.locator(SCHEDULE.grid.selector).first();
+  await grid.waitFor({ state: "attached", timeout: 12_000 }).catch(() => {});
   if ((await grid.count().catch(() => 0)) === 0) {
-    await captureRegisterDebug(page, job, "schedule_grid_not_found");
+    await captureRegisterDebug(page, job, "schedule_grid_not_found", {
+      url: page.url(),
+    });
     return fail(
       "予約スケジュールのグリッドが見つかりません",
       "UNKNOWN_ERROR",
@@ -1997,12 +2005,13 @@ async function pushBooking(
         .catch(() => "")
     )?.trim() || "";
 
-  // 対象スタッフの列(行)ヘッダを external_id + 日付で特定。
+  // 対象スタッフがその日のスケジュールに存在するかを external_id + 日付で確認。
+  // 新旧 DOM 両対応 (新: stockNameList の option / 旧: 列ヘッダ id)。
+  // 無ければシフト外/退職などで登録不能。
   const staffHead = page
-    .locator(staffHeadId(p.salonboard_staff_external_id, yyyymmdd))
+    .locator(staffPresenceSelector(p.salonboard_staff_external_id, yyyymmdd))
     .first();
   if ((await staffHead.count().catch(() => 0)) === 0) {
-    // その日にそのスタッフの列が無い = シフト外/退職など。
     await captureRegisterDebug(page, job, "staff_column_not_found");
     return fail(
       `スケジュールに対象スタッフ(${p.salonboard_staff_external_id})の列が見つかりません`,
@@ -2274,16 +2283,12 @@ async function pushBooking(
     await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
-  // 空き枠/エラーメッセージの検出 (入力直後にフォームが警告を出すことがある)
-  const slotError = await page
-    .locator("text=/予約できません|空いて|満員|埋ま|重複/")
-    .count()
-    .catch(() => 0);
-  if (slotError > 0) {
-    await captureRegisterDebug(page, job, "slot_not_available");
-    return fail("SalonBoard側で対象時間が空いていません", "SLOT_NOT_AVAILABLE", false);
-  }
-
+  // ⚠️ 空き枠/エラー検出はここ (入力直後・送信前) では行わない。
+  // 以前はページ全体テキスト `/予約できません|空いて|満員|埋ま|重複/` を検索していたが、
+  // 登録フォームに常設の注意書き「メニューとの重複登録にご注意ください。」の「重複」に
+  // 誤マッチし、空き枠でも常に SLOT_NOT_AVAILABLE になっていた (2026-06-21 実機検証で判明)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同様、エラー判定は「登録ボタン押下後」に
+  // 警告/エラー領域へスコープして行う (下記 §5)。
   const confirmed: CallbackBody["result_payload"] = {
     confirmed_customer_name: p.customer_name ?? null,
     confirmed_staff_name: p.staff_name ?? null,
@@ -2334,6 +2339,37 @@ async function pushBooking(
       "RECAPTCHA_REQUIRED",
       true,
     );
+  }
+
+  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する。
+  // ページ全体テキスト検索は静的な注意書き (例:「メニューとの重複登録にご注意ください」)
+  // に誤マッチするため不可。実証済み scrapers.cjs pushBookingViaForm と同じ
+  // エラー領域セレクタに揃える。hasText フィルタで空/非表示コンテナを避ける。
+  const errText = (
+    await page
+      .locator(
+        '.mod_box_warning, #warningMessageArea, .error, .errorMessage, [class*="error" i]',
+      )
+      .filter({ hasText: /\S/ })
+      .first()
+      .innerText()
+      .catch(() => "")
+  ).trim();
+  if (errText && /予約できません|空いて|満員|埋ま|重複|登録できません/.test(errText)) {
+    await captureRegisterDebug(page, job, "slot_not_available", {
+      errText: errText.slice(0, 120),
+    });
+    return fail(
+      `SalonBoard側で対象時間が空いていません (${errText.slice(0, 60)})`,
+      "SLOT_NOT_AVAILABLE",
+      false,
+    );
+  }
+  if (errText && /エラー|失敗|できません/.test(errText)) {
+    await captureRegisterDebug(page, job, "register_error", {
+      errText: errText.slice(0, 120),
+    });
+    return fail(`登録時にエラー: ${errText.slice(0, 80)}`, "UNKNOWN_ERROR", true);
   }
 
   // 完了画面から reserveId / detail_url を抽出。
