@@ -2582,6 +2582,82 @@ async function directScrape(shopId: string): Promise<void> {
   }
 }
 
+/**
+ * キュー非依存の push_booking 検証 (confirm-only)。
+ * env creds でログイン → SALONBOARD_DIRECT_PUSH_PAYLOAD (JSON) で pushBooking 実行。
+ * SALONBOARD_ENABLE_PUSH=OFF (既定) なら登録ボタンを押さず確認内容を返す (実予約を作らない)。
+ */
+async function directPush(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[push] shop=${shopId} channel=${launch.channel ?? "chromium"} headless=${launch.headless} ENABLE_PUSH=${ENABLE_PUSH ? "ON" : "OFF"} (キュー非依存・confirm-only)`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    console.log(`[push] isLoggedIn=${auth}`);
+    if (auth !== "logged_in") {
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[push] 未ログイン → 認証情報でログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(`[push] tryLogin => ${lr.status}`);
+        auth = await isLoggedIn(page, baseUrl);
+        console.log(`[push] isLoggedIn(after login)=${auth}`);
+      }
+      if (auth !== "logged_in") {
+        console.log(`[push] 未ログイン (auth=${auth})。認証情報を確認。`);
+        return;
+      }
+    }
+    const raw = process.env.SALONBOARD_DIRECT_PUSH_PAYLOAD;
+    if (!raw) {
+      console.log(`[push] SALONBOARD_DIRECT_PUSH_PAYLOAD (JSON) が未指定。`);
+      return;
+    }
+    let payload: PushBookingPayload;
+    try {
+      payload = JSON.parse(raw) as PushBookingPayload;
+    } catch (e) {
+      console.log(`[push] payload JSON parse 失敗:`, String(e).slice(0, 200));
+      return;
+    }
+    console.log(
+      `[push] payload: staff=${payload.salonboard_staff_external_id} menu=${
+        payload.salonboard_menu_name ?? payload.menu_name ?? payload.coupon_name
+      } at=${payload.scheduled_at} customer=${payload.customer_name}`
+    );
+    const fakeJob = {
+      id: "direct-push-test",
+      job_type: "push_booking",
+      shop_id: shopId,
+      organization_id: null,
+      attempts: 0,
+      max_attempts: 1,
+      status: "running",
+      credentials: { base_url: baseUrl },
+      payload,
+    } as unknown as Job;
+    const result = await pushBooking(page, fakeJob, payload);
+    console.log(`[push] ✅ pushBooking => status=${result.status}`);
+    console.log(`[push] result:`, JSON.stringify(result).slice(0, 1500));
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
+      console.log(`[push] result dumped => ${dumpFile}`);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
@@ -2593,6 +2669,13 @@ async function main() {
   const directShop = process.env.SALONBOARD_DIRECT_SCRAPE_SHOP;
   if (directShop) {
     await directScrape(directShop);
+    return;
+  }
+
+  // 直接 push モード (キュー非依存・confirm-only 検証用)。
+  const directPushShop = process.env.SALONBOARD_DIRECT_PUSH_SHOP;
+  if (directPushShop) {
+    await directPush(directPushShop);
     return;
   }
 
