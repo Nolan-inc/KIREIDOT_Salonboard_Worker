@@ -1980,6 +1980,23 @@ async function pushBooking(
     );
   }
 
+  // スケジュール画面の更新タイムスタンプ (#rlastupdate) を取得しておく。
+  // これを登録フォーム URL に付与しないと moduleId=KPCL017V01 が
+  // 「情報が一部失われています」エラーになるため、スケジュールを開いた今のうちに読む。
+  await page
+    .locator(SCHEDULE.rlastupdate.selector)
+    .first()
+    .waitFor({ state: "attached", timeout: 8_000 })
+    .catch(() => {});
+  const rlastupdate =
+    (
+      await page
+        .locator(SCHEDULE.rlastupdate.selector)
+        .first()
+        .textContent()
+        .catch(() => "")
+    )?.trim() || "";
+
   // 対象スタッフの列(行)ヘッダを external_id + 日付で特定。
   const staffHead = page
     .locator(staffHeadId(p.salonboard_staff_external_id, yyyymmdd))
@@ -2055,7 +2072,13 @@ async function pushBooking(
     yyyymmdd,
     startHH,
     startMM,
+    rlastupdate,
   );
+  if (!rlastupdate) {
+    console.warn(
+      `[push] #rlastupdate を取得できませんでした。登録フォームが KPCL017V01 (情報が一部失われています) になる可能性があります。`,
+    );
+  }
   try {
     await page.goto(registUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
@@ -2078,11 +2101,26 @@ async function pushBooking(
       .count()
       .catch(() => 0)) > 0;
   if (!formReady) {
+    // どの画面に居るかを診断に含める (rlastupdate 不足による KPCL017V01 等の切り分け)。
+    const diag = await page
+      .evaluate(() => {
+        const forms = Array.from(document.querySelectorAll("form"))
+          .map((f) => f.id || f.getAttribute("name") || f.getAttribute("action") || "?")
+          .slice(0, 5);
+        const body = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 200);
+        return { url: location.href, title: document.title, forms, body };
+      })
+      .catch(() => ({ url: page.url(), title: "?", forms: [] as string[], body: "?" }));
     await captureRegisterDebug(page, job, "register_page_not_found", {
-      url: page.url(),
+      url: diag.url,
+      rlastupdate: rlastupdate || null,
+      title: diag.title,
+      forms: diag.forms,
     });
     return fail(
-      "予約登録フォームに到達できませんでした (ログイン切れ/画面変更の可能性)。",
+      `予約登録フォームに到達できませんでした (ログイン切れ/画面変更/情報欠落の可能性。rlastupdate=${
+        rlastupdate || "なし"
+      })。url=${diag.url} title="${diag.title}" forms=[${diag.forms.join(",")}] body="${diag.body}"`,
       "CONFIRMATION_MISMATCH",
       true,
     );
@@ -2099,6 +2137,59 @@ async function pushBooking(
       .catch(async () => {
         if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
       });
+  }
+
+  // hidden staffId / 担当割当セレクトを external_id へ強制同期する。
+  // 表示用 salonStaffList を選んでも、実際に送信される hidden input#staffId と
+  // 担当割当 select[name=staffIdList] が既定スタッフのままだと
+  // 「どのスタッフを選んでも既定スタッフで登録される」取り違えが起きる。
+  // JS で値を揃え、SalonBoard 側ハンドラ向けに input/change を発火させる
+  // (実証済み scrapers.cjs pushBookingViaForm と同処理)。
+  await page
+    .evaluate(
+      ({ ext, hiddenSel, listSels }) => {
+        const setVal = (el: Element | null, v: string) => {
+          if (!el) return;
+          (el as HTMLInputElement | HTMLSelectElement).value = v;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        document.querySelectorAll(hiddenSel).forEach((el) => setVal(el, ext));
+        for (const sel of listSels) {
+          const el = document.querySelector(sel) as HTMLSelectElement | null;
+          if (el && Array.from(el.options).some((o) => o.value === ext)) {
+            setVal(el, ext);
+          }
+        }
+      },
+      {
+        ext: p.salonboard_staff_external_id,
+        hiddenSel: REGISTER_FORM.staffHiddenId.selector,
+        listSels: [
+          REGISTER_FORM.staffSelect.selector,
+          REGISTER_FORM.staffIdList.selector,
+        ],
+      },
+    )
+    .catch(() => {});
+
+  // hidden staffId が実際に external_id へ揃ったか検証 (取り違え防止の最終確認)。
+  // 揃っていなければ確定操作に進まず manual_required に倒す。
+  const appliedStaffId = await page
+    .locator(REGISTER_FORM.staffHiddenId.selector)
+    .first()
+    .inputValue()
+    .catch(() => null);
+  if (appliedStaffId && appliedStaffId !== p.salonboard_staff_external_id) {
+    await captureRegisterDebug(page, job, "staff_id_mismatch", {
+      expected: p.salonboard_staff_external_id,
+      applied: appliedStaffId,
+    });
+    return fail(
+      `スタッフ ID をフォームに反映できませんでした (期待=${p.salonboard_staff_external_id} 実際=${appliedStaffId})。スタッフ取り違え防止のため自動登録を中止します。`,
+      "STAFF_MAPPING_NOT_FOUND",
+      true,
+    );
   }
 
   // 開始 時/分 (URL でも入るが明示)
