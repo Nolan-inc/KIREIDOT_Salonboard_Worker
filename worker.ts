@@ -1250,13 +1250,65 @@ async function isLoggedIn(
   return "needs_login";
 }
 
+/**
+ * プロキシ/ネットワークの一時的失敗を表すナビゲーションエラーか判定する。
+ * 特に Decodo ISP プロキシは稀に tunnel をドロップし
+ * `net::ERR_TUNNEL_CONNECTION_FAILED` を返す (curl では同時刻に疎通する=恒久障害ではない)。
+ * これらは即時リトライで回復するため、恒久エラー (DNS 不正・証明書等) と区別する。
+ */
+function isTransientNavError(msg: string): boolean {
+  return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|ERR_TIMED_OUT|ERR_NETWORK_CHANGED|ERR_SOCKET_NOT_CONNECTED|ERR_HTTP2_PING_FAILED|ERR_ABORTED|ERR_NETWORK_IO_SUSPENDED/i.test(
+    msg,
+  );
+}
+
+/**
+ * `page.goto` を一時的ナビゲーションエラー (主に Decodo ISP の tunnel ドロップ
+ * = net::ERR_TUNNEL_CONNECTION_FAILED) に対して指数バックオフで再試行する。
+ * 一時的でないエラーは即座に投げ直し、無駄なリトライをしない。
+ * クラウド worker はログイン・深層ページ遷移とも単一プロキシ経由のため、
+ * tunnel の瞬断でジョブ全体を落とさないよう要所の goto をこれで包む。
+ */
+async function gotoResilient(
+  page: Page,
+  url: string,
+  opts: Parameters<Page["goto"]>[1],
+  label = "goto",
+  attempts = 3,
+): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await page.goto(url, opts);
+      if (i > 1) console.log(`[nav] ${label} OK (attempt ${i}/${attempts})`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (i >= attempts || !isTransientNavError(msg)) throw e;
+      const waitMs = 1200 * i;
+      console.warn(
+        `[nav] ${label} 一時的失敗 (attempt ${i}/${attempts}): ${msg.slice(0, 120)} → ${waitMs}ms 後に再試行`,
+      );
+      await page.waitForTimeout(waitMs).catch(() => {});
+    }
+  }
+  throw lastErr;
+}
+
 async function tryLogin(
   page: Page,
   url: string,
   c: { loginId: string; password: string }
 ): Promise<{ status: "ok" } | { status: "failed"; reason?: string } | { status: "captcha" }> {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    // ログイン遷移は tunnel 瞬断で落ちやすいので再試行付きで開く。
+    await gotoResilient(
+      page,
+      url,
+      { waitUntil: "domcontentloaded", timeout: 30_000 },
+      "login",
+    );
   } catch (e) {
     return { status: "failed", reason: `navigation: ${e instanceof Error ? e.message : e}` };
   }
@@ -1957,7 +2009,12 @@ async function pushBooking(
   // ----------------------------------------------------------
   const schedUrl = scheduleUrl(baseUrl, yyyymmdd);
   try {
-    await page.goto(schedUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await gotoResilient(
+      page,
+      schedUrl,
+      { waitUntil: "domcontentloaded", timeout: 25_000 },
+      "schedule",
+    );
   } catch (e) {
     return fail(
       `予約スケジュールを開けません: ${e instanceof Error ? e.message : e}`,
@@ -2089,7 +2146,12 @@ async function pushBooking(
     );
   }
   try {
-    await page.goto(registUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await gotoResilient(
+      page,
+      registUrl,
+      { waitUntil: "domcontentloaded", timeout: 25_000 },
+      "register-form",
+    );
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
   } catch (e) {
     return fail(
