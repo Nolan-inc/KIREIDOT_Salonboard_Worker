@@ -2381,6 +2381,44 @@ async function pushBooking(
     enable_push: ENABLE_PUSH,
   });
   if (!ENABLE_PUSH) {
+    // 診断モード (SALONBOARD_PUSH_DIAG=1): 「登録する」を押してダイアログ文言と直後ページを
+    // 記録するが、ダイアログは必ず DISMISS (=確認ならキャンセル) して絶対に登録しない。
+    // 「dialog=true なのに予約が作られない」原因 (確認 vs 検証アラート / ボタンの errorInput) の切り分け用。
+    if (process.env.SALONBOARD_PUSH_DIAG === "1") {
+      let diagMsg = "";
+      let diagFired = false;
+      const onDiag = async (d: Dialog) => {
+        diagFired = true;
+        diagMsg = d.message();
+        console.log(
+          `[push][diag] dialog(${d.type()}): "${diagMsg.slice(0, 180).replace(/\s+/g, " ")}" → dismiss(登録しない)`,
+        );
+        try {
+          await d.dismiss();
+        } catch {
+          /* noop */
+        }
+      };
+      page.on("dialog", onDiag);
+      const btn = page.locator(REGISTER_FORM.registerButton.selector).first();
+      const onclick = await btn.getAttribute("onclick").catch(() => null);
+      const beforeUrl = page.url();
+      await btn
+        .click({ timeout: 10_000 })
+        .catch((e) => console.log(`[push][diag] click err: ${e instanceof Error ? e.message : e}`));
+      await page.waitForTimeout(2500);
+      page.off("dialog", onDiag);
+      console.log(
+        `[push][diag] regist onclick="${onclick ?? ""}" dialogFired=${diagFired} dialog="${diagMsg.slice(0, 120)}" urlBefore=${beforeUrl} urlAfter=${page.url()}`,
+      );
+      await captureRegisterDebug(page, job, "push_diag", {
+        registOnclick: onclick,
+        dialogFired,
+        diagMessage: diagMsg.slice(0, 200),
+        urlBefore: beforeUrl,
+        urlAfter: page.url(),
+      });
+    }
     return { status: "confirm_only", confirmed };
   }
 
