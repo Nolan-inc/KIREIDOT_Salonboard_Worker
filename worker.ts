@@ -20,7 +20,7 @@
  *   npm run dry-run        # サロンボードに触らず callback だけ返す
  */
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from "playwright";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -2324,17 +2324,32 @@ async function pushBooking(
     );
   }
 
-  // 顧客名 (姓名分割)。p.customer_name を空白で姓/名に分ける。
-  if (p.customer_name) {
-    const parts = p.customer_name.trim().split(/[\s　]+/);
-    const sei = parts[0] ?? p.customer_name;
-    const mei = parts.slice(1).join(" ") || "";
+  // 顧客名 (姓名分割) + カナ。
+  // ⚠️ カナ (nmSeiKana/nmMeiKana) は SalonBoard で必須入力。未入力だと登録フォームが
+  // errorInput=true になり「登録する」ボタンが無効化されて送信できず、予約が作られない
+  // (2026-06-23 実機検証で判明: a#regist の onclick が errorInput=true;return false に)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同じく姓/名/セイ/メイを必ず埋める。
+  {
+    const cleanName = (s: string) => String(s || "").replace(/\s+/g, " ").trim();
+    // カナ用: 全角カタカナ + 長音 + 中黒のみ残す (半角/漢字は除去)。取れなければ汎用カナ。
+    const cleanKana = (s: string) =>
+      String(s || "").replace(/[^゠-ヿー・\s]/g, "").replace(/\s+/g, " ").trim();
+    const rawName = (p.customer_name && p.customer_name.trim()) || "ゲスト";
+    const cleaned = cleanName(rawName) || "ゲスト";
+    const parts = cleaned.split(/[\s　]+/).filter(Boolean);
+    const sei = parts[0] || cleaned || "ゲスト";
+    const mei = parts.slice(1).join("") || "様";
+    const seiKana = cleanKana(sei) || "ヨヤク";
+    const meiKana = cleanKana(mei) || "キャクサマ";
     await page.locator(REGISTER_FORM.customerSei.selector).first().fill(sei, { timeout: 6_000 }).catch(() => {});
-    if (mei) await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerSeiKana.selector).first().fill(seiKana, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMeiKana.selector).first().fill(meiKana, { timeout: 6_000 }).catch(() => {});
   }
-  // 電話 (任意)
+  // 電話 (任意・ハイフン無し数字のみ)
   if (p.customer_phone) {
-    await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(p.customer_phone, { timeout: 6_000 }).catch(() => {});
+    const tel = String(p.customer_phone).replace(/[^\d]/g, "");
+    if (tel) await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(tel, { timeout: 6_000 }).catch(() => {});
   }
   // 備考 (KIREIDOT予約ID を必ず入れる → 二重登録チェックの照合キー)
   {
@@ -2388,12 +2403,47 @@ async function pushBooking(
     );
   }
 
+  // 「登録する」を押すとネイティブ confirm()「予約を登録します。よろしいですか？」が出る。
+  // ⚠️ Playwright は既定でダイアログを dismiss (=キャンセル→登録されない) ため、click 前に
+  // accept(OK) するハンドラを仕込む (これが無いと送信がキャンセルされ予約が作られない。
+  // 2026-06-23 実機検証で判明。実証済み scrapers.cjs pushBookingViaForm と同処理)。
+  let dialogAccepted = false;
+  const onDialog = async (d: Dialog) => {
+    dialogAccepted = true;
+    try {
+      await d.accept();
+    } catch {
+      /* noop */
+    }
+  };
+  page.on("dialog", onDialog);
+
   const beforeUrl = page.url();
-  await Promise.all([
-    page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {}),
-    registerBtn.click({ timeout: 15_000 }),
-  ]).catch(() => {});
-  await page.waitForTimeout(1500);
+  try {
+    await registerBtn.click({ timeout: 15_000 }).catch(() => {});
+    // 完了サイン (フォーム離脱 / 完了文言 / 詳細リンク / エラー領域) を最大15秒ポーリング。
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      if (!/extReserveRegist/i.test(page.url())) break;
+      const done = await page
+        .locator(
+          "a[href*='extReserveDetail'][href*='reserveId='], text=/完了しました|受け付けました|登録しました/",
+        )
+        .first()
+        .count()
+        .catch(() => 0);
+      if (done > 0) break;
+      const err = await page
+        .locator(".mod_box_warning, #warningMessageArea, .error, .errorMessage")
+        .first()
+        .count()
+        .catch(() => 0);
+      if (err > 0) break;
+    }
+  } finally {
+    page.off("dialog", onDialog);
+  }
 
   if (await hasRecaptcha(page)) {
     return fail(
@@ -2403,10 +2453,9 @@ async function pushBooking(
     );
   }
 
-  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する。
-  // ページ全体テキスト検索は静的な注意書き (例:「メニューとの重複登録にご注意ください」)
-  // に誤マッチするため不可。実証済み scrapers.cjs pushBookingViaForm と同じ
-  // エラー領域セレクタに揃える。hasText フィルタで空/非表示コンテナを避ける。
+  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する (ページ全体テキスト検索は
+  // 静的注意書き「メニューとの重複登録にご注意ください」等に誤マッチするため不可)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同じエラー領域セレクタに揃える。
   const errText = (
     await page
       .locator(
@@ -2452,17 +2501,87 @@ async function pushBooking(
   }
 
   const doneText = await page
-    .locator("text=/完了|受け付け|登録しました|予約を登録/")
+    .locator("text=/完了しました|受け付けました|登録しました|予約を登録しました/")
     .count()
     .catch(() => 0);
-  const looksDone = doneText > 0 || afterUrl !== beforeUrl;
-  if (!looksDone) {
-    await captureRegisterDebug(page, job, "completion_not_confirmed");
+  // まだ登録フォーム上に居る = 送信されていない (確認ダイアログを押せなかった等)。
+  const stillOnForm = /extReserveRegist/i.test(afterUrl);
+  if (!dialogAccepted && stillOnForm) {
+    await captureRegisterDebug(page, job, "register_dialog_not_confirmed");
     return fail(
-      "登録ボタンを押しましたが完了画面を確認できませんでした。SalonBoard で登録状況を確認してください。",
+      "登録確認ダイアログ (「予約を登録します。よろしいですか？」) を確定できませんでした。",
       "UNKNOWN_ERROR",
       true,
     );
+  }
+
+  // reserveList 再照合 (対象日 + 開始時刻 + スタッフ + 顧客名 で reserveId を特定)。
+  // 完了サイン欠落時の成功判定 + reserveId バックフィルに使う (実証済み scrapers.cjs と同じ)。
+  const reconcile = (): Promise<string | null> =>
+    (
+      scrapers as unknown as {
+        findReserveIdForBooking: (
+          p: Page,
+          t: {
+            yyyymmdd: string;
+            hhmm: string;
+            staffExt?: string | null;
+            customerName?: string | null;
+          },
+          o: { baseUrl: string },
+        ) => Promise<string | null>;
+      }
+    )
+      .findReserveIdForBooking(
+        page,
+        {
+          yyyymmdd,
+          hhmm: `${startHH}:${startMM}`,
+          staffExt: p.salonboard_staff_external_id,
+          customerName: p.customer_name,
+        },
+        { baseUrl },
+      )
+      .catch(() => null);
+
+  const looksDone =
+    !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
+  if (!looksDone) {
+    // 完了サインは出なかったが確認ダイアログは受理済み (=送信された) なら登録済みの
+    // 可能性が高い。reserveList を再照合し、見つかれば成功扱い (誤fail→再試行による
+    // 二重登録を防ぐ)。
+    if (dialogAccepted) {
+      const recovered = await reconcile();
+      if (recovered) {
+        return {
+          status: "ok",
+          externalId: recovered,
+          detailUrl: `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          alreadyExists: false,
+          confirmed,
+        };
+      }
+    }
+    await captureRegisterDebug(page, job, "completion_not_confirmed", {
+      dialogAccepted,
+      afterUrl,
+    });
+    return fail(
+      `登録ボタンは押しましたが完了を確認できませんでした (dialog=${dialogAccepted})。SalonBoard で登録状況を確認してください。`,
+      "UNKNOWN_ERROR",
+      true,
+    );
+  }
+
+  // 完了サインは出たが reserveId を拾えなかった場合は reserveList から補完。
+  if (!externalId) {
+    const found = await reconcile();
+    if (found) {
+      externalId = found;
+      detailUrl =
+        detailUrl ||
+        `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+    }
   }
 
   return { status: "ok", externalId, detailUrl, alreadyExists: false, confirmed };

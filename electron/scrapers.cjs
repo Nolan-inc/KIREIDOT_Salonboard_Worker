@@ -7246,6 +7246,7 @@ module.exports = {
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
+  findReserveIdForBooking,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,
