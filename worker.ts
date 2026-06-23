@@ -2408,8 +2408,13 @@ async function pushBooking(
   // accept(OK) するハンドラを仕込む (これが無いと送信がキャンセルされ予約が作られない。
   // 2026-06-23 実機検証で判明。実証済み scrapers.cjs pushBookingViaForm と同処理)。
   let dialogAccepted = false;
+  let dialogMessage = "";
   const onDialog = async (d: Dialog) => {
     dialogAccepted = true;
+    dialogMessage = d.message();
+    console.log(
+      `[push] dialog(${d.type()}): "${dialogMessage.slice(0, 150).replace(/\s+/g, " ")}" → accept`,
+    );
     try {
       await d.accept();
     } catch {
@@ -2444,6 +2449,14 @@ async function pushBooking(
   } finally {
     page.off("dialog", onDialog);
   }
+
+  // 診断: click 直後 (reconcile でナビゲートする前) のページ状態を記録。
+  // ダイアログ文言 (確認 vs 検証アラート) と直後 URL を証跡に残す。
+  await captureRegisterDebug(page, job, "post_submit_diag", {
+    dialogAccepted,
+    dialogMessage: dialogMessage.slice(0, 200),
+    url: page.url(),
+  });
 
   if (await hasRecaptcha(page)) {
     return fail(
