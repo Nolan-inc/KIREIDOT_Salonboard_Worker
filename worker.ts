@@ -2360,6 +2360,102 @@ async function pushBooking(
     await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
+  // 設備(席/ベッド)割当。⚠️ エステ等ベッドのある店舗では登録フォームの #equipArea で
+  // 設備の指定が必須のことがあり、未設定だと errorInput=true で「登録する」が無効化され
+  // 登録されない (2026-06-24 実機検証で判明: confirm は出るが onclick=errorInput;return false)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同処理: payload 指定設備(EQ/名前)優先、
+  // 無ければ空行に「ベッド」を入れる。設備が無い店舗では #equipArea が無く no-op。
+  try {
+    const pp = p as unknown as {
+      salonboard_equipment_external_id?: string | null;
+      salonboard_equipment_name?: string | null;
+    };
+    const wantedEquipId =
+      (pp.salonboard_equipment_external_id || "").trim() || null;
+    const wantedEquipName = (pp.salonboard_equipment_name || "").trim() || null;
+    const equipSelector =
+      'select[name="equipIdList"], #equipArea select.equipIdList, #equipArea select';
+    const hasEquipArea =
+      (await page.locator("#equipArea, #equipAdd").first().count().catch(() => 0)) >
+      0;
+    if (hasEquipArea) {
+      // 設備行が無ければ「追加する」(#equipAdd) を押して 1 行作る。
+      if ((await page.locator(equipSelector).count().catch(() => 0)) === 0) {
+        const addBtn = page.locator('#equipAdd, a[id="equipAdd"]').first();
+        if ((await addBtn.count().catch(() => 0)) > 0) {
+          await addBtn.click().catch(() => {});
+          await page
+            .waitForSelector(equipSelector, { timeout: 5_000 })
+            .catch(() => {});
+        }
+      }
+      const equipSelects = page.locator(equipSelector);
+      const n = await equipSelects.count().catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        const sel = equipSelects.nth(i);
+        const pick = await sel
+          .evaluate(
+            (el, args) => {
+              const { wantId, wantName } = args as {
+                wantId: string | null;
+                wantName: string | null;
+              };
+              const opts = Array.from((el as HTMLSelectElement).options);
+              const norm = (s: string) => (s || "").replace(/[○×\s]/g, "");
+              if (wantId) {
+                const o = opts.find((o) => o.value === wantId);
+                if (o) return o.value;
+              }
+              if (wantName) {
+                const o = opts.find(
+                  (o) => norm(o.textContent || "") === norm(wantName),
+                );
+                if (o) return o.value;
+              }
+              return null;
+            },
+            { wantId: wantedEquipId, wantName: wantedEquipName },
+          )
+          .catch(() => null);
+        if (pick) {
+          await sel.selectOption({ value: pick }).catch(() => {});
+        } else {
+          // payload 指定が無い/解決不可: 空行のみ「ベッド」を入れる。
+          const needsSet = await sel
+            .evaluate((el) => {
+              const s = el as HTMLSelectElement;
+              const cur = s.options[s.selectedIndex];
+              return (
+                !s.value ||
+                (cur?.textContent || "").replace(/[○×\s]/g, "") === ""
+              );
+            })
+            .catch(() => false);
+          if (needsSet) {
+            const bedVal = await sel
+              .evaluate((el) => {
+                const opt = Array.from((el as HTMLSelectElement).options).find(
+                  (o) => (o.textContent || "").includes("ベッド"),
+                );
+                return opt ? opt.value : null;
+              })
+              .catch(() => null);
+            if (bedVal) await sel.selectOption({ value: bedVal }).catch(() => {});
+          }
+        }
+        // SalonBoard 側の検証 (errorInput クリア) を起こすため input/change 発火。
+        await sel
+          .evaluate((el) => {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          })
+          .catch(() => {});
+      }
+    }
+  } catch {
+    /* 設備割当の失敗は登録続行 (設備必須でない店舗もあるため) */
+  }
+
   // ⚠️ 空き枠/エラー検出はここ (入力直後・送信前) では行わない。
   // 以前はページ全体テキスト `/予約できません|空いて|満員|埋ま|重複/` を検索していたが、
   // 登録フォームに常設の注意書き「メニューとの重複登録にご注意ください。」の「重複」に
