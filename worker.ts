@@ -2847,6 +2847,76 @@ async function directPush(shopId: string): Promise<void> {
   }
 }
 
+/**
+ * キュー非依存の cancel_booking 検証 (one-shot)。
+ * env creds でログイン → SALONBOARD_DIRECT_CANCEL_PAYLOAD (JSON) で cancelBookingViaForm 実行。
+ * SALONBOARD_ENABLE_PUSH=OFF なら確認のみ (実キャンセルしない)。
+ * payload は external_booking_id (reserveId) があればそれで特定、無ければ
+ * scheduled_at + salonboard_staff_external_id + customer_name で予約一覧から特定して取消す。
+ */
+async function directCancel(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[cancel] shop=${shopId} channel=${launch.channel ?? "chromium"} headless=${launch.headless} ENABLE_PUSH=${ENABLE_PUSH ? "ON" : "OFF"} (キュー非依存)`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    console.log(`[cancel] isLoggedIn=${auth}`);
+    if (auth !== "logged_in") {
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[cancel] 未ログイン → 認証情報でログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(`[cancel] tryLogin => ${lr.status}`);
+        auth = await isLoggedIn(page, baseUrl);
+        console.log(`[cancel] isLoggedIn(after login)=${auth}`);
+      }
+      if (auth !== "logged_in") {
+        console.log(`[cancel] 未ログイン (auth=${auth})。認証情報を確認。`);
+        return;
+      }
+    }
+    const raw = process.env.SALONBOARD_DIRECT_CANCEL_PAYLOAD;
+    if (!raw) {
+      console.log(`[cancel] SALONBOARD_DIRECT_CANCEL_PAYLOAD (JSON) が未指定。`);
+      return;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch (e) {
+      console.log(`[cancel] payload JSON parse 失敗:`, String(e).slice(0, 200));
+      return;
+    }
+    console.log(
+      `[cancel] payload: reserveId=${payload.external_booking_id ?? "(検索)"} at=${payload.scheduled_at} staff=${payload.salonboard_staff_external_id} customer=${payload.customer_name}`
+    );
+    const result = await scrapers.cancelBookingViaForm(page, payload, {
+      baseUrl,
+      enableCancel: ENABLE_PUSH,
+    });
+    console.log(
+      `[cancel] ✅ cancelBookingViaForm => status=${(result as { status?: string })?.status}`
+    );
+    console.log(`[cancel] result:`, JSON.stringify(result).slice(0, 1000));
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
+      console.log(`[cancel] result dumped => ${dumpFile}`);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
@@ -2865,6 +2935,13 @@ async function main() {
   const directPushShop = process.env.SALONBOARD_DIRECT_PUSH_SHOP;
   if (directPushShop) {
     await directPush(directPushShop);
+    return;
+  }
+
+  // 直接 cancel モード (キュー非依存・検証/後始末用)。
+  const directCancelShop = process.env.SALONBOARD_DIRECT_CANCEL_SHOP;
+  if (directCancelShop) {
+    await directCancel(directCancelShop);
     return;
   }
 
