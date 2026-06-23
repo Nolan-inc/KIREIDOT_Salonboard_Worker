@@ -31,8 +31,8 @@ import {
   RESERVE_ID_RE,
   scheduleUrl,
   reserveRegistUrl,
-  staffHeadId,
   staffOptionValue,
+  staffPresenceSelector,
 } from "./salonboard-selectors";
 
 // 本番スクレイパー (scrapers.cjs) を共有。PC 版 worker-process.cjs と同じ実装を
@@ -1250,13 +1250,65 @@ async function isLoggedIn(
   return "needs_login";
 }
 
+/**
+ * プロキシ/ネットワークの一時的失敗を表すナビゲーションエラーか判定する。
+ * 特に Decodo ISP プロキシは稀に tunnel をドロップし
+ * `net::ERR_TUNNEL_CONNECTION_FAILED` を返す (curl では同時刻に疎通する=恒久障害ではない)。
+ * これらは即時リトライで回復するため、恒久エラー (DNS 不正・証明書等) と区別する。
+ */
+function isTransientNavError(msg: string): boolean {
+  return /ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_CLOSED|ERR_CONNECTION_FAILED|ERR_CONNECTION_TIMED_OUT|ERR_TIMED_OUT|ERR_NETWORK_CHANGED|ERR_SOCKET_NOT_CONNECTED|ERR_HTTP2_PING_FAILED|ERR_ABORTED|ERR_NETWORK_IO_SUSPENDED/i.test(
+    msg,
+  );
+}
+
+/**
+ * `page.goto` を一時的ナビゲーションエラー (主に Decodo ISP の tunnel ドロップ
+ * = net::ERR_TUNNEL_CONNECTION_FAILED) に対して指数バックオフで再試行する。
+ * 一時的でないエラーは即座に投げ直し、無駄なリトライをしない。
+ * クラウド worker はログイン・深層ページ遷移とも単一プロキシ経由のため、
+ * tunnel の瞬断でジョブ全体を落とさないよう要所の goto をこれで包む。
+ */
+async function gotoResilient(
+  page: Page,
+  url: string,
+  opts: Parameters<Page["goto"]>[1],
+  label = "goto",
+  attempts = 3,
+): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await page.goto(url, opts);
+      if (i > 1) console.log(`[nav] ${label} OK (attempt ${i}/${attempts})`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (i >= attempts || !isTransientNavError(msg)) throw e;
+      const waitMs = 1200 * i;
+      console.warn(
+        `[nav] ${label} 一時的失敗 (attempt ${i}/${attempts}): ${msg.slice(0, 120)} → ${waitMs}ms 後に再試行`,
+      );
+      await page.waitForTimeout(waitMs).catch(() => {});
+    }
+  }
+  throw lastErr;
+}
+
 async function tryLogin(
   page: Page,
   url: string,
   c: { loginId: string; password: string }
 ): Promise<{ status: "ok" } | { status: "failed"; reason?: string } | { status: "captcha" }> {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    // ログイン遷移は tunnel 瞬断で落ちやすいので再試行付きで開く。
+    await gotoResilient(
+      page,
+      url,
+      { waitUntil: "domcontentloaded", timeout: 30_000 },
+      "login",
+    );
   } catch (e) {
     return { status: "failed", reason: `navigation: ${e instanceof Error ? e.message : e}` };
   }
@@ -1957,7 +2009,12 @@ async function pushBooking(
   // ----------------------------------------------------------
   const schedUrl = scheduleUrl(baseUrl, yyyymmdd);
   try {
-    await page.goto(schedUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await gotoResilient(
+      page,
+      schedUrl,
+      { waitUntil: "domcontentloaded", timeout: 25_000 },
+      "schedule",
+    );
   } catch (e) {
     return fail(
       `予約スケジュールを開けません: ${e instanceof Error ? e.message : e}`,
@@ -1970,9 +2027,17 @@ async function pushBooking(
   }
 
   // グリッドが描画されるまで待つ。
+  // クラウド(EC2+プロキシ)ではログイン後の深い認証ページ(スケジュール)が
+  // domcontentloaded 直後にはグリッド未描画のことがある。proven な scrapeBookings と
+  // 同様に networkidle を待ち、さらにグリッド要素の出現を明示的に待ってから判定する
+  // (即 count()===0 だと一時的な未描画を「グリッドなし」と誤判定する)。
+  await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
   const grid = page.locator(SCHEDULE.grid.selector).first();
+  await grid.waitFor({ state: "attached", timeout: 12_000 }).catch(() => {});
   if ((await grid.count().catch(() => 0)) === 0) {
-    await captureRegisterDebug(page, job, "schedule_grid_not_found");
+    await captureRegisterDebug(page, job, "schedule_grid_not_found", {
+      url: page.url(),
+    });
     return fail(
       "予約スケジュールのグリッドが見つかりません",
       "UNKNOWN_ERROR",
@@ -1980,12 +2045,30 @@ async function pushBooking(
     );
   }
 
-  // 対象スタッフの列(行)ヘッダを external_id + 日付で特定。
+  // スケジュール画面の更新タイムスタンプ (#rlastupdate) を取得しておく。
+  // これを登録フォーム URL に付与しないと moduleId=KPCL017V01 が
+  // 「情報が一部失われています」エラーになるため、スケジュールを開いた今のうちに読む。
+  await page
+    .locator(SCHEDULE.rlastupdate.selector)
+    .first()
+    .waitFor({ state: "attached", timeout: 8_000 })
+    .catch(() => {});
+  const rlastupdate =
+    (
+      await page
+        .locator(SCHEDULE.rlastupdate.selector)
+        .first()
+        .textContent()
+        .catch(() => "")
+    )?.trim() || "";
+
+  // 対象スタッフがその日のスケジュールに存在するかを external_id + 日付で確認。
+  // 新旧 DOM 両対応 (新: stockNameList の option / 旧: 列ヘッダ id)。
+  // 無ければシフト外/退職などで登録不能。
   const staffHead = page
-    .locator(staffHeadId(p.salonboard_staff_external_id, yyyymmdd))
+    .locator(staffPresenceSelector(p.salonboard_staff_external_id, yyyymmdd))
     .first();
   if ((await staffHead.count().catch(() => 0)) === 0) {
-    // その日にそのスタッフの列が無い = シフト外/退職など。
     await captureRegisterDebug(page, job, "staff_column_not_found");
     return fail(
       `スケジュールに対象スタッフ(${p.salonboard_staff_external_id})の列が見つかりません`,
@@ -2055,9 +2138,20 @@ async function pushBooking(
     yyyymmdd,
     startHH,
     startMM,
+    rlastupdate,
   );
+  if (!rlastupdate) {
+    console.warn(
+      `[push] #rlastupdate を取得できませんでした。登録フォームが KPCL017V01 (情報が一部失われています) になる可能性があります。`,
+    );
+  }
   try {
-    await page.goto(registUrl, { waitUntil: "domcontentloaded", timeout: 25_000 });
+    await gotoResilient(
+      page,
+      registUrl,
+      { waitUntil: "domcontentloaded", timeout: 25_000 },
+      "register-form",
+    );
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
   } catch (e) {
     return fail(
@@ -2078,11 +2172,26 @@ async function pushBooking(
       .count()
       .catch(() => 0)) > 0;
   if (!formReady) {
+    // どの画面に居るかを診断に含める (rlastupdate 不足による KPCL017V01 等の切り分け)。
+    const diag = await page
+      .evaluate(() => {
+        const forms = Array.from(document.querySelectorAll("form"))
+          .map((f) => f.id || f.getAttribute("name") || f.getAttribute("action") || "?")
+          .slice(0, 5);
+        const body = (document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 200);
+        return { url: location.href, title: document.title, forms, body };
+      })
+      .catch(() => ({ url: page.url(), title: "?", forms: [] as string[], body: "?" }));
     await captureRegisterDebug(page, job, "register_page_not_found", {
-      url: page.url(),
+      url: diag.url,
+      rlastupdate: rlastupdate || null,
+      title: diag.title,
+      forms: diag.forms,
     });
     return fail(
-      "予約登録フォームに到達できませんでした (ログイン切れ/画面変更の可能性)。",
+      `予約登録フォームに到達できませんでした (ログイン切れ/画面変更/情報欠落の可能性。rlastupdate=${
+        rlastupdate || "なし"
+      })。url=${diag.url} title="${diag.title}" forms=[${diag.forms.join(",")}] body="${diag.body}"`,
       "CONFIRMATION_MISMATCH",
       true,
     );
@@ -2099,6 +2208,59 @@ async function pushBooking(
       .catch(async () => {
         if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
       });
+  }
+
+  // hidden staffId / 担当割当セレクトを external_id へ強制同期する。
+  // 表示用 salonStaffList を選んでも、実際に送信される hidden input#staffId と
+  // 担当割当 select[name=staffIdList] が既定スタッフのままだと
+  // 「どのスタッフを選んでも既定スタッフで登録される」取り違えが起きる。
+  // JS で値を揃え、SalonBoard 側ハンドラ向けに input/change を発火させる
+  // (実証済み scrapers.cjs pushBookingViaForm と同処理)。
+  await page
+    .evaluate(
+      ({ ext, hiddenSel, listSels }) => {
+        const setVal = (el: Element | null, v: string) => {
+          if (!el) return;
+          (el as HTMLInputElement | HTMLSelectElement).value = v;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        document.querySelectorAll(hiddenSel).forEach((el) => setVal(el, ext));
+        for (const sel of listSels) {
+          const el = document.querySelector(sel) as HTMLSelectElement | null;
+          if (el && Array.from(el.options).some((o) => o.value === ext)) {
+            setVal(el, ext);
+          }
+        }
+      },
+      {
+        ext: p.salonboard_staff_external_id,
+        hiddenSel: REGISTER_FORM.staffHiddenId.selector,
+        listSels: [
+          REGISTER_FORM.staffSelect.selector,
+          REGISTER_FORM.staffIdList.selector,
+        ],
+      },
+    )
+    .catch(() => {});
+
+  // hidden staffId が実際に external_id へ揃ったか検証 (取り違え防止の最終確認)。
+  // 揃っていなければ確定操作に進まず manual_required に倒す。
+  const appliedStaffId = await page
+    .locator(REGISTER_FORM.staffHiddenId.selector)
+    .first()
+    .inputValue()
+    .catch(() => null);
+  if (appliedStaffId && appliedStaffId !== p.salonboard_staff_external_id) {
+    await captureRegisterDebug(page, job, "staff_id_mismatch", {
+      expected: p.salonboard_staff_external_id,
+      applied: appliedStaffId,
+    });
+    return fail(
+      `スタッフ ID をフォームに反映できませんでした (期待=${p.salonboard_staff_external_id} 実際=${appliedStaffId})。スタッフ取り違え防止のため自動登録を中止します。`,
+      "STAFF_MAPPING_NOT_FOUND",
+      true,
+    );
   }
 
   // 開始 時/分 (URL でも入るが明示)
@@ -2183,16 +2345,12 @@ async function pushBooking(
     await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
   }
 
-  // 空き枠/エラーメッセージの検出 (入力直後にフォームが警告を出すことがある)
-  const slotError = await page
-    .locator("text=/予約できません|空いて|満員|埋ま|重複/")
-    .count()
-    .catch(() => 0);
-  if (slotError > 0) {
-    await captureRegisterDebug(page, job, "slot_not_available");
-    return fail("SalonBoard側で対象時間が空いていません", "SLOT_NOT_AVAILABLE", false);
-  }
-
+  // ⚠️ 空き枠/エラー検出はここ (入力直後・送信前) では行わない。
+  // 以前はページ全体テキスト `/予約できません|空いて|満員|埋ま|重複/` を検索していたが、
+  // 登録フォームに常設の注意書き「メニューとの重複登録にご注意ください。」の「重複」に
+  // 誤マッチし、空き枠でも常に SLOT_NOT_AVAILABLE になっていた (2026-06-21 実機検証で判明)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同様、エラー判定は「登録ボタン押下後」に
+  // 警告/エラー領域へスコープして行う (下記 §5)。
   const confirmed: CallbackBody["result_payload"] = {
     confirmed_customer_name: p.customer_name ?? null,
     confirmed_staff_name: p.staff_name ?? null,
@@ -2243,6 +2401,37 @@ async function pushBooking(
       "RECAPTCHA_REQUIRED",
       true,
     );
+  }
+
+  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する。
+  // ページ全体テキスト検索は静的な注意書き (例:「メニューとの重複登録にご注意ください」)
+  // に誤マッチするため不可。実証済み scrapers.cjs pushBookingViaForm と同じ
+  // エラー領域セレクタに揃える。hasText フィルタで空/非表示コンテナを避ける。
+  const errText = (
+    await page
+      .locator(
+        '.mod_box_warning, #warningMessageArea, .error, .errorMessage, [class*="error" i]',
+      )
+      .filter({ hasText: /\S/ })
+      .first()
+      .innerText()
+      .catch(() => "")
+  ).trim();
+  if (errText && /予約できません|空いて|満員|埋ま|重複|登録できません/.test(errText)) {
+    await captureRegisterDebug(page, job, "slot_not_available", {
+      errText: errText.slice(0, 120),
+    });
+    return fail(
+      `SalonBoard側で対象時間が空いていません (${errText.slice(0, 60)})`,
+      "SLOT_NOT_AVAILABLE",
+      false,
+    );
+  }
+  if (errText && /エラー|失敗|できません/.test(errText)) {
+    await captureRegisterDebug(page, job, "register_error", {
+      errText: errText.slice(0, 120),
+    });
+    return fail(`登録時にエラー: ${errText.slice(0, 80)}`, "UNKNOWN_ERROR", true);
   }
 
   // 完了画面から reserveId / detail_url を抽出。
@@ -2582,6 +2771,82 @@ async function directScrape(shopId: string): Promise<void> {
   }
 }
 
+/**
+ * キュー非依存の push_booking 検証 (confirm-only)。
+ * env creds でログイン → SALONBOARD_DIRECT_PUSH_PAYLOAD (JSON) で pushBooking 実行。
+ * SALONBOARD_ENABLE_PUSH=OFF (既定) なら登録ボタンを押さず確認内容を返す (実予約を作らない)。
+ */
+async function directPush(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[push] shop=${shopId} channel=${launch.channel ?? "chromium"} headless=${launch.headless} ENABLE_PUSH=${ENABLE_PUSH ? "ON" : "OFF"} (キュー非依存・confirm-only)`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    console.log(`[push] isLoggedIn=${auth}`);
+    if (auth !== "logged_in") {
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[push] 未ログイン → 認証情報でログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(`[push] tryLogin => ${lr.status}`);
+        auth = await isLoggedIn(page, baseUrl);
+        console.log(`[push] isLoggedIn(after login)=${auth}`);
+      }
+      if (auth !== "logged_in") {
+        console.log(`[push] 未ログイン (auth=${auth})。認証情報を確認。`);
+        return;
+      }
+    }
+    const raw = process.env.SALONBOARD_DIRECT_PUSH_PAYLOAD;
+    if (!raw) {
+      console.log(`[push] SALONBOARD_DIRECT_PUSH_PAYLOAD (JSON) が未指定。`);
+      return;
+    }
+    let payload: PushBookingPayload;
+    try {
+      payload = JSON.parse(raw) as PushBookingPayload;
+    } catch (e) {
+      console.log(`[push] payload JSON parse 失敗:`, String(e).slice(0, 200));
+      return;
+    }
+    console.log(
+      `[push] payload: staff=${payload.salonboard_staff_external_id} menu=${
+        payload.salonboard_menu_name ?? payload.menu_name ?? payload.coupon_name
+      } at=${payload.scheduled_at} customer=${payload.customer_name}`
+    );
+    const fakeJob = {
+      id: "direct-push-test",
+      job_type: "push_booking",
+      shop_id: shopId,
+      organization_id: null,
+      attempts: 0,
+      max_attempts: 1,
+      status: "running",
+      credentials: { base_url: baseUrl },
+      payload,
+    } as unknown as Job;
+    const result = await pushBooking(page, fakeJob, payload);
+    console.log(`[push] ✅ pushBooking => status=${result.status}`);
+    console.log(`[push] result:`, JSON.stringify(result).slice(0, 1500));
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
+      console.log(`[push] result dumped => ${dumpFile}`);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
@@ -2593,6 +2858,13 @@ async function main() {
   const directShop = process.env.SALONBOARD_DIRECT_SCRAPE_SHOP;
   if (directShop) {
     await directScrape(directShop);
+    return;
+  }
+
+  // 直接 push モード (キュー非依存・confirm-only 検証用)。
+  const directPushShop = process.env.SALONBOARD_DIRECT_PUSH_SHOP;
+  if (directPushShop) {
+    await directPush(directPushShop);
     return;
   }
 

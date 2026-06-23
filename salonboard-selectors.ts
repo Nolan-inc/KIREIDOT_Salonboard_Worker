@@ -57,6 +57,10 @@ export function scheduleUrl(baseUrl: string, yyyymmdd: string): string {
  * @param yyyymmdd 来店日 (JST)
  * @param hh 開始「時」(0-23)
  * @param mm 開始「分」(00/15/30/45 等、フォームの選択肢に合わせる)
+ * @param rlastupdate スケジュール画面 `#rlastupdate` のタイムスタンプ。
+ *   これを付けないと登録フォーム (moduleId=KPCL017V01) が
+ *   「情報が一部失われています」エラーになる。必ず SCHEDULE.rlastupdate から
+ *   取得した値を渡すこと (空文字なら付与しない)。
  */
 export function reserveRegistUrl(
   baseUrl: string,
@@ -64,23 +68,50 @@ export function reserveRegistUrl(
   yyyymmdd: string,
   hh: string,
   mm: string,
+  rlastupdate?: string,
 ): string {
   const u = new URL(SB_PATHS.reserveRegist, baseUrl);
   u.searchParams.set("staffId", externalStaffId);
   u.searchParams.set("date", yyyymmdd);
   u.searchParams.set("rsvHour", hh);
   u.searchParams.set("rsvMinute", mm);
+  if (rlastupdate) u.searchParams.set("rlastupdate", rlastupdate);
   return u.toString();
 }
 
 /** 予約スケジュール画面のセレクタ群 (確定)。 */
 export const SCHEDULE = {
-  /** グリッド全体。data-time-interval="5" / is5min。 */
-  grid: { selector: "#schedule.jscScheduleMain", state: "confirmed" } as Sel,
+  /**
+   * グリッド/スケジュール画面が描画されたことを示す指標 (readiness ゲート)。
+   * ⚠️ SalonBoard はタイミング/状況で予約スケジュールの DOM 構造が変わる。
+   * 2026-05-30 版は `#schedule.jscScheduleMain` だったが、2026-06-21 の実機では
+   * グリッド本体が `table.schedule` / `.jscScheduleTimeTable`(#timeFrameHeaderArea) /
+   * `#showSchedule` に変わっていた。新旧どちらでも「スケジュール画面に到達した」と
+   * 判定できるよう多候補にする (このゲートの役割はログイン切れ/エラー画面との切り分けのみ。
+   * 対象スタッフの存在は staffPresenceSelector() で別途判定する)。
+   * 末尾の `select#stockNameList` はスタッフ絞り込みセレクトで、DOM 改訂をまたいで
+   * 安定して存在するため最後の保険として含める。
+   */
+  grid: {
+    selector:
+      "#schedule.jscScheduleMain, table.schedule, .jscScheduleTimeTable, #showSchedule, select#stockNameList",
+    state: "confirmed",
+  } as Sel,
+
+  /**
+   * スケジュール画面に埋め込まれた更新タイムスタンプ
+   * (例: <span id="rlastupdate" class="display_none">20260530200622</span>)。
+   * 新規予約登録フォーム (extReserveRegist / moduleId=KPCL017V01) を開くとき
+   * `rlastupdate=<この値>` を付与しないと「情報が一部失われています」エラーになる。
+   * pushBooking() はスケジュールを開いた時点でこの値を読み、reserveRegistUrl() に渡す。
+   */
+  rlastupdate: { selector: "#rlastupdate", state: "confirmed" } as Sel,
 
   /**
    * スタッフ列(行)ヘッダ。id="STAFF_<externalId>_<YYYYMMDD>"、title=表示名。
-   * 特定スタッフは staffHeadById() で組み立てる。
+   * ⚠️ 2026-06-21 の実機ではこの列ヘッダ要素が消え、スタッフは
+   * `select#stockNameList` の option として表現されるよう DOM が変わっていた。
+   * 対象スタッフの存在判定は staffPresenceSelector()(新旧両対応) を使うこと。
    */
   staffHeadAll: {
     selector: "li.jscScheduleMainHead[id^='STAFF_']",
@@ -96,9 +127,15 @@ export const SCHEDULE = {
     state: "confirmed",
   } as Sel,
 
-  /** 既存予約ブロック (重複チェックに使う)。 */
+  /**
+   * 既存予約ブロック (重複チェックに使う)。
+   * 2026-05-30 版は `div.scheduleReservation.jscScheduleReservation`。
+   * 2026-06-21 実機では内側ラッパ `div.scheduleReservationInner` 構造に変わっていたため
+   * 新旧両対応にする (内部の時間帯 JSON は reservationTimeZone で読む)。
+   */
   reservationBlock: {
-    selector: "div.scheduleReservation.jscScheduleReservation",
+    selector:
+      "div.scheduleReservation.jscScheduleReservation, div.scheduleReservationInner",
     state: "confirmed",
   } as Sel,
 
@@ -141,6 +178,21 @@ export function staffOptionValue(externalId: string, yyyymmdd: string): string {
   return `STAFF_${externalId}_${yyyymmdd}`;
 }
 
+/**
+ * 対象スタッフがその日のスケジュールに存在する(=シフト内/登録対象)かを判定する
+ * 複合セレクタ。SalonBoard の DOM 改訂をまたいで効くよう新旧両方を OR で並べる:
+ *   - 新 DOM: `select#stockNameList option[value="STAFF_<ext>_<date>"]`
+ *   - 旧 DOM: 列ヘッダ `#STAFF_<ext>_<date>`
+ * どちらかが存在すれば「その日そのスタッフの枠がある」とみなす。
+ */
+export function staffPresenceSelector(
+  externalId: string,
+  yyyymmdd: string,
+): string {
+  const token = staffOptionValue(externalId, yyyymmdd);
+  return `${staffHeadId(externalId, yyyymmdd)}, select#stockNameList option[value="${token}"]`;
+}
+
 /** 予約一覧画面のセレクタ群 (確定)。重複チェック補助に使う。 */
 export const RESERVE_LIST = {
   resultTable: { selector: "table#resultList", state: "confirmed" } as Sel,
@@ -178,8 +230,26 @@ export const REGISTER_FORM = {
   customerMeiKana: { selector: "input#nmMeiKana", state: "confirmed" } as Sel,
   /** 電話。 */
   customerPhone: { selector: "input#tel", state: "confirmed" } as Sel,
-  /** スタッフ選択 (option value = external_id W...)。 */
+  /** スタッフ選択 (表示用セレクト。option value = external_id W...)。 */
   staffSelect: { selector: "select#salonStaffList", state: "confirmed" } as Sel,
+  /**
+   * 実際に送信される hidden スタッフ ID (input#staffId)。
+   * 表示用 salonStaffList を選んでも、この hidden が既定スタッフのままだと
+   * 「どのスタッフを選んでも既定スタッフで登録される」不整合が起きるため、
+   * external_id へ強制同期する。確定 DOM: input[type=hidden name=staffId id=staffId]。
+   */
+  staffHiddenId: {
+    selector: "input#staffId, input[name='staffId']",
+    state: "confirmed",
+  } as Sel,
+  /**
+   * 担当割当セレクト (select[name=staffIdList])。表示用 salonStaffList とは別に
+   * 送信されるため、option が一致すれば同じ external_id に揃える。
+   */
+  staffIdList: {
+    selector: "select[name='staffIdList'], select.staffIdList",
+    state: "confirmed",
+  } as Sel,
   /** メニュー = ネット予約クーポン (option label がメニュー/クーポン名)。 */
   menuSelect: { selector: "select#jsiNetCouponId, select[name='netCouponId']", state: "confirmed" } as Sel,
   /** 開始 時 / 分。 */
