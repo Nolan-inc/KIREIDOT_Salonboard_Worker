@@ -2708,18 +2708,38 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     const n = String(pat?.name || '').trim();
     return !!n && (t === n || n.startsWith(t) || t.startsWith(n));
   };
-  // 予定方式のベースパターン: シフト時間帯を「包含する」最小スパンのパターン。
-  // 包含するものが無ければ最大スパン (warning)。
+  // 予定方式のベースパターン選択。
+  //   ① シフト時間帯を「包含する」パターンがあれば最小スパンのもの (covers:true)。
+  //   ② 包含が無い場合は「シフト時間帯に最も近い」パターンを選ぶ (covers:false)。
+  //      近さ = |開始のズレ| + |終了のズレ| が最小。これで KIREIDOT のシフトに
+  //      時間帯が一番合うパターンが選ばれる。
+  //
+  // ⚠️ 旧実装は「包含が無ければ最大スパンのパターン」を機械的に選んでいたため、
+  //    例: 12:30-21:30(平日遅+30分) のシフトに対し、スパンがほぼ同じ別系統の
+  //    パターン (休日早番 10:00-18:30 等) が選ばれ、SalonBoard に全く違う
+  //    「休日の早番」が書き込まれる事故が起きていた。時間帯の近さで選ぶよう修正。
   const chooseBasePattern = (start, end) => {
     const s = toMin(start); const e = toMin(end);
     if (s == null || e == null || timedPatterns.length === 0) return null;
-    const covering = timedPatterns.filter((x) => toMin(x.start) <= s && toMin(x.end) >= e);
+    const covering = timedPatterns.filter((x) => toMin(x.start) != null && toMin(x.end) != null && toMin(x.start) <= s && toMin(x.end) >= e);
     if (covering.length > 0) {
       covering.sort((a, b) => (toMin(a.end) - toMin(a.start)) - (toMin(b.end) - toMin(b.start)));
       return { pattern: covering[0], covers: true };
     }
-    const sorted = [...timedPatterns].sort((a, b) => (toMin(b.end) - toMin(b.start)) - (toMin(a.end) - toMin(a.start)));
-    return { pattern: sorted[0], covers: false };
+    // 包含が無い → 時間帯が最も近いパターン (開始のズレ+終了のズレが最小)。
+    // 同点なら、シフトをよりカバーする (重なりが大きい) ものを優先。
+    const scored = timedPatterns
+      .map((x) => {
+        const ps = toMin(x.start); const pe = toMin(x.end);
+        if (ps == null || pe == null) return null;
+        const dist = Math.abs(ps - s) + Math.abs(pe - e);
+        const overlap = Math.max(0, Math.min(pe, e) - Math.max(ps, s));
+        return { pattern: x, dist, overlap };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (a.dist - b.dist) || (b.overlap - a.overlap));
+    if (scored.length === 0) return null;
+    return { pattern: scored[0].pattern, covers: false };
   };
 
   // (4) 差分計画を立てる。
@@ -2730,6 +2750,9 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   const plans = []; // 一括入力: {staffExt, kind:'off'|'work', patternId|null, patternName, days:['01',...], dates}
   const customPlans = []; // 予定方式: {staffExt, staffName, date, ymd, start, end, base}
   let skipped = 0; let totalChanges = 0;
+  // ユーザー報告用: 予定方式(work)で反映した日のうち「SBパターンに無かった
+  // (=シフト時刻を包含するパターンが無く近似ベースで入れた)」箇所の明細。
+  const outOfPatternDetails = []; // {staffName, date, start, end, baseName, baseStart, baseEnd}
   const knownExts = new Set(Object.keys(cells).map((k) => k.split('_')[0]));
   const staffChanged = new Set();
   for (const entry of entries) {
@@ -2773,7 +2796,14 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
             continue;
           }
           if (!base.covers) {
-            warnings.push(`${entry.staff_name ?? ext} ${date}: ${day.start}〜${day.end} を包含するパターンが無いため「${base.pattern.name}」(${base.pattern.start}〜${base.pattern.end})内で予定設定`);
+            warnings.push(`${entry.staff_name ?? ext} ${date}: ${day.start}〜${day.end} を包含するパターンが無いため、最も近い「${base.pattern.name}」(${base.pattern.start}〜${base.pattern.end})に合わせて予定設定`);
+            outOfPatternDetails.push({
+              staffName: entry.staff_name ?? ext,
+              date,
+              start: day.start, end: day.end,
+              baseName: base.pattern.name,
+              baseStart: base.pattern.start, baseEnd: base.pattern.end,
+            });
           }
           customPlans.push({
             staffExt: ext,
@@ -3055,10 +3085,25 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return fail(`シフト反映後の検証で ${mismatches}/${totalChanges} 件が期待値と一致しません。SalonBoardのシフト設定を確認してください。`, 'UNKNOWN_ERROR', true);
   }
 
+  // ユーザー要望の報告: ①対象が何日 ②うちパターンに無かった箇所が何個
+  // ③最終的にどの時間になったか。
+  const outCount = outOfPatternDetails.length;
+  let summary =
+    `シフト反映 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件${nativeDialogAccepted ? ', confirm承認' : ''})`;
+  if (outCount > 0) {
+    const lines = outOfPatternDetails
+      .map((d) => `${d.staffName} ${d.date}: 希望 ${d.start}〜${d.end} → 「${d.baseName}」(${d.baseStart}〜${d.baseEnd})に合わせて設定`)
+      .join('\n');
+    summary +=
+      `\n対象 ${totalChanges}件中、SalonBoardのパターンに無かった箇所 ${outCount}件:\n${lines}`;
+  }
+
   return {
     status: 'ok',
-    summary: `シフト反映 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件${nativeDialogAccepted ? ', confirm承認' : ''})`,
+    summary,
     changed: totalChanges,
+    outOfPatternCount: outCount,
+    outOfPatternDetails,
     warnings,
     patterns: patternsOut,
   };
