@@ -693,7 +693,7 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
-      const result = await pushBooking(page, job, payload);
+      const result = await pushBookingViaProvenForm(page, job, payload);
 
       if (result.status === "ok") {
         await report({
@@ -1950,6 +1950,50 @@ const SB_CONTEXT_OPTIONS = {
   timezoneId: "Asia/Tokyo",
 } as const;
 
+/**
+ * push_booking を実証済み scrapers.cjs pushBookingViaForm に委譲する。
+ * cloud worker は PC と同じ proven 実装を再利用する。worker.ts 独自の pushBooking() は
+ * エステ登録フォームの必須項目 (カナ / 設備ベッド / 確認ダイアログ accept 等) を取りこぼし
+ * 続け、ライブ schedule DOM への依存も強かったため委譲に切替。proven 版は schedule を
+ * `#rlastupdate` 取得のためだけに開き (grid/staffヘッダ非依存)、フォーム入力・確認ダイアログ・
+ * 完了 reconcile まで一通り正しい。返り値 shape は PushBookingResult 互換。
+ */
+async function pushBookingViaProvenForm(
+  page: Page,
+  job: Job,
+  p: PushBookingPayload,
+): Promise<PushBookingResult> {
+  const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
+  const salonId =
+    (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+  const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+  const result = await (
+    scrapers as unknown as {
+      pushBookingViaForm: (
+        pg: Page,
+        payload: PushBookingPayload,
+        opts: {
+          baseUrl: string;
+          enablePush: boolean;
+          salonId: string | null;
+          shopName: string | null;
+        },
+      ) => Promise<PushBookingResult>;
+    }
+  ).pushBookingViaForm(page, p, {
+    baseUrl,
+    enablePush: ENABLE_PUSH,
+    salonId,
+    shopName,
+  });
+  return result;
+}
+
+/**
+ * @deprecated 欠陥のある独自 reimplementation (必須項目の取りこぼし多数)。
+ * 代わりに pushBookingViaProvenForm (scrapers.cjs pushBookingViaForm へ委譲) を使う。
+ * 呼び出し元なし (将来削除)。
+ */
 async function pushBooking(
   page: Page,
   job: Job,
@@ -3099,7 +3143,7 @@ async function directPush(shopId: string): Promise<void> {
       credentials: { base_url: baseUrl },
       payload,
     } as unknown as Job;
-    const result = await pushBooking(page, fakeJob, payload);
+    const result = await pushBookingViaProvenForm(page, fakeJob, payload);
     console.log(`[push] ✅ pushBooking => status=${result.status}`);
     console.log(`[push] result:`, JSON.stringify(result).slice(0, 1500));
     const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
