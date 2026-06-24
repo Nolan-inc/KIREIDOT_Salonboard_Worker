@@ -7,6 +7,7 @@ import { Staff } from './pages/Staff';
 import { Menus } from './pages/Menus';
 import { Coupons } from './pages/Coupons';
 import { Shifts } from './pages/Shifts';
+import { Equipment } from './pages/Equipment';
 import { Styles } from './pages/Styles';
 import { Blog } from './pages/Blog';
 import { Reviews } from './pages/Reviews';
@@ -54,6 +55,7 @@ function Routes() {
       {active === 'menus' && selectedShopId && <Menus />}
       {active === 'coupons' && selectedShopId && <Coupons />}
       {active === 'shifts' && selectedShopId && <Shifts />}
+      {active === 'equipment' && selectedShopId && <Equipment />}
       {active === 'styles' && selectedShopId && <Styles />}
       {active === 'blog' && selectedShopId && <Blog />}
       {active === 'reviews' && selectedShopId && <Reviews />}

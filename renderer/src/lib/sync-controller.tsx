@@ -34,7 +34,7 @@ export type SyncRunSummary = {
   done: boolean;
 };
 
-export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'reviews' | 'customers';
+export type ChannelKey = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'equipment' | 'blog' | 'reviews' | 'customers';
 
 /**
  * 店舗 PC 自体の設定状態 (preflight 結果)。

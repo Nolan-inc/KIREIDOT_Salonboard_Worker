@@ -172,6 +172,46 @@ export async function fetchUnmatchedBookings(scope: StaffScope): Promise<Booking
 // スタッフ (サロンボード由来)
 //
 // SalonBoard から取り込んだスタッフを表示する。
+// =========================
+// 設備 (ベッド/席): salonboard_equipment_imports を shop_id でフィルタ。
+// =========================
+export type EquipmentRow = {
+  id: string;
+  external_id: string;
+  name: string;
+  max_rsv_num: number | null;
+  priority: number | null;
+  sort_no: number | null;
+  matched_resource_id: string | null;
+  last_synced_at: string | null;
+};
+
+export async function fetchEquipmentList(scope: StaffScope): Promise<EquipmentRow[]> {
+  if (!scope.shopId) return [];
+  const { data, error } = await supabase
+    .from('salonboard_equipment_imports')
+    .select(
+      'id, external_id, name, max_rsv_num, priority, sort_no, matched_resource_id, last_synced_at',
+    )
+    .eq('shop_id', scope.shopId)
+    .order('sort_no', { ascending: true, nullsFirst: false })
+    .order('name');
+  if (error) {
+    console.warn('[data] fetchEquipmentList error:', error.message);
+    return [];
+  }
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    external_id: r.external_id,
+    name: r.name,
+    max_rsv_num: r.max_rsv_num ?? null,
+    priority: r.priority ?? null,
+    sort_no: r.sort_no ?? null,
+    matched_resource_id: r.matched_resource_id ?? null,
+    last_synced_at: r.last_synced_at ?? null,
+  }));
+}
+
 // `staff` (社内 DB) ではなく `salonboard_staff_imports` を見るので
 // shop_id でフィルタするだけで店舗ごとの一覧になる。
 // =========================

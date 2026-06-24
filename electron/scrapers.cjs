@@ -1985,6 +1985,48 @@ async function findReserveIdForBooking(page, target, opts = {}) {
   }
 }
 
+// reserveId を直接キーに SalonBoard の予約詳細ページを開き、その予約が
+// 「現在も有効に存在するか」を判定する。一覧の名前照合 (findReserveIdForBooking)
+// と違い、顧客名が空の予約でも確実に存在確認できる (= 二重登録防止プリフライトの本命)。
+//
+// 戻り値:
+//   'active'    … 詳細ページが開けてキャンセルボタン(#fnc_cancel)あり = 有効な予約が存在
+//   'cancelled' … 詳細は開けたがステータスがキャンセル/取消 = SB上は無効 (再登録してよい)
+//   'not_found' … 詳細ページを開けない = SB上に存在しない (再登録してよい)
+//   'unknown'   … 判定に失敗 (reCAPTCHA 等)。安全側で扱う (呼び出し側で登録を見送る判断に使える)
+async function checkReserveStatusById(page, reserveId, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  if (!reserveId) return 'not_found';
+  try {
+    // 電話/外部予約(YG...) と ネット予約(BF/BE...) で詳細 URL が異なるので両方試す。
+    const detailCandidates = [
+      `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+      `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
+    ];
+    let onDetail = false;
+    for (const path of detailCandidates) {
+      await page
+        .goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 })
+        .catch(() => {});
+      // reCAPTCHA が出たら判定不能。
+      if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+        return 'unknown';
+      }
+      // 詳細ページなら #fnc_cancel(キャンセルにする) か、ステータス表記が出る。
+      await page.waitForSelector('#fnc_cancel', { timeout: 8_000 }).catch(() => {});
+      const hasCancelBtn = (await page.locator('#fnc_cancel').count().catch(() => 0)) > 0;
+      const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+      const looksCancelled = /ステータス[\s\S]{0,30}(キャンセル|取消)/.test(bodyText);
+      if (hasCancelBtn) { onDetail = true; return looksCancelled ? 'cancelled' : 'active'; }
+      if (looksCancelled) { onDetail = true; return 'cancelled'; }
+      // この URL では詳細に到達できなかった → 次の候補へ。
+    }
+    return onDetail ? 'active' : 'not_found';
+  } catch (_e) {
+    return 'unknown';
+  }
+}
+
 // =====================================================================
 // 予定登録 (KIREIDOT のブロック予約=休憩/業務 → SalonBoard の「予定」)
 //   予約(extReserveRegist)ではなく予定(scheduleRegist)として登録する。
@@ -3050,11 +3092,48 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const startMM = String(when.minute).padStart(2, '0');
 
   // --- 二重登録防止プリフライト (§6.4) ---
-  // payload.preflight_required (孤児再enqueue / 手動リトライ時に Admin が付与) の場合のみ、
-  // 登録フォームを開く前に予約一覧を再照合する。既に同予約が存在すれば登録せず
-  // 「既登録」として成功を返す (= 再試行による二重登録を防ぐ)。
+  // payload.preflight_required (孤児再enqueue / 手動「SB連携」リトライ / sweep 再enqueue
+  // 時に Admin が付与) の場合のみ、登録フォームを開く前に既存予約を確認する。
+  // 既に同予約が存在すれば登録せず「既登録」として成功を返す (= 二重登録を防ぐ)。
   // 通常の新規 push では走らないので速度に影響しない。
   if (p.preflight_required) {
+    const okExisting = (reserveId) => ({
+      status: 'ok',
+      externalId: reserveId,
+      detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+      confirmed: {
+        confirmed_customer_name: p.customer_name ?? null,
+        confirmed_staff_name: p.staff_name ?? null,
+        confirmed_menu_name: menuTarget,
+        confirmed_scheduled_at: p.scheduled_at,
+      },
+      alreadyExists: true,
+    });
+
+    // ① reserveId (external_booking_id) を持っているなら、それで予約詳細を直接開いて
+    //    存在確認する。一覧の名前照合と違い顧客名が空でも確実に判定できる (本命)。
+    const knownReserveId = p.external_booking_id || null;
+    if (knownReserveId) {
+      const st = await checkReserveStatusById(page, knownReserveId, { baseUrl }).catch(() => 'unknown');
+      if (st === 'active') {
+        // 既に有効な予約が SB に存在 → 登録せず reserveId を回収して成功。
+        return okExisting(knownReserveId);
+      }
+      if (st === 'unknown') {
+        // 判定できなかった (reCAPTCHA / ページ不安定など)。ここで登録に進むと
+        // 既存予約があった場合に二重登録になるため、安全側で人手対応に倒す。
+        return fail(
+          `既存予約 (reserveId=${knownReserveId}) の存在確認ができませんでした。二重登録防止のため自動登録を見送りました。SalonBoard をご確認ください。`,
+          'UNKNOWN_ERROR',
+          true,
+        );
+      }
+      // st === 'cancelled' / 'not_found' → SB 上に有効な予約は無い。下の②へ進み、
+      // 念のため一覧照合もしてから (無ければ) 新規登録する。
+    }
+
+    // ② reserveId が無い / reserveId では見つからなかった場合は、日時+スタッフ+顧客名で
+    //    一覧照合する (従来ロジック)。顧客名が空だと特定できないことがある点に注意。
     const existing = await findReserveIdForBooking(page, {
       yyyymmdd: when.yyyymmdd,
       hhmm: when.hhmm,
@@ -3062,18 +3141,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       customerName: p.customer_name,
     }, { baseUrl }).catch(() => null);
     if (existing) {
-      return {
-        status: 'ok',
-        externalId: existing,
-        detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${existing}`,
-        confirmed: {
-          confirmed_customer_name: p.customer_name ?? null,
-          confirmed_staff_name: p.staff_name ?? null,
-          confirmed_menu_name: menuTarget,
-          confirmed_scheduled_at: p.scheduled_at,
-        },
-        alreadyExists: true,
-      };
+      return okExisting(existing);
     }
   }
 

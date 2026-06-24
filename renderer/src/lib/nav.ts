@@ -11,6 +11,7 @@ import {
   MessageSquareText,
   Settings as SettingsIcon,
   Store,
+  Bed,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -22,6 +23,7 @@ export type NavKey =
   | 'menus'
   | 'coupons'
   | 'shifts'
+  | 'equipment'
   | 'styles'
   | 'blog'
   | 'reviews'
@@ -85,6 +87,12 @@ export const NAV_ITEMS: NavItem[] = [
     icon: CalendarClock,
   },
   {
+    key: 'equipment',
+    label: '設備',
+    description: 'SalonBoard 取得のベッド/席など設備一覧',
+    icon: Bed,
+  },
+  {
     key: 'styles',
     label: 'スタイル/ギャラリー',
     description: 'SalonBoard 取得の美容室スタイル / エステ等フォトギャラリー一覧',
@@ -118,6 +126,7 @@ const SHOP_SCOPED_KEYS: ReadonlySet<NavKey> = new Set<NavKey>([
   'menus',
   'coupons',
   'shifts',
+  'equipment',
   'styles',
   'blog',
   'reviews',

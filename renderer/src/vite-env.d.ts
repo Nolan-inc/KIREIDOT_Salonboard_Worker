@@ -37,7 +37,7 @@ type ExtensionEvent = {
 };
 
 // utilityProcess (electron/worker-process.cjs) からのイベント。
-type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'blog' | 'reviews' | 'customers';
+type WorkerChannel = 'bookings' | 'staff' | 'menus' | 'coupons' | 'shifts' | 'equipment' | 'blog' | 'reviews' | 'customers';
 type WorkerEvent =
   | { type: 'boot'; payload: { pid: number; at: string } }
   | { type: 'ready'; payload: { ok: boolean } }
