@@ -3134,6 +3134,47 @@ async function directScrape(shopId: string): Promise<void> {
         return;
       }
     }
+    // サロン情報ページ等の DOM 調査用モード: SALONBOARD_DIRECT_DUMP_URL に遷移し、
+    // HTML 全体 + 「店舗/サロン/設定/情報」系リンク一覧を吐く。scraper 実装前の発見用。
+    const dumpUrl = process.env.SALONBOARD_DIRECT_DUMP_URL;
+    if (dumpUrl) {
+      const target = dumpUrl.startsWith("http")
+        ? dumpUrl
+        : new URL(dumpUrl, baseUrl).toString();
+      await page
+        .goto(target, { waitUntil: "domcontentloaded", timeout: 30_000 })
+        .catch(() => {});
+      await page.waitForTimeout(1500);
+      const info = await page
+        .evaluate(() => {
+          const links = Array.from(document.querySelectorAll("a"))
+            .map((a) => ({
+              href: a.getAttribute("href") || "",
+              text: (a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 30),
+            }))
+            .filter(
+              (l) =>
+                l.href &&
+                (/店舗|サロン|設定|基本|情報|営業|アクセス/.test(l.text) ||
+                  /setting|salon|shop|store|info|tenpo/i.test(l.href)),
+            );
+          return {
+            url: location.href,
+            title: document.title,
+            links: links.slice(0, 50),
+          };
+        })
+        .catch(() => null);
+      console.log("[dump] page:", JSON.stringify(info).slice(0, 2500));
+      const fsp2 = await import("node:fs/promises");
+      const html = await page.content().catch(() => "");
+      const out =
+        process.env.SALONBOARD_DIRECT_DUMP_FILE ||
+        "/home/pwuser/.kireidot/dump.html";
+      await fsp2.writeFile(out, html).catch(() => {});
+      console.log(`[dump] html(${html.length}) => ${out}`);
+      return;
+    }
     // 検証する scrape 種別。カンマ区切りで複数種別を1ログインで連続スクレイプ(横展開検証)。
     // staff/menus/coupons/blogs/reviews/photo_gallery を汎用 dispatch で扱う。
     const typesRaw = (process.env.SALONBOARD_DIRECT_SCRAPE_TYPE || "bookings").toLowerCase();
