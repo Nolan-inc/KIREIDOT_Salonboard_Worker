@@ -3351,15 +3351,20 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           continue;
         }
 
-        // payload 指定が解決できない場合: 空行のみ「ベッド」を入れる従来動作
-        const needsSet = await sel.evaluate((el) => {
-          const cur = el.options[el.selectedIndex];
-          const curText = (cur?.textContent || '').replace(/[○×\s]/g, '');
-          return !el.value || curText === '';
-        }).catch(() => false);
-        if (!needsSet) { keptCount++; continue; }
+        // payload 指定が無い場合: 空き(○)のベッド/席を選ぶ。
+        // ⚠️ 追加した設備行は既定で埋まっているベッド(例 ベッド1)が選択済みのことがあり、
+        //    それを維持すると「設備の受付可能数を超えて」で登録不可になる (2026-06-25 実機で判明)。
+        //    option text は「○ベッド1」「×ベッド1」のように先頭に空き記号(○=空き/×=満)が付くので、
+        //    必ず ○ のベッド/席へ上書きする。
         const bedVal = await sel.evaluate((el) => {
-          const opt = Array.from(el.options).find((o) => (o.textContent || '').includes('ベッド'));
+          const opts = Array.from(el.options).filter((o) => o.value);
+          const isBed = (o) => /ベッド|ベット|席/.test(o.textContent || '');
+          // 1) ○(空き)のベッド/席を優先
+          let opt = opts.find((o) => isBed(o) && /○/.test(o.textContent || ''));
+          // 2) ×(満)でないベッド/席
+          if (!opt) opt = opts.find((o) => isBed(o) && !/×/.test(o.textContent || ''));
+          // 3) とにかくベッド/席
+          if (!opt) opt = opts.find((o) => isBed(o));
           return opt ? opt.value : null;
         }).catch(() => null);
         if (bedVal) {
