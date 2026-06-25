@@ -248,7 +248,9 @@ type JobType =
   | "fetch_coupon"
   | "fetch_coupons"
   | "fetch_equipment"
-  | "fetch_reviews";
+  | "fetch_reviews"
+  | "fetch_blog"
+  | "fetch_photo_gallery";
 
 type Job = {
   id: string;
@@ -992,6 +994,11 @@ async function handleJob(job: Job): Promise<void> {
         fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
         fetch_equipment: { fn: "scrapeEquipment", key: "equipment" },
         fetch_reviews: { fn: "scrapeReviews", key: "reviews" },
+        fetch_blog: { fn: "scrapeBlogs", key: "blogs" },
+        fetch_photo_gallery: {
+          fn: "scrapePhotoGallery",
+          key: "photo_galleries",
+        },
       };
       const m = FETCH_MAP[job.job_type];
       if (m) {
