@@ -550,6 +550,228 @@ async function sendSlack(text) {
   }
 }
 
+// =====================================================================
+// エラー画面のスクショ + 画面テキストAI判別 + 原因推測を Slack へ送る
+//   - 通知先は専用チャンネル C0BAPMRQR2L (設定で上書き可: deviceAuth.slack.error_channel)
+//   - スクショは Slack files.upload(v2: getUploadURLExternal→completeUploadExternal)
+//   - AI推測は OpenAI Vision を直叩き (OPENAI_API_KEY 未設定ならスキップ)
+//   - 全ジョブの失敗 (postCallback の失敗ステータス) で発火。重複抑制なし(毎回送る)
+// =====================================================================
+const SLACK_ERROR_SCREENSHOT_CHANNEL =
+  process.env.SALONBOARD_SLACK_ERROR_CHANNEL || 'C0BAPMRQR2L';
+
+function slackErrorChannel() {
+  return (
+    (deviceAuth && deviceAuth.slack && deviceAuth.slack.error_channel) ||
+    SLACK_ERROR_SCREENSHOT_CHANNEL
+  );
+}
+
+// 「現在処理中の Playwright page」。postCallback は page を持たないため、
+// runOneInner がジョブ処理中の page をここに保持し、失敗時のスクショ取得に使う。
+let _errorCapturePage = null;
+
+const JOB_LABEL = {
+  push_booking: '予約の登録/変更',
+  cancel_booking: '予約のキャンセル',
+  push_blog: 'ブログ投稿',
+  delete_blog: 'ブログ削除',
+  push_photo_gallery: 'フォトギャラリー投稿',
+  push_review_reply: '口コミ返信',
+  push_shifts: 'シフト反映',
+  fetch_shift_patterns: '勤務パターン取得',
+  fetch_staff: 'スタッフ取得',
+  fetch_equipment: '設備取得',
+  fetch_reviews: '口コミ取得',
+};
+
+// エラー画面のスクショ(Buffer)と本文テキストを今の page から取得する。
+async function captureErrorPageArtifacts(page) {
+  if (!page) return { buffer: null, text: '', url: '' };
+  let buffer = null;
+  let text = '';
+  let url = '';
+  try { url = page.url(); } catch (_e) { /* noop */ }
+  try {
+    const shot = await Promise.race([
+      page.screenshot({ fullPage: false }),
+      new Promise((resolve) => setTimeout(() => resolve(null), 7000)),
+    ]);
+    if (shot && Buffer.isBuffer(shot)) buffer = shot;
+  } catch (_e) { /* noop */ }
+  try {
+    text = (await Promise.race([
+      page.evaluate(() => (document.body?.innerText ?? '').slice(0, 4000)),
+      new Promise((resolve) => setTimeout(() => resolve(''), 4000)),
+    ])) || '';
+  } catch (_e) { /* noop */ }
+  return { buffer, text, url };
+}
+
+// OpenAI Vision でエラー画面を解析し「なぜ起きたか」の推測を返す。
+//   OPENAI_API_KEY 未設定なら null。画像(base64 data URL)+本文テキストを渡す。
+async function analyzeSalonboardError({ buffer, errorText, jobType, errorCode }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const label = JOB_LABEL[jobType] || jobType || '操作';
+    const content = [
+      {
+        type: 'text',
+        text:
+          `SalonBoard で「${label}」を自動操作中にエラーになりました。\n` +
+          `エラーコード: ${errorCode || '不明'}\n` +
+          `Workerが検知したエラー: ${String(errorText || '').slice(0, 800)}\n\n` +
+          `添付のエラー画面スクリーンショットと、その画面に書かれているテキストを読み取り、` +
+          `(1)画面に出ているエラーメッセージの要約 (2)考えられる原因の推測 (3)対処の提案 ` +
+          `を日本語で簡潔に答えてください。`,
+      },
+    ];
+    if (buffer && Buffer.isBuffer(buffer)) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: `data:image/png;base64,${buffer.toString('base64')}` },
+      });
+    }
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_VISION_MODEL || 'gpt-4.1-mini',
+        max_tokens: 600,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              '次のJSON形式のみで日本語で答えてください: ' +
+              '{"screen_message":"画面に出ているエラーメッセージの要約","probable_cause":"考えられる原因","suggested_action":"対処の提案"}',
+          },
+          { role: 'user', content },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      console.warn('[ai] openai error', res.status, (await res.text().catch(() => '')).slice(0, 200));
+      return null;
+    }
+    const json = await res.json();
+    const textOut = json?.choices?.[0]?.message?.content ?? '';
+    try { return JSON.parse(textOut); } catch (_e) {
+      const m = String(textOut).match(/\{[\s\S]*\}/);
+      if (m) { try { return JSON.parse(m[0]); } catch (_e2) { /* noop */ } }
+      return { raw: String(textOut).slice(0, 500) };
+    }
+  } catch (e) {
+    console.warn('[ai] analyze error', e?.message ?? e);
+    return null;
+  }
+}
+
+// Slack へスクショをアップロード (files v2: getUploadURLExternal → PUT → completeUploadExternal)。
+//   成功したらファイルが channel に表示される。initial_comment にエラー概要を載せる。
+async function uploadScreenshotToSlack({ buffer, channel, filename, comment }) {
+  const token = deviceAuth?.slack?.token;
+  if (!token || !buffer || !Buffer.isBuffer(buffer)) return false;
+  try {
+    // 1) アップロードURL発行
+    const u = new URLSearchParams({ filename: filename || 'error.png', length: String(buffer.length) });
+    const r1 = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: u.toString(),
+    });
+    const j1 = await r1.json().catch(() => ({}));
+    if (!j1.ok) { console.warn('[slack] getUploadURL failed', j1.error); return false; }
+    // 2) バイナリをPUT
+    const put = await fetch(j1.upload_url, { method: 'POST', body: buffer });
+    if (!put.ok) { console.warn('[slack] upload PUT failed', put.status); return false; }
+    // 3) 完了 (channel に投稿)
+    const r3 = await fetch('https://slack.com/api/files.completeUploadExternal', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({
+        files: [{ id: j1.file_id, title: filename || 'error.png' }],
+        channel_id: channel,
+        initial_comment: comment || undefined,
+      }),
+    });
+    const j3 = await r3.json().catch(() => ({}));
+    if (!j3.ok) { console.warn('[slack] completeUpload failed', j3.error); return false; }
+    return true;
+  } catch (e) {
+    console.warn('[slack] upload error', e?.message ?? e);
+    return false;
+  }
+}
+
+// エラー時に「スクショ + 画面テキストAI判別 + 原因推測」を Slack 専用チャンネルへ送る。
+//   毎回送る(重複抑制なし)。画像が撮れなければテキストのみ送る。
+async function reportSalonboardErrorWithScreenshot({ jobType, status, errorCode, reason }) {
+  if (!slackEnabled()) return;
+  try {
+    const page = _errorCapturePage;
+    const { buffer, text, url } = await captureErrorPageArtifacts(page);
+    const ai = await analyzeSalonboardError({
+      buffer,
+      errorText: reason || text,
+      jobType,
+      errorCode,
+    });
+    const machine = (typeof machineId === 'function' ? machineId() : 'worker');
+    const ver = (typeof appVersionFallback === 'function' ? appVersionFallback() : null);
+    const label = JOB_LABEL[jobType] || jobType || 'ジョブ';
+    const lines = [
+      `:rotating_light: *SalonBoard エラー: ${label}*  (${machine}${ver ? ` v${ver}` : ''})`,
+      `• 状態: ${status || 'failed'}${errorCode ? ` [${errorCode}]` : ''}`,
+      reason ? `• Worker検知: ${String(reason).slice(0, 400)}` : null,
+      url ? `• URL: ${url}` : null,
+    ];
+    if (ai) {
+      if (ai.screen_message) lines.push(`• 画面メッセージ: ${ai.screen_message}`);
+      if (ai.probable_cause) lines.push(`• 推測される原因(AI): ${ai.probable_cause}`);
+      if (ai.suggested_action) lines.push(`• 対処の提案(AI): ${ai.suggested_action}`);
+      if (ai.raw && !ai.screen_message) lines.push(`• AI: ${ai.raw}`);
+    } else if (process.env.OPENAI_API_KEY) {
+      lines.push(`• (AI解析は失敗またはスキップ)`);
+    }
+    const comment = lines.filter(Boolean).join('\n');
+    const channel = slackErrorChannel();
+
+    let uploaded = false;
+    if (buffer) {
+      uploaded = await uploadScreenshotToSlack({
+        buffer,
+        channel,
+        filename: `sb-error-${jobType || 'job'}.png`,
+        comment,
+      });
+    }
+    // 画像が無い/アップロード失敗時はテキストだけでも必ず送る。
+    if (!uploaded) {
+      await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${deviceAuth.slack.token}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ channel, text: comment }),
+      }).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[slack] error-report failed', e?.message ?? e);
+  }
+}
+
 // emit されたイベントから「エラーとして Slack に送るべきもの」を判定して送る。
 function maybeSlackFromEmit(type, payload) {
   if (!slackEnabled()) return;
@@ -2965,6 +3187,8 @@ async function runPushJobs({ showBrowser } = {}) {
         viewport: { width: 1366, height: 900 },
       });
       const page = await ctx.newPage();
+      // 失敗時のエラー画面スクショ取得用に現在の page を保持 (postCallback が使う)。
+      _errorCapturePage = page;
 
       // ログイン (セッション切れなら再ログイン)。
       // ★genre を渡すのが重要: 美容室(hair)で /KLP/top/ を先に開くと毎回再ログインを
@@ -3498,6 +3722,9 @@ async function runPushJobs({ showBrowser } = {}) {
       await runOneInner(job);
     } finally {
       if (locked && shopId) releaseShopLock(shopId);
+      // 次のジョブに古い page が残らないようクリア (close 済みの page を
+      // 後続のエラー報告が触らないように)。
+      _errorCapturePage = null;
     }
   };
 
@@ -3593,6 +3820,15 @@ async function postCallback(body) {
       const code = body?.error_code ? `[${body.error_code}] ` : '';
       const reason = body?.error || body?.summary || '';
       void sendSlack(`${jt} ${st}: ${code}${reason}`.slice(0, 500));
+      // エラー画面のスクショ + 画面テキストAI判別 + 原因推測を専用チャンネルへ。
+      // ⚠️ page がまだ生きているうちにスクショを撮る必要があるため await する
+      //   (この後 browser.close される)。AI/Slack送信の失敗は内部で握りつぶす。
+      await reportSalonboardErrorWithScreenshot({
+        jobType: jt,
+        status: st,
+        errorCode: body?.error_code || null,
+        reason,
+      });
     }
   } catch (_e) { /* noop */ }
   const headers = buildDeviceHeaders({ 'Content-Type': 'application/json' });
