@@ -3396,6 +3396,53 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     equip_assigned: equipResult,
   };
 
+  // 診断 (SALONBOARD_PUSH_DIAG=1): 送信前にフォームの検証状態を吐く (登録はしない)。
+  // 「doComplete に達するのに予約が作られない=errorInput でクライアント検証が NG」の
+  // 原因フィールド特定用。
+  if (process.env.SALONBOARD_PUSH_DIAG === '1') {
+    const d = await page.evaluate(() => {
+      const root = document.querySelector('#extReserveRegist') || document;
+      const els = Array.from(root.querySelectorAll('input,select,textarea'));
+      const fields = els.map((el) => {
+        const errCont = el.closest('.error,.errorArea,[class*="error" i],.mod_form_error') ? 1 : 0;
+        const errCls = /error|invalid/i.test(el.className) ? 1 : 0;
+        return {
+          n: el.name || el.id || el.tagName,
+          v: (el.value || '').slice(0, 24),
+          req: el.required || el.getAttribute('aria-required') === 'true' ? 1 : 0,
+          err: errCont || errCls,
+        };
+      });
+      const msgs = Array.from(
+        document.querySelectorAll('.error,.errorMessage,[class*="error" i],.mod_box_warning,.mod_form_error'),
+      )
+        .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, 12);
+      const q = (s) => (document.querySelector(s) || {}).value;
+      return {
+        errorInput: typeof window.errorInput !== 'undefined' ? window.errorInput : 'undef',
+        registOnclick: (document.querySelector('#regist') || {}).getAttribute
+          ? document.querySelector('#regist').getAttribute('onclick')
+          : null,
+        totalFields: fields.length,
+        errFields: fields.filter((f) => f.err).map((f) => f.n),
+        emptyReq: fields.filter((f) => f.req && !f.v).map((f) => f.n),
+        msgs,
+        key: {
+          staffId: q('#staffId'),
+          nmSei: q('#nmSei'),
+          nmSeiKana: q('#nmSeiKana'),
+          menu: q('#jsiNetCouponId') || q('[name=netCouponId]'),
+          rsvHour: q('#jsiRsvHour'),
+          termHour: q('#jsiRsvTermHour'),
+          equip: q('[name=equipIdList]'),
+        },
+      };
+    }).catch((e) => ({ err: String(e) }));
+    console.log('[push][diag] FORM STATE:', JSON.stringify(d).slice(0, 1900));
+  }
+
   if (!enablePush) {
     return { status: 'confirm_only', confirmed };
   }
