@@ -1091,12 +1091,30 @@ type ResolvedLaunch = {
  *  - プロキシは「ジョブの credentials.proxy」優先、無ければ env SB_PROXY_* にフォールバック。
  *    どちらも無ければ direct = 現状と完全に同じ挙動 (既存 PC / Electron 無影響)。
  */
+// プロキシIPプールの round-robin 割当て用カウンタ。
+let _proxyRrCounter = 0;
+/**
+ * SB_PROXY_POOL=host:port,host:port,... が設定されていれば round-robin で1つ返す。
+ * 単一IP酷使による評判劣化 (ERR_TUNNEL_CONNECTION_FAILED) を避け、各IPの休息を増やす
+ * (複数店舗スケール時の必須対策)。未設定なら従来の SB_PROXY_SERVER。
+ */
+function pickPooledProxyServer(): string {
+  const pool = (process.env.SB_PROXY_POOL || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (pool.length === 0) return process.env.SB_PROXY_SERVER || "";
+  const pick = pool[_proxyRrCounter % pool.length];
+  _proxyRrCounter += 1;
+  return pick;
+}
+
 function resolveLaunchOptions(
   credProxy?: { server: string; username?: string | null; password?: string | null } | null
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
-  const rawServer = credProxy?.server || process.env.SB_PROXY_SERVER || "";
+  const rawServer = credProxy?.server || pickPooledProxyServer();
   const proxy = rawServer
     ? {
         // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
