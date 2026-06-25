@@ -3525,6 +3525,28 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
   // 完了画面から reserveId / detail_url
   const afterUrl = page.url();
+  // 診断 (SALONBOARD_PUSH_DIAG=1): doComplete 等「送信後ページ」の中身を吐く。
+  // 「doComplete に達するのに予約が作られない」原因 (検証エラー文言 vs Akamai 書込拒否) の確定用。
+  if (process.env.SALONBOARD_PUSH_DIAG === '1') {
+    try {
+      const dc = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        body: (document.body && document.body.innerText ? document.body.innerText : '')
+          .replace(/\s+/g, ' ')
+          .slice(0, 900),
+        errs: Array.from(
+          document.querySelectorAll('.error,.errorMessage,[class*="error" i],.mod_box_warning,.mod_form_error'),
+        )
+          .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .slice(0, 12),
+        hasForm: !!document.querySelector('#extReserveRegist'),
+        detailLink: !!document.querySelector("a[href*='extReserveDetail'][href*='reserveId=']"),
+      }));
+      console.log('[push][diag] POST-SUBMIT PAGE:', JSON.stringify(dc).slice(0, 1500));
+    } catch (_e) { /* noop */ }
+  }
   let externalId = null;
   let detailUrl = null;
   const detailLink = await page
