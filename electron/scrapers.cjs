@@ -1947,6 +1947,58 @@ function parseJstPartsForPush(iso) {
  * 引数 target: { yyyymmdd, hhmm, staffExt, customerName }
  * 戻り値: reserveId(string) | null
  */
+/**
+ * reserveId を「予約一覧スクレイプ(scrapeBookings)」で特定する確実版。
+ * findReserveIdForBooking(日付フィルタUI依存・cancelled 混在で曖昧化)が null の時の
+ * フォールバック兼・確実経路。scrapeBookings は全件読むので reserveId(external_id) を
+ * 取りこぼさず、status=cancelled を除外して confirmed を一意に選べる。
+ * target: { yyyymmdd, hhmm, staffExt?, staffName?, customerName? }
+ * 戻り値: reserveId(string) | null
+ */
+async function findReserveIdViaScrape(page, target, opts = {}) {
+  try {
+    const { rows } = await scrapeBookings(page, {
+      baseUrl: opts.baseUrl,
+      genre: opts.genre || 'esthetic',
+    });
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    // ISO(UTC) → JST の yyyymmdd / HH:MM
+    const toJst = (iso) => {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return { ymd: null, hhmm: null };
+      const j = new Date(d.getTime() + 9 * 3600 * 1000);
+      const ymd = `${j.getUTCFullYear()}${String(j.getUTCMonth() + 1).padStart(2, '0')}${String(j.getUTCDate()).padStart(2, '0')}`;
+      const hhmm = `${String(j.getUTCHours()).padStart(2, '0')}:${String(j.getUTCMinutes()).padStart(2, '0')}`;
+      return { ymd, hhmm };
+    };
+    const norm = (s) => (s || '').replace(/\s*様$/, '').replace(/\s+/g, '');
+    const getId = (b) => ((b.external_id || b.customer_code || '') + '').trim() || null;
+    const wantStaff = (target.staffExt || '').toUpperCase();
+    const wantStaffName = norm(target.staffName);
+    const wantCust = norm(target.customerName);
+    let cands = rows.filter((b) => {
+      if (!b.scheduled_at) return false;
+      const { ymd, hhmm } = toJst(b.scheduled_at);
+      if (target.yyyymmdd && ymd !== target.yyyymmdd) return false;
+      if (target.hhmm && hhmm !== target.hhmm) return false;
+      if (wantStaff && b.staff_external_id && String(b.staff_external_id).toUpperCase() !== wantStaff) return false;
+      if (!b.staff_external_id && wantStaffName && b.staff_name && norm(b.staff_name) !== wantStaffName) return false;
+      return true;
+    });
+    // cancelled を除外 (confirmed のみ)。再予約で同枠に cancelled+confirmed が並んでも一意化。
+    const active = cands.filter((b) => b.status !== 'cancelled');
+    if (active.length) cands = active;
+    if (cands.length === 1) return getId(cands[0]);
+    if (cands.length > 1 && wantCust) {
+      const byCust = cands.filter((b) => norm(b.customer_name).includes(wantCust) || wantCust.includes(norm(b.customer_name)));
+      if (byCust.length === 1) return getId(byCust[0]);
+    }
+    return null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function findReserveIdForBooking(page, target, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   try {
@@ -3473,15 +3525,20 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           continue;
         }
 
-        // payload 指定が解決できない場合: 空行のみ「ベッド」を入れる従来動作
-        const needsSet = await sel.evaluate((el) => {
-          const cur = el.options[el.selectedIndex];
-          const curText = (cur?.textContent || '').replace(/[○×\s]/g, '');
-          return !el.value || curText === '';
-        }).catch(() => false);
-        if (!needsSet) { keptCount++; continue; }
+        // payload 指定が無い場合: 空き(○)のベッド/席を選ぶ。
+        // ⚠️ 追加した設備行は既定で埋まっているベッド(例 ベッド1)が選択済みのことがあり、
+        //    それを維持すると「設備の受付可能数を超えて」で登録不可になる (2026-06-25 実機で判明)。
+        //    option text は「○ベッド1」「×ベッド1」のように先頭に空き記号(○=空き/×=満)が付くので、
+        //    必ず ○ のベッド/席へ上書きする。
         const bedVal = await sel.evaluate((el) => {
-          const opt = Array.from(el.options).find((o) => (o.textContent || '').includes('ベッド'));
+          const opts = Array.from(el.options).filter((o) => o.value);
+          const isBed = (o) => /ベッド|ベット|席/.test(o.textContent || '');
+          // 1) ○(空き)のベッド/席を優先
+          let opt = opts.find((o) => isBed(o) && /○/.test(o.textContent || ''));
+          // 2) ×(満)でないベッド/席
+          if (!opt) opt = opts.find((o) => isBed(o) && !/×/.test(o.textContent || ''));
+          // 3) とにかくベッド/席
+          if (!opt) opt = opts.find((o) => isBed(o));
           return opt ? opt.value : null;
         }).catch(() => null);
         if (bedVal) {
@@ -3518,6 +3575,53 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     equip_assigned: equipResult,
   };
 
+  // 診断 (SALONBOARD_PUSH_DIAG=1): 送信前にフォームの検証状態を吐く (登録はしない)。
+  // 「doComplete に達するのに予約が作られない=errorInput でクライアント検証が NG」の
+  // 原因フィールド特定用。
+  if (process.env.SALONBOARD_PUSH_DIAG === '1') {
+    const d = await page.evaluate(() => {
+      const root = document.querySelector('#extReserveRegist') || document;
+      const els = Array.from(root.querySelectorAll('input,select,textarea'));
+      const fields = els.map((el) => {
+        const errCont = el.closest('.error,.errorArea,[class*="error" i],.mod_form_error') ? 1 : 0;
+        const errCls = /error|invalid/i.test(el.className) ? 1 : 0;
+        return {
+          n: el.name || el.id || el.tagName,
+          v: (el.value || '').slice(0, 24),
+          req: el.required || el.getAttribute('aria-required') === 'true' ? 1 : 0,
+          err: errCont || errCls,
+        };
+      });
+      const msgs = Array.from(
+        document.querySelectorAll('.error,.errorMessage,[class*="error" i],.mod_box_warning,.mod_form_error'),
+      )
+        .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .slice(0, 12);
+      const q = (s) => (document.querySelector(s) || {}).value;
+      return {
+        errorInput: typeof window.errorInput !== 'undefined' ? window.errorInput : 'undef',
+        registOnclick: (document.querySelector('#regist') || {}).getAttribute
+          ? document.querySelector('#regist').getAttribute('onclick')
+          : null,
+        totalFields: fields.length,
+        errFields: fields.filter((f) => f.err).map((f) => f.n),
+        emptyReq: fields.filter((f) => f.req && !f.v).map((f) => f.n),
+        msgs,
+        key: {
+          staffId: q('#staffId'),
+          nmSei: q('#nmSei'),
+          nmSeiKana: q('#nmSeiKana'),
+          menu: q('#jsiNetCouponId') || q('[name=netCouponId]'),
+          rsvHour: q('#jsiRsvHour'),
+          termHour: q('#jsiRsvTermHour'),
+          equip: q('[name=equipIdList]'),
+        },
+      };
+    }).catch((e) => ({ err: String(e) }));
+    console.log('[push][diag] FORM STATE:', JSON.stringify(d).slice(0, 1900));
+  }
+
   if (!enablePush) {
     return { status: 'confirm_only', confirmed };
   }
@@ -3539,25 +3643,61 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   };
   page.on('dialog', onDialog);
 
+  // クラウド対策 (SALONBOARD_FORCE_REGIST=1): 登録ボタンの decoy onclick
+  // "errorInput=true;return false" は、クリック時に errorInput=true をセットして
+  // SalonBoard の実 submit ハンドラを阻害する。クラウドでは(フォームが valid でも)
+  // 検証成功時にこの decoy が除去されず残るため、doComplete に達しても予約が作られない
+  // (2026-06-25 実機診断: errorInput=undef・全フィールド valid なのに登録されない)。
+  // PC は本フラグ未設定で従来通り。
+  if (process.env.SALONBOARD_FORCE_REGIST === '1') {
+    await page.evaluate(() => {
+      try {
+        const b = document.querySelector('#regist');
+        if (b) b.removeAttribute('onclick');
+        // eslint-disable-next-line no-undef
+        window.errorInput = false;
+      } catch (_e) { /* noop */ }
+    }).catch(() => {});
+  }
+
   const beforeUrl = page.url();
+  let finalConfirmClicked = false;
   try {
     await registerBtn.click({ timeout: 15_000 }).catch(() => {});
-    // ★高速化(要望対応): networkidle(30s)固定待ちをやめ、「完了サインが出たら即進む」
-    //   ポーリングにする。完了サイン = フォームから離脱 / 完了文言 / 詳細リンク出現 /
-    //   エラー領域出現。最大15秒だが通常は数秒で抜ける。
+    // 1回目送信後を最大15秒ポーリング: doComplete(2段階確認ページ) / 一覧遷移(=容量余裕で即完了) /
+    // 完了文言・詳細リンク のいずれかが出たら抜ける。
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       await page.waitForTimeout(400);
-      const left = !/extReserveRegist/i.test(page.url());
-      if (left) break;
+      if (/doComplete/i.test(page.url())) break;          // 2段階確認ページに到達
+      if (!/extReserveRegist/i.test(page.url())) break;   // 一覧/詳細へ遷移 = 即完了
       const done = await page
         .locator("a[href*='extReserveDetail'][href*='reserveId='], text=/完了しました|受け付けました|登録しました/")
         .first().count().catch(() => 0);
       if (done > 0) break;
-      const err = await page
-        .locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage')
-        .first().count().catch(() => 0);
-      if (err > 0) break;
+    }
+    // ★2段階確認: doComplete は「！！この予約はまだ登録されていません！！ …問題なければ『登録』を
+    //   押してください」という最終確認ページ (容量警告等で出る)。最終「登録」(a#regist) をもう一度
+    //   押して確定する。容量に余裕のある予約は1段階で完了するためこのループは即抜ける
+    //   (2026-06-25 実機で doComplete=確認ページと判明。worker は従来ここで止まり未登録だった)。
+    for (let step = 0; step < 2; step++) {
+      const needsFinal = await page.evaluate(() => {
+        const t = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+        return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
+      }).catch(() => false);
+      if (!needsFinal) break;
+      const finalBtn = page.locator('a#regist').first();
+      if ((await finalBtn.count().catch(() => 0)) === 0) break;
+      await finalBtn.click({ timeout: 10_000 }).catch(() => {});
+      finalConfirmClicked = true;
+      const dl2 = Date.now() + 12_000;
+      while (Date.now() < dl2) {
+        await page.waitForTimeout(400);
+        const stillConfirm = await page
+          .evaluate(() => /まだ登録されていません/.test(((document.body && document.body.innerText) || '')))
+          .catch(() => false);
+        if (!stillConfirm) break;
+      }
     }
   } finally {
     page.off('dialog', onDialog);
@@ -3583,6 +3723,39 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
   // 完了画面から reserveId / detail_url
   const afterUrl = page.url();
+  // 診断 (SALONBOARD_PUSH_DIAG=1): doComplete 等「送信後ページ」の中身を吐く。
+  // 「doComplete に達するのに予約が作られない」原因 (検証エラー文言 vs Akamai 書込拒否) の確定用。
+  if (process.env.SALONBOARD_PUSH_DIAG === '1') {
+    try {
+      const dc = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        body: (document.body && document.body.innerText ? document.body.innerText : '')
+          .replace(/\s+/g, ' ')
+          .slice(0, 900),
+        errs: Array.from(
+          document.querySelectorAll('.error,.errorMessage,[class*="error" i],.mod_box_warning,.mod_form_error'),
+        )
+          .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .slice(0, 12),
+        hasForm: !!document.querySelector('#extReserveRegist'),
+        detailLink: !!document.querySelector("a[href*='extReserveDetail'][href*='reserveId=']"),
+        // doComplete の最終「登録」ボタン候補 (id/text/onclick/表示) を列挙。
+        regBtns: Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]'))
+          .filter((e) => /登録|確定/.test((e.textContent || e.value || '')) && !/予定/.test(e.textContent || ''))
+          .map((e) => ({
+            tag: e.tagName,
+            id: e.id || '',
+            txt: ((e.textContent || e.value || '')).replace(/\s+/g, ' ').trim().slice(0, 16),
+            onclick: (e.getAttribute && e.getAttribute('onclick') || '').slice(0, 50),
+            vis: !!(e.offsetParent !== null),
+          }))
+          .slice(0, 8),
+      }));
+      console.log('[push][diag] POST-SUBMIT PAGE:', JSON.stringify(dc).slice(0, 1900));
+    } catch (_e) { /* noop */ }
+  }
   let externalId = null;
   let detailUrl = null;
   const detailLink = await page
@@ -3596,8 +3769,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     if (m) externalId = m[1];
   }
   const doneText = await page.locator('text=/完了しました|受け付けました|登録しました|予約を登録しました/').count().catch(() => 0);
-  // まだ登録フォーム上に居る = 送信されていない (confirm が押せなかった等)。
-  const stillOnForm = /extReserveRegist/i.test(afterUrl);
+  // ⚠️ doComplete は「成功」ではなく2段階確認ページ。上で最終「登録」を押した後、
+  //    まだ確認ページ (「まだ登録されていません」) に居れば未登録 (容量超過で弾かれた等)。
+  const stillConfirmPage = await page
+    .evaluate(() => /まだ登録されていません/.test(((document.body && document.body.innerText) || '')))
+    .catch(() => false);
+  // 素の登録フォーム上 (doComplete/確認ページでない) = 送信されていない。
+  const stillOnForm = !/doComplete/i.test(afterUrl) && /extReserveRegist/i.test(afterUrl);
 
   if (!dialogAccepted && stillOnForm) {
     return fail(
@@ -3606,7 +3784,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       true,
     );
   }
-  const looksDone = !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
+  if (stillConfirmPage) {
+    return fail(
+      '登録の最終確認 (doComplete「まだ登録されていません」) を確定できませんでした (容量超過/設備不足の可能性)。',
+      'UNKNOWN_ERROR',
+      true,
+    );
+  }
+  // 完了サイン: 詳細リンク / 完了文言 / 2段階目を押して確認ページを抜けた / 一覧等へ遷移。
+  const looksDone = !!detailLink || doneText > 0 || finalConfirmClicked || (!stillOnForm && afterUrl !== beforeUrl);
   if (!looksDone) {
     // 完了サインが出なかった。ただし確認ダイアログは受理済み (= 送信はされた) なので、
     // 実際には登録できている可能性が高い。ここで予約一覧を再照合し、対象予約が
@@ -3615,12 +3801,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     //   (2) 成功扱い → 再試行されない → 二重登録を防止
     // (失敗パスでのみ実行するので正常時の速度には影響しない)
     if (dialogAccepted) {
-      const recovered = await findReserveIdForBooking(page, {
+      const target = {
         yyyymmdd: when.yyyymmdd,
         hhmm: when.hhmm,
         staffExt: p.salonboard_staff_external_id,
+        staffName: p.staff_name,
         customerName: p.customer_name,
-      }, { baseUrl }).catch(() => null);
+      };
+      let recovered = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+      if (!recovered) recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
       if (recovered) {
         return {
           status: 'ok',
@@ -3642,12 +3831,16 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 予約一覧(reserveList)を対象日で検索し、同開始時刻+同スタッフ(+顧客名)で
   // 一意に決まる行の reserveId を取得する (synced なのに external_booking_id=null を防ぐ)。
   if (!externalId) {
-    const found = await findReserveIdForBooking(page, {
+    const target = {
       yyyymmdd: when.yyyymmdd,
       hhmm: when.hhmm,
       staffExt: p.salonboard_staff_external_id,
+      staffName: p.staff_name,
       customerName: p.customer_name,
-    }, { baseUrl }).catch(() => null);
+    };
+    // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
+    let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+    if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
       detailUrl = detailUrl || `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
@@ -3694,12 +3887,16 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
       await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
       const when = parseJstPartsForPush(p.scheduled_at);
       if (when) {
-        const found = await findReserveIdForBooking(page, {
+        const target = {
           yyyymmdd: when.yyyymmdd,
           hhmm: `${String(when.hour).padStart(2, '0')}:${String(when.minute).padStart(2, '0')}`,
           staffExt: p.salonboard_staff_external_id || null,
+          staffName: p.staff_name || null,
           customerName: p.customer_name || null,
-        }, { baseUrl }).catch(() => null);
+        };
+        // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
+        let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+        if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
         if (found) {
           reserveId = found;
           // 呼び出し側(worker)が bookings.external_booking_id に焼き直せるよう返す。
@@ -7368,6 +7565,7 @@ module.exports = {
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
+  findReserveIdForBooking,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,

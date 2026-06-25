@@ -20,7 +20,7 @@
  *   npm run dry-run        # サロンボードに触らず callback だけ返す
  */
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from "playwright";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -693,7 +693,7 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
-      const result = await pushBooking(page, job, payload);
+      const result = await pushBookingViaProvenForm(page, job, payload);
 
       if (result.status === "ok") {
         await report({
@@ -771,6 +771,8 @@ async function handleJob(job: Job): Promise<void> {
     // Admin 側で credentials.salon_id / shop_name を同梱する必要がある)。
     const salonId = (job.credentials as { salon_id?: string | null }).salon_id ?? null;
     const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+    // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
+    const genre = (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
 
     if (job.job_type === "cancel_booking") {
       const p = job.payload as Record<string, unknown>;
@@ -787,6 +789,7 @@ async function handleJob(job: Job): Promise<void> {
               enableCancel: ENABLE_PUSH,
               salonId,
               shopName,
+              genre,
             });
       await reportScraperResult(job, "cancel_booking", result, {
         booking_id: p.booking_id ?? null,
@@ -1950,6 +1953,54 @@ const SB_CONTEXT_OPTIONS = {
   timezoneId: "Asia/Tokyo",
 } as const;
 
+/**
+ * push_booking を実証済み scrapers.cjs pushBookingViaForm に委譲する。
+ * cloud worker は PC と同じ proven 実装を再利用する。worker.ts 独自の pushBooking() は
+ * エステ登録フォームの必須項目 (カナ / 設備ベッド / 確認ダイアログ accept 等) を取りこぼし
+ * 続け、ライブ schedule DOM への依存も強かったため委譲に切替。proven 版は schedule を
+ * `#rlastupdate` 取得のためだけに開き (grid/staffヘッダ非依存)、フォーム入力・確認ダイアログ・
+ * 完了 reconcile まで一通り正しい。返り値 shape は PushBookingResult 互換。
+ */
+async function pushBookingViaProvenForm(
+  page: Page,
+  job: Job,
+  p: PushBookingPayload,
+): Promise<PushBookingResult> {
+  const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
+  const salonId =
+    (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+  const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+  // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
+  const genre = (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+  const result = await (
+    scrapers as unknown as {
+      pushBookingViaForm: (
+        pg: Page,
+        payload: PushBookingPayload,
+        opts: {
+          baseUrl: string;
+          enablePush: boolean;
+          salonId: string | null;
+          shopName: string | null;
+          genre: string;
+        },
+      ) => Promise<PushBookingResult>;
+    }
+  ).pushBookingViaForm(page, p, {
+    baseUrl,
+    enablePush: ENABLE_PUSH,
+    salonId,
+    shopName,
+    genre,
+  });
+  return result;
+}
+
+/**
+ * @deprecated 欠陥のある独自 reimplementation (必須項目の取りこぼし多数)。
+ * 代わりに pushBookingViaProvenForm (scrapers.cjs pushBookingViaForm へ委譲) を使う。
+ * 呼び出し元なし (将来削除)。
+ */
 async function pushBooking(
   page: Page,
   job: Job,
@@ -2324,17 +2375,32 @@ async function pushBooking(
     );
   }
 
-  // 顧客名 (姓名分割)。p.customer_name を空白で姓/名に分ける。
-  if (p.customer_name) {
-    const parts = p.customer_name.trim().split(/[\s　]+/);
-    const sei = parts[0] ?? p.customer_name;
-    const mei = parts.slice(1).join(" ") || "";
+  // 顧客名 (姓名分割) + カナ。
+  // ⚠️ カナ (nmSeiKana/nmMeiKana) は SalonBoard で必須入力。未入力だと登録フォームが
+  // errorInput=true になり「登録する」ボタンが無効化されて送信できず、予約が作られない
+  // (2026-06-23 実機検証で判明: a#regist の onclick が errorInput=true;return false に)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同じく姓/名/セイ/メイを必ず埋める。
+  {
+    const cleanName = (s: string) => String(s || "").replace(/\s+/g, " ").trim();
+    // カナ用: 全角カタカナ + 長音 + 中黒のみ残す (半角/漢字は除去)。取れなければ汎用カナ。
+    const cleanKana = (s: string) =>
+      String(s || "").replace(/[^゠-ヿー・\s]/g, "").replace(/\s+/g, " ").trim();
+    const rawName = (p.customer_name && p.customer_name.trim()) || "ゲスト";
+    const cleaned = cleanName(rawName) || "ゲスト";
+    const parts = cleaned.split(/[\s　]+/).filter(Boolean);
+    const sei = parts[0] || cleaned || "ゲスト";
+    const mei = parts.slice(1).join("") || "様";
+    const seiKana = cleanKana(sei) || "ヨヤク";
+    const meiKana = cleanKana(mei) || "キャクサマ";
     await page.locator(REGISTER_FORM.customerSei.selector).first().fill(sei, { timeout: 6_000 }).catch(() => {});
-    if (mei) await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerSeiKana.selector).first().fill(seiKana, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMeiKana.selector).first().fill(meiKana, { timeout: 6_000 }).catch(() => {});
   }
-  // 電話 (任意)
+  // 電話 (任意・ハイフン無し数字のみ)
   if (p.customer_phone) {
-    await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(p.customer_phone, { timeout: 6_000 }).catch(() => {});
+    const tel = String(p.customer_phone).replace(/[^\d]/g, "");
+    if (tel) await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(tel, { timeout: 6_000 }).catch(() => {});
   }
   // 備考 (KIREIDOT予約ID を必ず入れる → 二重登録チェックの照合キー)
   {
@@ -2343,6 +2409,102 @@ async function pushBooking(
         ? p.notes
         : `${p.notes ? p.notes + "\n" : ""}${kireidotRef}`;
     await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
+  }
+
+  // 設備(席/ベッド)割当。⚠️ エステ等ベッドのある店舗では登録フォームの #equipArea で
+  // 設備の指定が必須のことがあり、未設定だと errorInput=true で「登録する」が無効化され
+  // 登録されない (2026-06-24 実機検証で判明: confirm は出るが onclick=errorInput;return false)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同処理: payload 指定設備(EQ/名前)優先、
+  // 無ければ空行に「ベッド」を入れる。設備が無い店舗では #equipArea が無く no-op。
+  try {
+    const pp = p as unknown as {
+      salonboard_equipment_external_id?: string | null;
+      salonboard_equipment_name?: string | null;
+    };
+    const wantedEquipId =
+      (pp.salonboard_equipment_external_id || "").trim() || null;
+    const wantedEquipName = (pp.salonboard_equipment_name || "").trim() || null;
+    const equipSelector =
+      'select[name="equipIdList"], #equipArea select.equipIdList, #equipArea select';
+    const hasEquipArea =
+      (await page.locator("#equipArea, #equipAdd").first().count().catch(() => 0)) >
+      0;
+    if (hasEquipArea) {
+      // 設備行が無ければ「追加する」(#equipAdd) を押して 1 行作る。
+      if ((await page.locator(equipSelector).count().catch(() => 0)) === 0) {
+        const addBtn = page.locator('#equipAdd, a[id="equipAdd"]').first();
+        if ((await addBtn.count().catch(() => 0)) > 0) {
+          await addBtn.click().catch(() => {});
+          await page
+            .waitForSelector(equipSelector, { timeout: 5_000 })
+            .catch(() => {});
+        }
+      }
+      const equipSelects = page.locator(equipSelector);
+      const n = await equipSelects.count().catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        const sel = equipSelects.nth(i);
+        const pick = await sel
+          .evaluate(
+            (el, args) => {
+              const { wantId, wantName } = args as {
+                wantId: string | null;
+                wantName: string | null;
+              };
+              const opts = Array.from((el as HTMLSelectElement).options);
+              const norm = (s: string) => (s || "").replace(/[○×\s]/g, "");
+              if (wantId) {
+                const o = opts.find((o) => o.value === wantId);
+                if (o) return o.value;
+              }
+              if (wantName) {
+                const o = opts.find(
+                  (o) => norm(o.textContent || "") === norm(wantName),
+                );
+                if (o) return o.value;
+              }
+              return null;
+            },
+            { wantId: wantedEquipId, wantName: wantedEquipName },
+          )
+          .catch(() => null);
+        if (pick) {
+          await sel.selectOption({ value: pick }).catch(() => {});
+        } else {
+          // payload 指定が無い/解決不可: 空行のみ「ベッド」を入れる。
+          const needsSet = await sel
+            .evaluate((el) => {
+              const s = el as HTMLSelectElement;
+              const cur = s.options[s.selectedIndex];
+              return (
+                !s.value ||
+                (cur?.textContent || "").replace(/[○×\s]/g, "") === ""
+              );
+            })
+            .catch(() => false);
+          if (needsSet) {
+            const bedVal = await sel
+              .evaluate((el) => {
+                const opt = Array.from((el as HTMLSelectElement).options).find(
+                  (o) => (o.textContent || "").includes("ベッド"),
+                );
+                return opt ? opt.value : null;
+              })
+              .catch(() => null);
+            if (bedVal) await sel.selectOption({ value: bedVal }).catch(() => {});
+          }
+        }
+        // SalonBoard 側の検証 (errorInput クリア) を起こすため input/change 発火。
+        await sel
+          .evaluate((el) => {
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          })
+          .catch(() => {});
+      }
+    }
+  } catch {
+    /* 設備割当の失敗は登録続行 (設備必須でない店舗もあるため) */
   }
 
   // ⚠️ 空き枠/エラー検出はここ (入力直後・送信前) では行わない。
@@ -2366,6 +2528,44 @@ async function pushBooking(
     enable_push: ENABLE_PUSH,
   });
   if (!ENABLE_PUSH) {
+    // 診断モード (SALONBOARD_PUSH_DIAG=1): 「登録する」を押してダイアログ文言と直後ページを
+    // 記録するが、ダイアログは必ず DISMISS (=確認ならキャンセル) して絶対に登録しない。
+    // 「dialog=true なのに予約が作られない」原因 (確認 vs 検証アラート / ボタンの errorInput) の切り分け用。
+    if (process.env.SALONBOARD_PUSH_DIAG === "1") {
+      let diagMsg = "";
+      let diagFired = false;
+      const onDiag = async (d: Dialog) => {
+        diagFired = true;
+        diagMsg = d.message();
+        console.log(
+          `[push][diag] dialog(${d.type()}): "${diagMsg.slice(0, 180).replace(/\s+/g, " ")}" → dismiss(登録しない)`,
+        );
+        try {
+          await d.dismiss();
+        } catch {
+          /* noop */
+        }
+      };
+      page.on("dialog", onDiag);
+      const btn = page.locator(REGISTER_FORM.registerButton.selector).first();
+      const onclick = await btn.getAttribute("onclick").catch(() => null);
+      const beforeUrl = page.url();
+      await btn
+        .click({ timeout: 10_000 })
+        .catch((e) => console.log(`[push][diag] click err: ${e instanceof Error ? e.message : e}`));
+      await page.waitForTimeout(2500);
+      page.off("dialog", onDiag);
+      console.log(
+        `[push][diag] regist onclick="${onclick ?? ""}" dialogFired=${diagFired} dialog="${diagMsg.slice(0, 120)}" urlBefore=${beforeUrl} urlAfter=${page.url()}`,
+      );
+      await captureRegisterDebug(page, job, "push_diag", {
+        registOnclick: onclick,
+        dialogFired,
+        diagMessage: diagMsg.slice(0, 200),
+        urlBefore: beforeUrl,
+        urlAfter: page.url(),
+      });
+    }
     return { status: "confirm_only", confirmed };
   }
 
@@ -2388,12 +2588,60 @@ async function pushBooking(
     );
   }
 
+  // 「登録する」を押すとネイティブ confirm()「予約を登録します。よろしいですか？」が出る。
+  // ⚠️ Playwright は既定でダイアログを dismiss (=キャンセル→登録されない) ため、click 前に
+  // accept(OK) するハンドラを仕込む (これが無いと送信がキャンセルされ予約が作られない。
+  // 2026-06-23 実機検証で判明。実証済み scrapers.cjs pushBookingViaForm と同処理)。
+  let dialogAccepted = false;
+  let dialogMessage = "";
+  const onDialog = async (d: Dialog) => {
+    dialogAccepted = true;
+    dialogMessage = d.message();
+    console.log(
+      `[push] dialog(${d.type()}): "${dialogMessage.slice(0, 150).replace(/\s+/g, " ")}" → accept`,
+    );
+    try {
+      await d.accept();
+    } catch {
+      /* noop */
+    }
+  };
+  page.on("dialog", onDialog);
+
   const beforeUrl = page.url();
-  await Promise.all([
-    page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {}),
-    registerBtn.click({ timeout: 15_000 }),
-  ]).catch(() => {});
-  await page.waitForTimeout(1500);
+  try {
+    await registerBtn.click({ timeout: 15_000 }).catch(() => {});
+    // 完了サイン (フォーム離脱 / 完了文言 / 詳細リンク / エラー領域) を最大15秒ポーリング。
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(400);
+      if (!/extReserveRegist/i.test(page.url())) break;
+      const done = await page
+        .locator(
+          "a[href*='extReserveDetail'][href*='reserveId='], text=/完了しました|受け付けました|登録しました/",
+        )
+        .first()
+        .count()
+        .catch(() => 0);
+      if (done > 0) break;
+      const err = await page
+        .locator(".mod_box_warning, #warningMessageArea, .error, .errorMessage")
+        .first()
+        .count()
+        .catch(() => 0);
+      if (err > 0) break;
+    }
+  } finally {
+    page.off("dialog", onDialog);
+  }
+
+  // 診断: click 直後 (reconcile でナビゲートする前) のページ状態を記録。
+  // ダイアログ文言 (確認 vs 検証アラート) と直後 URL を証跡に残す。
+  await captureRegisterDebug(page, job, "post_submit_diag", {
+    dialogAccepted,
+    dialogMessage: dialogMessage.slice(0, 200),
+    url: page.url(),
+  });
 
   if (await hasRecaptcha(page)) {
     return fail(
@@ -2403,10 +2651,9 @@ async function pushBooking(
     );
   }
 
-  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する。
-  // ページ全体テキスト検索は静的な注意書き (例:「メニューとの重複登録にご注意ください」)
-  // に誤マッチするため不可。実証済み scrapers.cjs pushBookingViaForm と同じ
-  // エラー領域セレクタに揃える。hasText フィルタで空/非表示コンテナを避ける。
+  // 登録結果のエラー/警告を「エラー領域」へスコープして判定する (ページ全体テキスト検索は
+  // 静的注意書き「メニューとの重複登録にご注意ください」等に誤マッチするため不可)。
+  // 実証済み scrapers.cjs pushBookingViaForm と同じエラー領域セレクタに揃える。
   const errText = (
     await page
       .locator(
@@ -2452,17 +2699,87 @@ async function pushBooking(
   }
 
   const doneText = await page
-    .locator("text=/完了|受け付け|登録しました|予約を登録/")
+    .locator("text=/完了しました|受け付けました|登録しました|予約を登録しました/")
     .count()
     .catch(() => 0);
-  const looksDone = doneText > 0 || afterUrl !== beforeUrl;
-  if (!looksDone) {
-    await captureRegisterDebug(page, job, "completion_not_confirmed");
+  // まだ登録フォーム上に居る = 送信されていない (確認ダイアログを押せなかった等)。
+  const stillOnForm = /extReserveRegist/i.test(afterUrl);
+  if (!dialogAccepted && stillOnForm) {
+    await captureRegisterDebug(page, job, "register_dialog_not_confirmed");
     return fail(
-      "登録ボタンを押しましたが完了画面を確認できませんでした。SalonBoard で登録状況を確認してください。",
+      "登録確認ダイアログ (「予約を登録します。よろしいですか？」) を確定できませんでした。",
       "UNKNOWN_ERROR",
       true,
     );
+  }
+
+  // reserveList 再照合 (対象日 + 開始時刻 + スタッフ + 顧客名 で reserveId を特定)。
+  // 完了サイン欠落時の成功判定 + reserveId バックフィルに使う (実証済み scrapers.cjs と同じ)。
+  const reconcile = (): Promise<string | null> =>
+    (
+      scrapers as unknown as {
+        findReserveIdForBooking: (
+          p: Page,
+          t: {
+            yyyymmdd: string;
+            hhmm: string;
+            staffExt?: string | null;
+            customerName?: string | null;
+          },
+          o: { baseUrl: string },
+        ) => Promise<string | null>;
+      }
+    )
+      .findReserveIdForBooking(
+        page,
+        {
+          yyyymmdd,
+          hhmm: `${startHH}:${startMM}`,
+          staffExt: p.salonboard_staff_external_id,
+          customerName: p.customer_name,
+        },
+        { baseUrl },
+      )
+      .catch(() => null);
+
+  const looksDone =
+    !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
+  if (!looksDone) {
+    // 完了サインは出なかったが確認ダイアログは受理済み (=送信された) なら登録済みの
+    // 可能性が高い。reserveList を再照合し、見つかれば成功扱い (誤fail→再試行による
+    // 二重登録を防ぐ)。
+    if (dialogAccepted) {
+      const recovered = await reconcile();
+      if (recovered) {
+        return {
+          status: "ok",
+          externalId: recovered,
+          detailUrl: `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          alreadyExists: false,
+          confirmed,
+        };
+      }
+    }
+    await captureRegisterDebug(page, job, "completion_not_confirmed", {
+      dialogAccepted,
+      afterUrl,
+    });
+    return fail(
+      `登録ボタンは押しましたが完了を確認できませんでした (dialog=${dialogAccepted})。SalonBoard で登録状況を確認してください。`,
+      "UNKNOWN_ERROR",
+      true,
+    );
+  }
+
+  // 完了サインは出たが reserveId を拾えなかった場合は reserveList から補完。
+  if (!externalId) {
+    const found = await reconcile();
+    if (found) {
+      externalId = found;
+      detailUrl =
+        detailUrl ||
+        `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+    }
   }
 
   return { status: "ok", externalId, detailUrl, alreadyExists: false, confirmed };
@@ -2833,7 +3150,7 @@ async function directPush(shopId: string): Promise<void> {
       credentials: { base_url: baseUrl },
       payload,
     } as unknown as Job;
-    const result = await pushBooking(page, fakeJob, payload);
+    const result = await pushBookingViaProvenForm(page, fakeJob, payload);
     console.log(`[push] ✅ pushBooking => status=${result.status}`);
     console.log(`[push] result:`, JSON.stringify(result).slice(0, 1500));
     const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
@@ -2841,6 +3158,76 @@ async function directPush(shopId: string): Promise<void> {
       const fs = await import("node:fs/promises");
       await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
       console.log(`[push] result dumped => ${dumpFile}`);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
+/**
+ * キュー非依存の cancel_booking 検証 (one-shot)。
+ * env creds でログイン → SALONBOARD_DIRECT_CANCEL_PAYLOAD (JSON) で cancelBookingViaForm 実行。
+ * SALONBOARD_ENABLE_PUSH=OFF なら確認のみ (実キャンセルしない)。
+ * payload は external_booking_id (reserveId) があればそれで特定、無ければ
+ * scheduled_at + salonboard_staff_external_id + customer_name で予約一覧から特定して取消す。
+ */
+async function directCancel(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[cancel] shop=${shopId} channel=${launch.channel ?? "chromium"} headless=${launch.headless} ENABLE_PUSH=${ENABLE_PUSH ? "ON" : "OFF"} (キュー非依存)`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    console.log(`[cancel] isLoggedIn=${auth}`);
+    if (auth !== "logged_in") {
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[cancel] 未ログイン → 認証情報でログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(`[cancel] tryLogin => ${lr.status}`);
+        auth = await isLoggedIn(page, baseUrl);
+        console.log(`[cancel] isLoggedIn(after login)=${auth}`);
+      }
+      if (auth !== "logged_in") {
+        console.log(`[cancel] 未ログイン (auth=${auth})。認証情報を確認。`);
+        return;
+      }
+    }
+    const raw = process.env.SALONBOARD_DIRECT_CANCEL_PAYLOAD;
+    if (!raw) {
+      console.log(`[cancel] SALONBOARD_DIRECT_CANCEL_PAYLOAD (JSON) が未指定。`);
+      return;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch (e) {
+      console.log(`[cancel] payload JSON parse 失敗:`, String(e).slice(0, 200));
+      return;
+    }
+    console.log(
+      `[cancel] payload: reserveId=${payload.external_booking_id ?? "(検索)"} at=${payload.scheduled_at} staff=${payload.salonboard_staff_external_id} customer=${payload.customer_name}`
+    );
+    const result = await scrapers.cancelBookingViaForm(page, payload, {
+      baseUrl,
+      enableCancel: ENABLE_PUSH,
+    });
+    console.log(
+      `[cancel] ✅ cancelBookingViaForm => status=${(result as { status?: string })?.status}`
+    );
+    console.log(`[cancel] result:`, JSON.stringify(result).slice(0, 1000));
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
+      console.log(`[cancel] result dumped => ${dumpFile}`);
     }
   } finally {
     await ctx.close().catch(() => {});
@@ -2865,6 +3252,13 @@ async function main() {
   const directPushShop = process.env.SALONBOARD_DIRECT_PUSH_SHOP;
   if (directPushShop) {
     await directPush(directPushShop);
+    return;
+  }
+
+  // 直接 cancel モード (キュー非依存・検証/後始末用)。
+  const directCancelShop = process.env.SALONBOARD_DIRECT_CANCEL_SHOP;
+  if (directCancelShop) {
+    await directCancel(directCancelShop);
     return;
   }
 
