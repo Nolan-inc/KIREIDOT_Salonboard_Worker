@@ -4580,6 +4580,90 @@ async function scrapeEquipment(page, opts = {}) {
   };
 }
 
+/**
+ * サロン情報(基本設定)を取得する。/KLP/set/salonSetup/ (基本設定) から
+ * 営業時間/定休日(曜日別ウィジェットの表示テキスト)・キャンセルポリシー・STORE_ID を拾う。
+ * 1 shop = 1 row。external_id = STORE_ID(SalonBoard 店舗ID, 例 H000811410)。
+ * 店舗名/住所/アクセス等のプロフィールは掲載管理(別モジュール)にあるため、ここでは
+ * 基本設定で取得できる「営業時間/定休日/キャンセルポリシー」を対象とする。
+ * 戻り値: { rows: [{ external_id, business_hours, holidays, cancel_policy(jsonb), raw }], debug }
+ */
+async function scrapeSalonInfo(page, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  await page
+    .goto(new URL('/KLP/set/salonSetup/', baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    })
+    .catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+  const data = await page.evaluate(() => {
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const val = (name) => {
+      const e = document.querySelector(`[name="${name}"]`);
+      if (!e) return null;
+      if (e.tagName === 'SELECT') {
+        const o = e.options[e.selectedIndex];
+        return o ? norm(o.textContent) : (e.value || null);
+      }
+      return e.value != null ? e.value : null;
+    };
+    // STORE_ID
+    let storeId = val('STORE_ID');
+    if (!storeId) {
+      const m = document.body.innerHTML.match(/storeId=([A-Z0-9]+)/);
+      if (m) storeId = m[1];
+    }
+    // 営業時間設定セクション: 見出しを含む最寄りの section/table/dl の表示テキストを丸ごと拾う。
+    let hoursText = null;
+    let holidayText = null;
+    const heads = Array.from(document.querySelectorAll('h1,h2,h3,h4,p,th,dt,legend'));
+    const head = heads.find((e) => /営業時間設定|営業時間.{0,3}定休日/.test(e.textContent || ''));
+    if (head) {
+      let box = head;
+      for (let i = 0; i < 6 && box && box.parentElement; i++) {
+        box = box.parentElement;
+        if (/section|table|dl|fieldset/i.test(box.tagName) || (box.className && /set|business|hour|area|box/i.test(box.className))) break;
+      }
+      const t = norm(box && box.innerText);
+      if (t) hoursText = t.slice(0, 1500);
+    }
+    // 定休日らしき行
+    const dh = heads.find((e) => /定休日/.test(e.textContent || ''));
+    if (dh && dh.parentElement) holidayText = norm(dh.parentElement.innerText).slice(0, 400);
+    // キャンセルポリシー(構造化)
+    const cancel = {
+      use_kbn: val('cancelPolicyUseKbn'),
+      note: val('cancelPolicyNote'),
+      p1_price: val('cancelPolicy01FeePrice'),
+      p1_rate: val('cancelPolicy01FeeRate'),
+      p2_price: val('cancelPolicy02FeePrice'),
+      p2_rate: val('cancelPolicy02FeeRate'),
+    };
+    // 即時予約受付・指名なし受付等の基本設定フラグも参考に拾う
+    const flags = {
+      free_rsv_stop: val('freeRsvStopFlg'),
+      web_to_before: val('webToBeforeTime'),
+      base_time_today: val('baseTimeOfWebToTodayTime'),
+    };
+    return { storeId, hoursText, holidayText, cancel, flags, title: document.title };
+  }).catch(() => null);
+  if (!data || !data.storeId) {
+    return { rows: [], debug: { storeId: data && data.storeId, reason: 'no_store_id' } };
+  }
+  const rows = [
+    {
+      external_id: String(data.storeId),
+      business_hours: data.hoursText || null,
+      holidays: data.holidayText || null,
+      cancel_policy: data.cancel || null,
+      flags: data.flags || null,
+      raw: { title: data.title },
+    },
+  ];
+  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText } };
+}
+
 async function scrapeStaff(page, opts = {}) {
   // ジャンル別分岐: 美容室(hair)はスタッフではなく「スタイリスト一覧」を取得する。
   // 他ジャンル(esthetic/nail/eyelash/other)は従来のスタッフ一覧 (/CNK/draft/staffList)。
@@ -7546,6 +7630,7 @@ async function scrapeReviews(page, opts = {}) {
 module.exports = {
   scrapeBookings,
   scrapeStaff,
+  scrapeSalonInfo,
   scrapeEquipment,
   scrapeMenus,
   scrapeCoupons,
