@@ -3464,6 +3464,23 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   };
   page.on('dialog', onDialog);
 
+  // クラウド対策 (SALONBOARD_FORCE_REGIST=1): 登録ボタンの decoy onclick
+  // "errorInput=true;return false" は、クリック時に errorInput=true をセットして
+  // SalonBoard の実 submit ハンドラを阻害する。クラウドでは(フォームが valid でも)
+  // 検証成功時にこの decoy が除去されず残るため、doComplete に達しても予約が作られない
+  // (2026-06-25 実機診断: errorInput=undef・全フィールド valid なのに登録されない)。
+  // PC は本フラグ未設定で従来通り。
+  if (process.env.SALONBOARD_FORCE_REGIST === '1') {
+    await page.evaluate(() => {
+      try {
+        const b = document.querySelector('#regist');
+        if (b) b.removeAttribute('onclick');
+        // eslint-disable-next-line no-undef
+        window.errorInput = false;
+      } catch (_e) { /* noop */ }
+    }).catch(() => {});
+  }
+
   const beforeUrl = page.url();
   try {
     await registerBtn.click({ timeout: 15_000 }).catch(() => {});
@@ -3521,8 +3538,10 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     if (m) externalId = m[1];
   }
   const doneText = await page.locator('text=/完了しました|受け付けました|登録しました|予約を登録しました/').count().catch(() => 0);
-  // まだ登録フォーム上に居る = 送信されていない (confirm が押せなかった等)。
-  const stillOnForm = /extReserveRegist/i.test(afterUrl);
+  // doComplete = 登録完了エンドポイント = 成功 (URL に extReserveRegist を含むが /doComplete は完了)。
+  const completed = /doComplete/i.test(afterUrl);
+  // まだ登録フォーム上に居る = 送信されていない (confirm が押せなかった等)。doComplete は除く。
+  const stillOnForm = !completed && /extReserveRegist/i.test(afterUrl);
 
   if (!dialogAccepted && stillOnForm) {
     return fail(
@@ -3531,7 +3550,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       true,
     );
   }
-  const looksDone = !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
+  const looksDone = completed || !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
   if (!looksDone) {
     // 完了サインが出なかった。ただし確認ダイアログは受理済み (= 送信はされた) なので、
     // 実際には登録できている可能性が高い。ここで予約一覧を再照合し、対象予約が
