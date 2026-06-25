@@ -771,6 +771,8 @@ async function handleJob(job: Job): Promise<void> {
     // Admin 側で credentials.salon_id / shop_name を同梱する必要がある)。
     const salonId = (job.credentials as { salon_id?: string | null }).salon_id ?? null;
     const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+    // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
+    const genre = (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
 
     if (job.job_type === "cancel_booking") {
       const p = job.payload as Record<string, unknown>;
@@ -787,6 +789,7 @@ async function handleJob(job: Job): Promise<void> {
               enableCancel: ENABLE_PUSH,
               salonId,
               shopName,
+              genre,
             });
       await reportScraperResult(job, "cancel_booking", result, {
         booking_id: p.booking_id ?? null,
@@ -1967,6 +1970,8 @@ async function pushBookingViaProvenForm(
   const salonId =
     (job.credentials as { salon_id?: string | null }).salon_id ?? null;
   const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
+  // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
+  const genre = (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
   const result = await (
     scrapers as unknown as {
       pushBookingViaForm: (
@@ -1977,6 +1982,7 @@ async function pushBookingViaProvenForm(
           enablePush: boolean;
           salonId: string | null;
           shopName: string | null;
+          genre: string;
         },
       ) => Promise<PushBookingResult>;
     }
@@ -1985,6 +1991,7 @@ async function pushBookingViaProvenForm(
     enablePush: ENABLE_PUSH,
     salonId,
     shopName,
+    genre,
   });
   return result;
 }

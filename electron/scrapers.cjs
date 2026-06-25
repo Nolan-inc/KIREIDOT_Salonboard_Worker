@@ -1947,6 +1947,58 @@ function parseJstPartsForPush(iso) {
  * 引数 target: { yyyymmdd, hhmm, staffExt, customerName }
  * 戻り値: reserveId(string) | null
  */
+/**
+ * reserveId を「予約一覧スクレイプ(scrapeBookings)」で特定する確実版。
+ * findReserveIdForBooking(日付フィルタUI依存・cancelled 混在で曖昧化)が null の時の
+ * フォールバック兼・確実経路。scrapeBookings は全件読むので reserveId(external_id) を
+ * 取りこぼさず、status=cancelled を除外して confirmed を一意に選べる。
+ * target: { yyyymmdd, hhmm, staffExt?, staffName?, customerName? }
+ * 戻り値: reserveId(string) | null
+ */
+async function findReserveIdViaScrape(page, target, opts = {}) {
+  try {
+    const { rows } = await scrapeBookings(page, {
+      baseUrl: opts.baseUrl,
+      genre: opts.genre || 'esthetic',
+    });
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    // ISO(UTC) → JST の yyyymmdd / HH:MM
+    const toJst = (iso) => {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return { ymd: null, hhmm: null };
+      const j = new Date(d.getTime() + 9 * 3600 * 1000);
+      const ymd = `${j.getUTCFullYear()}${String(j.getUTCMonth() + 1).padStart(2, '0')}${String(j.getUTCDate()).padStart(2, '0')}`;
+      const hhmm = `${String(j.getUTCHours()).padStart(2, '0')}:${String(j.getUTCMinutes()).padStart(2, '0')}`;
+      return { ymd, hhmm };
+    };
+    const norm = (s) => (s || '').replace(/\s*様$/, '').replace(/\s+/g, '');
+    const getId = (b) => ((b.external_id || b.customer_code || '') + '').trim() || null;
+    const wantStaff = (target.staffExt || '').toUpperCase();
+    const wantStaffName = norm(target.staffName);
+    const wantCust = norm(target.customerName);
+    let cands = rows.filter((b) => {
+      if (!b.scheduled_at) return false;
+      const { ymd, hhmm } = toJst(b.scheduled_at);
+      if (target.yyyymmdd && ymd !== target.yyyymmdd) return false;
+      if (target.hhmm && hhmm !== target.hhmm) return false;
+      if (wantStaff && b.staff_external_id && String(b.staff_external_id).toUpperCase() !== wantStaff) return false;
+      if (!b.staff_external_id && wantStaffName && b.staff_name && norm(b.staff_name) !== wantStaffName) return false;
+      return true;
+    });
+    // cancelled を除外 (confirmed のみ)。再予約で同枠に cancelled+confirmed が並んでも一意化。
+    const active = cands.filter((b) => b.status !== 'cancelled');
+    if (active.length) cands = active;
+    if (cands.length === 1) return getId(cands[0]);
+    if (cands.length > 1 && wantCust) {
+      const byCust = cands.filter((b) => norm(b.customer_name).includes(wantCust) || wantCust.includes(norm(b.customer_name)));
+      if (byCust.length === 1) return getId(byCust[0]);
+    }
+    return null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function findReserveIdForBooking(page, target, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   try {
@@ -3627,12 +3679,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     //   (2) 成功扱い → 再試行されない → 二重登録を防止
     // (失敗パスでのみ実行するので正常時の速度には影響しない)
     if (dialogAccepted) {
-      const recovered = await findReserveIdForBooking(page, {
+      const target = {
         yyyymmdd: when.yyyymmdd,
         hhmm: when.hhmm,
         staffExt: p.salonboard_staff_external_id,
+        staffName: p.staff_name,
         customerName: p.customer_name,
-      }, { baseUrl }).catch(() => null);
+      };
+      let recovered = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+      if (!recovered) recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
       if (recovered) {
         return {
           status: 'ok',
@@ -3654,12 +3709,16 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 予約一覧(reserveList)を対象日で検索し、同開始時刻+同スタッフ(+顧客名)で
   // 一意に決まる行の reserveId を取得する (synced なのに external_booking_id=null を防ぐ)。
   if (!externalId) {
-    const found = await findReserveIdForBooking(page, {
+    const target = {
       yyyymmdd: when.yyyymmdd,
       hhmm: when.hhmm,
       staffExt: p.salonboard_staff_external_id,
+      staffName: p.staff_name,
       customerName: p.customer_name,
-    }, { baseUrl }).catch(() => null);
+    };
+    // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
+    let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+    if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
       detailUrl = detailUrl || `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
@@ -3706,12 +3765,16 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
       await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
       const when = parseJstPartsForPush(p.scheduled_at);
       if (when) {
-        const found = await findReserveIdForBooking(page, {
+        const target = {
           yyyymmdd: when.yyyymmdd,
           hhmm: `${String(when.hour).padStart(2, '0')}:${String(when.minute).padStart(2, '0')}`,
           staffExt: p.salonboard_staff_external_id || null,
+          staffName: p.staff_name || null,
           customerName: p.customer_name || null,
-        }, { baseUrl }).catch(() => null);
+        };
+        // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
+        let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+        if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
         if (found) {
           reserveId = found;
           // 呼び出し側(worker)が bookings.external_booking_id に焼き直せるよう返す。
