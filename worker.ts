@@ -239,7 +239,16 @@ type JobType =
   | "push_photo_gallery"
   | "delete_blog"
   | "push_review_reply"
-  | "fetch_shift_patterns";
+  | "fetch_shift_patterns"
+  // 設定系 fetch (クラウド完結/PC引退用に job 化)。worker は既存 scraper を呼び、
+  // Admin callback が既存 RPC salonboard_bulk_upsert_* に取込む。
+  | "fetch_staff"
+  | "fetch_menu"
+  | "fetch_menus"
+  | "fetch_coupon"
+  | "fetch_coupons"
+  | "fetch_equipment"
+  | "fetch_reviews";
 
 type Job = {
   id: string;
@@ -968,6 +977,72 @@ async function handleJob(job: Job): Promise<void> {
         console.log(`[job] done  ${tag} (fetch_shift_patterns ${code})`);
       }
       return;
+    }
+
+    // fetch_staff / fetch_menu(s) / fetch_coupon(s) / fetch_equipment / fetch_reviews:
+    // 設定系(スタッフ/メニュー/設備/クーポン/口コミ)を scrape し、Admin callback 経由で
+    // 既存 RPC salonboard_bulk_upsert_* に取込ませる。従来 PC が in-process scrape で
+    // staging(salonboard_*_imports)を埋めていた処理を job 化し、クラウド完結(PC引退)させる。
+    {
+      const FETCH_MAP: Record<string, { fn: string; key: string }> = {
+        fetch_staff: { fn: "scrapeStaff", key: "staff" },
+        fetch_menu: { fn: "scrapeMenus", key: "menus" },
+        fetch_menus: { fn: "scrapeMenus", key: "menus" },
+        fetch_coupon: { fn: "scrapeCoupons", key: "coupons" },
+        fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
+        fetch_equipment: { fn: "scrapeEquipment", key: "equipment" },
+        fetch_reviews: { fn: "scrapeReviews", key: "reviews" },
+      };
+      const m = FETCH_MAP[job.job_type];
+      if (m) {
+        const genre =
+          (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+        try {
+          const sx = scrapers as unknown as Record<
+            string,
+            (
+              pg: Page,
+              o: Record<string, unknown>,
+            ) => Promise<{ rows?: unknown[] }>
+          >;
+          const res = await sx[m.fn](page, {
+            baseUrl,
+            genre,
+            loginId: job.credentials.login_id,
+            password: job.credentials.password,
+          });
+          const rows = (res?.rows ?? []) as unknown[];
+          await report({
+            job_id: job.id,
+            job_type: job.job_type,
+            status: "succeeded",
+            [m.key]: rows,
+            summary: `${job.job_type}: ${rows.length}件取得`,
+          } as unknown as CallbackBody);
+          console.log(`[job] done  ${tag} (${job.job_type} ${rows.length}件)`);
+        } catch (e) {
+          const err = e as { code?: string; message?: string };
+          const code = err?.code ?? "UNKNOWN_ERROR";
+          const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
+          const exhausted = job.attempts + 1 >= cap;
+          const isCaptcha = code === "RECAPTCHA_REQUIRED";
+          const noRetry = isCaptcha || exhausted;
+          await report({
+            job_id: job.id,
+            job_type: job.job_type,
+            status: isCaptcha
+              ? "captcha_detected"
+              : noRetry
+                ? "manual_required"
+                : "retryable_failed",
+            error_code: code,
+            error: String(err?.message ?? e).slice(0, 500),
+            manual_required: noRetry,
+          } as unknown as CallbackBody);
+          console.log(`[job] done  ${tag} (${job.job_type} ${code})`);
+        }
+        return;
+      }
     }
 
     // 未実装ジョブ: succeeded ではなく not_implemented
