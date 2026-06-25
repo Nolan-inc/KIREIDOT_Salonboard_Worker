@@ -3562,8 +3562,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           .slice(0, 12),
         hasForm: !!document.querySelector('#extReserveRegist'),
         detailLink: !!document.querySelector("a[href*='extReserveDetail'][href*='reserveId=']"),
+        // doComplete の最終「登録」ボタン候補 (id/text/onclick/表示) を列挙。
+        regBtns: Array.from(document.querySelectorAll('a,button,input[type=button],input[type=submit]'))
+          .filter((e) => /登録|確定/.test((e.textContent || e.value || '')) && !/予定/.test(e.textContent || ''))
+          .map((e) => ({
+            tag: e.tagName,
+            id: e.id || '',
+            txt: ((e.textContent || e.value || '')).replace(/\s+/g, ' ').trim().slice(0, 16),
+            onclick: (e.getAttribute && e.getAttribute('onclick') || '').slice(0, 50),
+            vis: !!(e.offsetParent !== null),
+          }))
+          .slice(0, 8),
       }));
-      console.log('[push][diag] POST-SUBMIT PAGE:', JSON.stringify(dc).slice(0, 1500));
+      console.log('[push][diag] POST-SUBMIT PAGE:', JSON.stringify(dc).slice(0, 1900));
     } catch (_e) { /* noop */ }
   }
   let externalId = null;
