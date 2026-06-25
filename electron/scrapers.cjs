@@ -4625,12 +4625,25 @@ async function scrapeSalonInfo(page, opts = {}) {
         box = box.parentElement;
         if (/section|table|dl|fieldset/i.test(box.tagName) || (box.className && /set|business|hour|area|box/i.test(box.className))) break;
       }
-      const t = norm(box && box.innerText);
-      if (t) hoursText = t.slice(0, 1500);
+      let t = norm(box && box.innerText);
+      // グローバルナビ等の接頭辞を落とし、「営業時間設定」セクションから開始する。
+      if (t) {
+        const idx = t.indexOf('営業時間設定');
+        if (idx > 0) t = t.slice(idx);
+        // 末尾の注意書き以降(キャンセルポリシー等)は落とす
+        const cut = t.indexOf('注意：');
+        if (cut > 40) t = t.slice(0, cut);
+        hoursText = t.slice(0, 1200);
+      }
     }
     // 定休日らしき行
     const dh = heads.find((e) => /定休日/.test(e.textContent || ''));
-    if (dh && dh.parentElement) holidayText = norm(dh.parentElement.innerText).slice(0, 400);
+    if (dh && dh.parentElement) {
+      let h = norm(dh.parentElement.innerText);
+      const idx = h.indexOf('営業時間設定');
+      if (idx > 0) h = h.slice(idx);
+      holidayText = h.slice(0, 300);
+    }
     // キャンセルポリシー(構造化)
     const cancel = {
       use_kbn: val('cancelPolicyUseKbn'),
