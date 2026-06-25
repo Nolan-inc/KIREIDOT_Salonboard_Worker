@@ -3482,24 +3482,43 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
 
   const beforeUrl = page.url();
+  let finalConfirmClicked = false;
   try {
     await registerBtn.click({ timeout: 15_000 }).catch(() => {});
-    // ★高速化(要望対応): networkidle(30s)固定待ちをやめ、「完了サインが出たら即進む」
-    //   ポーリングにする。完了サイン = フォームから離脱 / 完了文言 / 詳細リンク出現 /
-    //   エラー領域出現。最大15秒だが通常は数秒で抜ける。
+    // 1回目送信後を最大15秒ポーリング: doComplete(2段階確認ページ) / 一覧遷移(=容量余裕で即完了) /
+    // 完了文言・詳細リンク のいずれかが出たら抜ける。
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       await page.waitForTimeout(400);
-      const left = !/extReserveRegist/i.test(page.url());
-      if (left) break;
+      if (/doComplete/i.test(page.url())) break;          // 2段階確認ページに到達
+      if (!/extReserveRegist/i.test(page.url())) break;   // 一覧/詳細へ遷移 = 即完了
       const done = await page
         .locator("a[href*='extReserveDetail'][href*='reserveId='], text=/完了しました|受け付けました|登録しました/")
         .first().count().catch(() => 0);
       if (done > 0) break;
-      const err = await page
-        .locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage')
-        .first().count().catch(() => 0);
-      if (err > 0) break;
+    }
+    // ★2段階確認: doComplete は「！！この予約はまだ登録されていません！！ …問題なければ『登録』を
+    //   押してください」という最終確認ページ (容量警告等で出る)。最終「登録」(a#regist) をもう一度
+    //   押して確定する。容量に余裕のある予約は1段階で完了するためこのループは即抜ける
+    //   (2026-06-25 実機で doComplete=確認ページと判明。worker は従来ここで止まり未登録だった)。
+    for (let step = 0; step < 2; step++) {
+      const needsFinal = await page.evaluate(() => {
+        const t = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+        return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
+      }).catch(() => false);
+      if (!needsFinal) break;
+      const finalBtn = page.locator('a#regist').first();
+      if ((await finalBtn.count().catch(() => 0)) === 0) break;
+      await finalBtn.click({ timeout: 10_000 }).catch(() => {});
+      finalConfirmClicked = true;
+      const dl2 = Date.now() + 12_000;
+      while (Date.now() < dl2) {
+        await page.waitForTimeout(400);
+        const stillConfirm = await page
+          .evaluate(() => /まだ登録されていません/.test(((document.body && document.body.innerText) || '')))
+          .catch(() => false);
+        if (!stillConfirm) break;
+      }
     }
   } finally {
     page.off('dialog', onDialog);
@@ -3560,10 +3579,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     if (m) externalId = m[1];
   }
   const doneText = await page.locator('text=/完了しました|受け付けました|登録しました|予約を登録しました/').count().catch(() => 0);
-  // doComplete = 登録完了エンドポイント = 成功 (URL に extReserveRegist を含むが /doComplete は完了)。
-  const completed = /doComplete/i.test(afterUrl);
-  // まだ登録フォーム上に居る = 送信されていない (confirm が押せなかった等)。doComplete は除く。
-  const stillOnForm = !completed && /extReserveRegist/i.test(afterUrl);
+  // ⚠️ doComplete は「成功」ではなく2段階確認ページ。上で最終「登録」を押した後、
+  //    まだ確認ページ (「まだ登録されていません」) に居れば未登録 (容量超過で弾かれた等)。
+  const stillConfirmPage = await page
+    .evaluate(() => /まだ登録されていません/.test(((document.body && document.body.innerText) || '')))
+    .catch(() => false);
+  // 素の登録フォーム上 (doComplete/確認ページでない) = 送信されていない。
+  const stillOnForm = !/doComplete/i.test(afterUrl) && /extReserveRegist/i.test(afterUrl);
 
   if (!dialogAccepted && stillOnForm) {
     return fail(
@@ -3572,7 +3594,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       true,
     );
   }
-  const looksDone = completed || !!detailLink || doneText > 0 || (!stillOnForm && afterUrl !== beforeUrl);
+  if (stillConfirmPage) {
+    return fail(
+      '登録の最終確認 (doComplete「まだ登録されていません」) を確定できませんでした (容量超過/設備不足の可能性)。',
+      'UNKNOWN_ERROR',
+      true,
+    );
+  }
+  // 完了サイン: 詳細リンク / 完了文言 / 2段階目を押して確認ページを抜けた / 一覧等へ遷移。
+  const looksDone = !!detailLink || doneText > 0 || finalConfirmClicked || (!stillOnForm && afterUrl !== beforeUrl);
   if (!looksDone) {
     // 完了サインが出なかった。ただし確認ダイアログは受理済み (= 送信はされた) なので、
     // 実際には登録できている可能性が高い。ここで予約一覧を再照合し、対象予約が
