@@ -56,7 +56,58 @@ function scrubScrapeSecrets(text, secrets) {
   );
   return out;
 }
+// 直近に撮ったエラー画面のスクショ(Buffer)。失敗が起きた「まさにその画面」
+// (ポップアップ/画像認証/エラーダイアログ等) を、後段の Slack 通知でそのまま
+// 送れるように保持する。postCallback が再スクショする頃には画面遷移して
+// しまっていることがあるため、失敗地点 (captureScrapeDebug 呼び出し時) の
+// バッファを優先採用する。ジョブ開始時に resetLastErrorShot() でクリアする。
+let _lastErrorShot = null; // { buffer, url, label, channel, at }
+// 失敗地点で撮影中のスクショ Promise。postCallback 側が await して
+// 「撮り終わってから」Slack に送れるようにする (撮影完了前に browser.close される競合回避)。
+let _lastErrorShotPromise = null;
+
+/** 失敗地点で撮った最新スクショを返す (無ければ null)。撮影中なら待つ。 */
+async function getLastErrorShot() {
+  try { if (_lastErrorShotPromise) await _lastErrorShotPromise; } catch (_e) { /* noop */ }
+  return _lastErrorShot;
+}
+/** ジョブ開始時に呼んで古いスクショを捨てる (前ジョブの画面を誤送信しない)。 */
+function resetLastErrorShot() {
+  _lastErrorShot = null;
+  _lastErrorShotPromise = null;
+}
+
+/**
+ * 失敗地点で「今の画面」をメモリにスクショする (best-effort, 非ブロッキング)。
+ * fail() ヘルパ等から page を渡して呼ぶ。返り値は撮影 Promise (await 任意)。
+ */
+function captureErrorShot(page, label) {
+  const pr = _captureErrorShotToMemory(page, 'push', label || 'fail');
+  _lastErrorShotPromise = pr;
+  return pr;
+}
+
+// SCRAPE_DEBUG_CAPTURE が false でも、エラー画面のスクショ(メモリ保持)だけは
+// 撮りたい。ローカルへのファイル保存とは独立に、常に最新ショットを更新する。
+async function _captureErrorShotToMemory(page, channel, label) {
+  try {
+    if (!page || page.isClosed?.()) return;
+    const shot = await Promise.race([
+      page.screenshot({ fullPage: false, timeout: 6_000 }),
+      new Promise((resolve) => setTimeout(() => resolve(null), 7_000)),
+    ]);
+    if (shot && Buffer.isBuffer(shot)) {
+      let url = '';
+      try { url = page.url(); } catch (_e) { /* noop */ }
+      _lastErrorShot = { buffer: shot, url, label, channel, at: Date.now() };
+    }
+  } catch (_e) { /* スクショ失敗は致命ではない */ }
+}
+
 async function captureScrapeDebug(page, channel, label, opts = {}) {
+  // 失敗地点のスクショは「まさにその画面」を Slack に出すために常にメモリ保持する
+  // (ローカル保存フラグ SCRAPE_DEBUG_CAPTURE とは独立)。
+  await _captureErrorShotToMemory(page, channel, label);
   if (!SCRAPE_DEBUG_CAPTURE) return null;
   try {
     const dir = path.join(
@@ -723,6 +774,15 @@ async function scrapeHairBookings(page, opts = {}) {
         const id = get('panel_reserve_id');
         if (!id) continue;
         const stylistId = get('panel_reserve_stylistId');
+        // 所要(粗): 予約ブロックを内包する <td colspan=N> の N。SBスケジュールは
+        // 30分/枠なので所要分 ≈ colspan*30 の目安。正確な値は後段で予約変更
+        // フォームから補正する (enrichDurationsFromDetail)。colspan が取れない/1未満なら null。
+        let colspanMin = null;
+        const td = rv.closest('td');
+        if (td) {
+          const cs = parseInt(td.getAttribute('colspan') || '', 10);
+          if (Number.isFinite(cs) && cs >= 1) colspanMin = cs * 30;
+        }
         out.push({
           external_id: id,
           customer: (rv.querySelector('.reserveItemCustomer')?.textContent || '').replace(/\s*様\s*$/, '').trim(),
@@ -731,6 +791,7 @@ async function scrapeHairBookings(page, opts = {}) {
           date: get('panel_reserve_date'),
           start: get('panel_reserve_start'),
           registered: get('panel_reserve_registeredFlg'),
+          colspan_min: colspanMin,
         });
       }
       return out;
@@ -750,7 +811,9 @@ async function scrapeHairBookings(page, opts = {}) {
       allRows.push({
         external_id: it.external_id,
         scheduled_at: scheduledAt,
-        duration_min: null, // スケジュールの colspan から将来推定可
+        // 粗い所要 (colspan*30)。後段の enrichDurationsFromDetail で
+        // SBの正確な値に上書きされる。取れなければ null のまま。
+        duration_min: Number(it.colspan_min) > 0 ? it.colspan_min : null,
         customer_name: cleanText(it.customer) || null,
         customer_code: null,
         customer_phone: null,
@@ -776,12 +839,26 @@ async function scrapeHairBookings(page, opts = {}) {
     }
   }
 
+  // 所要の確定: 美容室スケジュールの colspan は 30分刻みの粗い目安なので
+  // (75分が60/90に化ける)、予約変更フォームから SB の正確な所要を読み直す。
+  // Akamai 対策で maxOpen 件まで・人手風待機つき。取りこぼしは次回 sync に回す。
+  let durationFixedDetail = 0;
+  try {
+    durationFixedDetail = await enrichDurationsFromDetail(page, allRows, baseUrl, {
+      onlyNull: false,
+    });
+    diag.push(`duration補正(detail): ${durationFixedDetail} 件`);
+  } catch (e) {
+    diag.push(`duration補正(detail) 失敗: ${e?.message ?? e}`);
+  }
+
   return {
     rows: allRows,
     debug: {
       itemsFound: allRows.length,
       genre: 'hair',
       source: 'salonSchedule',
+      durationFixedDetail,
       range: `${range.fromStr} 〜 ${range.toStr}`,
       diag,
     },
@@ -1233,10 +1310,25 @@ async function scrapeBookings(page, opts = {}) {
   let durationFixed = 0;
   try {
     durationFixed = await enrichDurationsFromSchedule(page, rows, opts.baseUrl);
-    diag.push(`duration補正: ${durationFixed} 件`);
+    diag.push(`duration補正(schedule): ${durationFixed} 件`);
   } catch (e) {
-    diag.push(`duration補正 失敗: ${e?.message ?? e}`);
+    diag.push(`duration補正(schedule) 失敗: ${e?.message ?? e}`);
   }
+
+  // スケジュール補正でも所要が取れなかった行 (重複で一意に決まらない等) は、
+  // 予約変更フォームから「SBが保持する正確な所要」を 1 件ずつ読んで確定させる。
+  // これをしないと duration_min=null のまま DB に渡り、60分で上書きされる。
+  let durationFixedDetail = 0;
+  try {
+    durationFixedDetail = await enrichDurationsFromDetail(page, rows, opts.baseUrl);
+    diag.push(`duration補正(detail): ${durationFixedDetail} 件`);
+  } catch (e) {
+    diag.push(`duration補正(detail) 失敗: ${e?.message ?? e}`);
+  }
+  const stillNull = rows.filter(
+    (r) => r.status !== 'cancelled' && !(Number(r.duration_min) > 0),
+  ).length;
+  if (stillNull > 0) diag.push(`duration未確定(残): ${stillNull} 件`);
 
   return {
     rows,
@@ -1246,6 +1338,8 @@ async function scrapeBookings(page, opts = {}) {
       skipped,
       sampleSkipped,
       durationFixed,
+      durationFixedDetail,
+      durationStillNull: stillNull,
       range: `${range.fromStr} 〜 ${range.toStr}`,
       diag,
     },
@@ -1358,6 +1452,109 @@ async function enrichDurationsFromSchedule(page, rows, baseUrl) {
         r.duration_min = dur;
         fixed++;
       }
+    }
+  }
+  return fixed;
+}
+
+/**
+ * 予約詳細(変更フォーム)から「正確な所要時間」を読む。
+ *
+ * 背景: 予約一覧には終了時刻/所要が無く、スケジュール画面からの補正
+ * (enrichDurationsFromSchedule) も「同日+同開始+同スタッフが一意」のときしか
+ * 効かない (重複したら null のまま)。null のまま DB に渡すと
+ * salonboard_bulk_upsert_bookings が 60 分で上書きし、75分等の予約が
+ * 1時間に潰れる。
+ *
+ * SB の変更フォーム (/KLP/reserve/ext/extReserveChange/?reserveId=...,
+ * ネット予約は net/reserveChange) は、登録フォームと同じ
+ *   <select id="jsiRsvTermHour">  … value は「分換算」(60=1時間, 120=2時間)
+ *   <select id="jsiRsvTermMinute"> … 端数の分 (00/15/30/45 等)
+ * が「SBが保持している正確な値」で selected された状態で開く。
+ * これを読めば 75分(termHour=60 + termMinute=15)も確実に取れる。
+ *
+ * Akamai Bot Manager 対策のため:
+ *   - duration_min が未確定 (null) の行だけ開く (全件は開かない)。
+ *   - 1件ごとに人手風のランダム待機 (0.4〜1.1秒) を挟む。
+ *   - 上限件数 (maxOpen) を超えたら打ち切る (取りこぼしは次回 sync に回す)。
+ *   - external_id が reserveId 形式 (英大文字+数字) の行のみ対象。
+ *
+ * @param {import('playwright').Page} page
+ * @param {Array} rows scrapeBookings/scrapeHairBookings が組んだ行 (破壊的に補正)
+ * @param {string} baseUrl
+ * @param {{ maxOpen?: number, onlyNull?: boolean }} [options]
+ * @returns {Promise<number>} 補正した件数
+ */
+async function enrichDurationsFromDetail(page, rows, baseUrl, options = {}) {
+  const base = baseUrl || 'https://salonboard.com/';
+  if (!rows || rows.length === 0) return 0;
+  const onlyNull = options.onlyNull !== false; // 既定: null の行だけ
+  const maxOpen = Number.isFinite(options.maxOpen) ? options.maxOpen : 120;
+
+  // 対象: duration_min が未確定 (null/0/NaN) で、reserveId 形式の external_id を持つ行。
+  // status が cancelled の行は所要が要らない (画面表示にも使わない) ので除外。
+  const isReserveId = (s) => typeof s === 'string' && /^[A-Z]{1,4}\d{4,}$/.test(s.trim());
+  const targets = rows.filter((r) => {
+    if (r.status === 'cancelled') return false;
+    if (!isReserveId(r.external_id)) return false;
+    if (!onlyNull) return true;
+    const d = Number(r.duration_min);
+    return !Number.isFinite(d) || d <= 0;
+  });
+  if (targets.length === 0) return 0;
+
+  let fixed = 0;
+  let opened = 0;
+  for (const r of targets) {
+    if (opened >= maxOpen) break;
+    opened++;
+    const reserveId = r.external_id.trim();
+    // ext (電話/外部) → net (ネット予約) の順で変更フォームを開く。
+    const candidates = [
+      `/KLP/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
+      `/KLP/reserve/net/reserveChange/?reserveId=${reserveId}`,
+    ];
+    let dur = null;
+    for (const path of candidates) {
+      try {
+        await page.goto(new URL(path, base).toString(), {
+          waitUntil: 'domcontentloaded',
+          timeout: 25_000,
+        });
+      } catch (_e) {
+        continue;
+      }
+      // 所要 select が出るまで待つ (networkidle は待たない: 高速化)。
+      await page
+        .waitForSelector('select#jsiRsvTermHour, select#jsiRsvHour', { timeout: 8_000 })
+        .catch(() => {});
+      dur = await page
+        .evaluate(() => {
+          const sel = (id) => {
+            const el = document.getElementById(id);
+            if (!el) return null;
+            const v = el.value;
+            if (v == null || v === '') return null;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+          };
+          // termHour の value は「分換算」(60=1時間)。termMinute は端数分。
+          const th = sel('jsiRsvTermHour');
+          const tm = sel('jsiRsvTermMinute');
+          if (th == null && tm == null) return null;
+          return (th || 0) + (tm || 0);
+        })
+        .catch(() => null);
+      if (dur != null && dur > 0) break; // 取れたら 2 候補目は開かない
+    }
+    if (dur != null && dur > 0 && dur <= 24 * 60) {
+      r.duration_min = dur;
+      fixed++;
+    }
+    // 人手風の待機 (BAN/Akamai 回避)。最後の行は待たない。
+    if (opened < targets.length && opened < maxOpen) {
+      const jitter = (Math.random() + Math.random()) / 2; // 0..1 中央0.5
+      await page.waitForTimeout(Math.round(400 + jitter * 700)).catch(() => {});
     }
   }
   return fixed;
@@ -3122,12 +3319,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const p = payload || {};
-  const fail = (reason, errorCode, manualRequired) => ({
-    status: 'failed',
-    reason,
-    errorCode,
-    manualRequired,
-  });
+  const fail = (reason, errorCode, manualRequired) => {
+    // 失敗した「まさにその画面」(ポップアップ/画像認証/エラー表示) をメモリに
+    // スクショして Slack 通知で使えるようにする (非ブロッキング)。
+    captureErrorShot(page, `push_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
 
   if (!p.booking_id || !p.scheduled_at) {
     return fail('payload missing booking_id or scheduled_at', 'UNKNOWN_ERROR', true);
@@ -3681,7 +3878,10 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enableCancel = opts.enableCancel !== false; // 既定は実行
   const p = payload || {};
-  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+  const fail = (reason, errorCode, manualRequired) => {
+    captureErrorShot(page, `cancel_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
   let reserveId = (p.external_booking_id || '').trim();
 
   // reserveId が無い場合 (KIREIDOT で作成→push したが reserveId 未回収の予約等) は、
@@ -3824,7 +4024,10 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enableChange = opts.enableChange !== false;
   const p = payload || {};
-  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+  const fail = (reason, errorCode, manualRequired) => {
+    captureErrorShot(page, `change_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
   const reserveId = (p.external_booking_id || '').trim();
 
   if (!reserveId) return fail('external_booking_id (SalonBoard 予約ID) が無いため変更対象を特定できません', 'STAFF_MAPPING_NOT_FOUND', true);
@@ -7368,6 +7571,10 @@ module.exports = {
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
+  // エラー画面スクショ (失敗地点のバッファ) を worker-process が Slack 送信に使う
+  getLastErrorShot,
+  resetLastErrorShot,
+  captureScrapeDebug,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,
