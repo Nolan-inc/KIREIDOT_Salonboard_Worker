@@ -651,6 +651,31 @@ async function scrapeHairBookings(page, opts = {}) {
   let capturedOnce = false;
   let MAX_DAYS = dates.length;
 
+  // グループアカウント(ADER等)はサロン選択後 /CLP/bt/top/ に居る。スケジュールへ直接 goto すると
+  // SB が無効セッション扱い(「有効期限切れ/再度ログイン」エラー画面)にするため(実機 2026-06-28)、
+  // UI の「本日のスケジュール」リンクをクリックして遷移し、セッション文脈を確立する。
+  // 確立後は日付の ?date= goto が通る。単一店(既にスケジュール文脈)では no-op に近い。
+  try {
+    await captureScrapeDebug(page, 'bookings', 'hair_top_before_sched', {
+      diagnostics: { url: page.url() },
+    }).catch(() => null);
+    const schedLink = page
+      .locator('a[href*="/CLP/bt/schedule/salonSchedule"], a:has-text("本日のスケジュール")')
+      .first();
+    if ((await schedLink.count().catch(() => 0)) > 0) {
+      await schedLink.click({ timeout: 10_000 }).catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      diag.push(`hair: schedule warmup click -> ${page.url()}`);
+      console.log(`[scrape] hair schedule warmup -> ${page.url()}`);
+    } else {
+      diag.push(`hair: schedule link not found (url=${page.url()})`);
+      console.log(`[scrape] hair schedule link not found (url=${page.url()})`);
+    }
+  } catch (_e) {
+    /* best-effort: 失敗しても日付ループの直接 goto を試す */
+  }
+
   for (let i = 0; i < MAX_DAYS; i++) {
     const ymd = dates[i];
     let schedUrl;
@@ -937,6 +962,31 @@ async function scrapeBookings(page, opts = {}) {
   const months = Number.isFinite(opts.months) ? opts.months : 3;
   const range = defaultBookingDateRange(months);
   const diag = [];
+
+  // グループアカウント(1ログイン複数サロン)はログイン直後 /CNC/groupTop/ (サロン一覧)に
+  // 居る。対象サロンを選んで店舗文脈(/CLP/bt/)に入ってから取得する。未選択のまま
+  // /CLP/bt/schedule/ を開くと session_expired になる(実機 2026-06-28: ADER鯖江=グループ hair)。
+  // 単一店舗(salonId/shopName無し、または groupTop 非該当)では ensureSalonSelected が no-op。
+  if (opts.salonId || opts.shopName) {
+    // グループアカウントはログイン後 warmup(/KLP/top/)に飛ぶとサロン未選択のため
+    // session_expired になる(実機 2026-06-28: ADER鯖江)。warmup 後はページが groupTop で
+    // ないので ensureSalonSelected が no-op になってしまう。明示的に /CNC/groupTop/ へ行き、
+    // 対象サロンを選んで /CLP/bt/ 文脈を確立してから取得する。単一店(salonId無し)は到達しない。
+    try {
+      await page.goto(
+        new URL('/CNC/groupTop/', opts.baseUrl || 'https://salonboard.com/').toString(),
+        { waitUntil: 'domcontentloaded', timeout: 25_000 },
+      );
+    } catch (_e) {
+      /* groupTop 到達失敗時も ensureSalonSelected が現状を判定して理由を返す */
+    }
+    const sel = await ensureSalonSelected(page, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+    }).catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
+    diag.push(`salon-select: ${JSON.stringify(sel)}`);
+    console.log(`[scrape] salon-select ${JSON.stringify(sel)}`);
+  }
 
   // 美容室(hair)はスケジュール画面 (/CLP/bt/schedule/salonSchedule/) から取得する。
   // エステ用の予約一覧フロー(reserveList navigation/検索/抽出)は通さない。

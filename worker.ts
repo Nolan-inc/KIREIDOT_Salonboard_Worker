@@ -1009,8 +1009,12 @@ async function handleJob(job: Job): Promise<void> {
       // 飛ぶ前に管理 TOP を読み込み + 人間らしいマウス/スクロール/待機で Akamai
       // センサーにテレメトリを送り、_abck の信頼を立ててから scrape に入る。
       try {
+        // グループ/hair アカウント(salonId有り)は /KLP/top/ が無効パスで SESSION_EXPIRED に
+        // なり、後続のサロン入場(/CLP/bt/top/)まで壊す(実機 2026-06-28: ADER鯖江)。
+        // warmup 先を group は /CNC/groupTop/ に出し分ける(Akamaiトラスト構築は同様に効く)。
+        const warmupPath = salonId ? "/CNC/groupTop/" : "/KLP/top/";
         await page
-          .goto(new URL("/KLP/top/", baseUrl).toString(), {
+          .goto(new URL(warmupPath, baseUrl).toString(), {
             waitUntil: "domcontentloaded",
             timeout: 30_000,
           })
@@ -1035,7 +1039,7 @@ async function handleJob(job: Job): Promise<void> {
             return "UNKNOWN(" + (document.title || "").slice(0, 30) + ")";
           })
           .catch(() => "?");
-        console.log(`[scrape] warmup /KLP/top/ state=${topState} url=${page.url()}`);
+        console.log(`[scrape] warmup ${warmupPath} state=${topState} url=${page.url()}`);
       } catch {
         /* warmup is best-effort */
       }
@@ -1043,6 +1047,8 @@ async function handleJob(job: Job): Promise<void> {
       const { rows, debug } = await scrapers.scrapeBookings(page, {
         baseUrl,
         genre,
+        salonId,
+        shopName,
         loginId: job.credentials.login_id,
         password: job.credentials.password,
       });
@@ -1784,7 +1790,15 @@ async function tryLogin(
       reason: `session-expired page after login (url=${pageInfo.url})`,
     };
   }
-  if ((pageInfo && pageInfo.hasMgmt) || /\/KLP\//i.test(page.url())) {
+  // グループアカウント(1ログイン複数サロン)はログイン後 /CNC/groupTop/ (サロン一覧) に
+  // 着地する。管理ナビ(予約管理)は無いが認証自体は成功しており、対象サロンは後続フロー
+  // (scrapers.cjs selectSalonIfOnGroupTop) で salon_id を使って選び直し /CLP/bt/ 文脈に入る。
+  // よって groupTop もログイン成功として扱う (実機: ADER鯖江=グループ account で誤判定していた)。
+  if (
+    (pageInfo && pageInfo.hasMgmt) ||
+    /\/KLP\//i.test(page.url()) ||
+    /\/(?:CNC|KLP)\/groupTop/i.test(page.url())
+  ) {
     return { status: "ok" };
   }
   return {
