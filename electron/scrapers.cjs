@@ -568,7 +568,7 @@ async function applyBookingDateFilter(page, { fromStr, toStr }, { diag } = {}) {
           .then(() => true)
           .catch(() => false);
         if (!resultVisible) report('result table not visible after submit (該当0件 or 結果ページ未到達)');
-        await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
         report(`clicked submit: ${sel}`);
         await snapshot('after-submit');
         // 検索後の結果テーブル行数も簡易ログ
@@ -853,7 +853,7 @@ async function _scrapeHairBookingsLegacy(page, opts = {}) {
       await searchBtn.click({ timeout: 8_000 }).catch(() => {});
       // ナビゲーション完了をゆるく待つ (load → networkidle、いずれもタイムアウト無視)。
       await page.waitForLoadState('load', { timeout: 20_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       await page.waitForTimeout(800);
       diag.push('hair: 検索する クリック');
     } else {
@@ -979,7 +979,7 @@ async function scrapeBookings(page, opts = {}) {
     }
     if (!_ok) throw new Error(`reserveList unreachable after 5 tries: ${_lastErr}`);
   }
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // 予約一覧に到達できているかの即時診断 (検出0 の原因切り分け用)。
   // landing が login / 空ページ / interstitial だと search 以前に分かる。
@@ -1048,7 +1048,7 @@ async function scrapeBookings(page, opts = {}) {
       diag.push(
         `page sizes -> ${pageSizeChanged.map((p) => `${p.name}=${p.value}`).join(', ')}`,
       );
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       // 件数を変えたら再検索が必要なフォームもあるので、もう一度「検索する」を押す
       const reSearch = page
         .locator('a:has-text("検索する"), a.common-CNCcommon__primaryBtn:has-text("検索")')
@@ -1059,7 +1059,7 @@ async function scrapeBookings(page, opts = {}) {
             page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
             reSearch.click({ timeout: 3000 }),
           ]);
-          await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
           diag.push('re-searched after page size change');
         } catch (_e) {
           /* ignore */
@@ -1147,7 +1147,7 @@ async function scrapeBookings(page, opts = {}) {
           page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
           loc.click({ timeout: 3000 }),
         ]);
-        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
         advanced = true;
         break;
       } catch (_e) {
@@ -1170,7 +1170,7 @@ async function scrapeBookings(page, opts = {}) {
       }, pageNum + 1);
       if (jumped) {
         await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
         advanced = true;
         diag.push(`page ${pageNum}: jumped to ${pageNum + 1} via number link`);
       }
@@ -1279,7 +1279,7 @@ async function enrichDurationsFromSchedule(page, rows, baseUrl) {
       const u = new URL('/KLP/schedule/salonSchedule/', base);
       u.searchParams.set('date', ymd);
       await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       const blocks = await page.evaluate(() => {
         const out = [];
         // スタッフ列ヘッダの external_id 順
@@ -1679,7 +1679,7 @@ async function scrapeMenus(page, opts = {}) {
     return scrapeStyles(page, opts);
   }
   await page.goto(MENU_EDIT_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   const raw = await page.evaluate(() => {
     // name="frmMenuEditMenuDetailList[N].field" の N とフィールドを引く
@@ -1742,7 +1742,7 @@ const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
 
 async function scrapeCoupons(page) {
   await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // 一覧テーブルが描画されるまで少し待つ (couponId hidden が現れるか、最大8秒)
   await page
     .waitForSelector('input[name^="frmCouponListDto"]', { timeout: 8_000 })
@@ -1814,7 +1814,7 @@ async function scrapeCoupons(page) {
       // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
       if (!page.url().includes('/CNK/draft/couponList')) {
         await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       }
       // couponEditForm に couponId をセットして submit
       const submitted = await page.evaluate((couponId) => {
@@ -2003,12 +2003,12 @@ async function findReserveIdForBooking(page, target, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   try {
     await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     // 対象日に絞って検索 (その日だけ)
     const y = target.yyyymmdd;
     const fromStr = `${y.slice(0, 4)}-${y.slice(4, 6)}-${y.slice(6, 8)}`;
     await applyBookingDateFilter(page, { fromStr, toStr: fromStr }, {});
-    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
     const items = await extractBookingItemsFromCurrentPage(page);
     const wantStaff = (target.staffExt || '').toUpperCase();
@@ -3206,7 +3206,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const okExisting = (reserveId) => ({
       status: 'ok',
       externalId: reserveId,
-      detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+      detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
       confirmed: {
         confirmed_customer_name: p.customer_name ?? null,
         confirmed_staff_name: p.staff_name ?? null,
@@ -3814,7 +3814,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         return {
           status: 'ok',
           externalId: recovered,
-          detailUrl: `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
           confirmed,
           recovered: true,
         };
@@ -3843,7 +3843,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
-      detailUrl = detailUrl || `${baseUrl.replace(/\/$/, '')}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+      detailUrl = detailUrl || `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
     }
   }
 
@@ -3967,7 +3967,7 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     await yesBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
     if ((await yesBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         yesBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmClicked = true;
@@ -4151,13 +4151,13 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     await finalBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
     if ((await finalBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmClicked = true;
       await page.waitForTimeout(1500);
     } else {
-      await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
   } finally {
     page.off('dialog', onDialog);
@@ -4203,12 +4203,12 @@ const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
  */
 async function scrapeStylists(page, opts = {}) {
   await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
   const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
   if (sel.selected) {
     await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   }
 
   const raw = await page.evaluate(() => {
@@ -4289,14 +4289,14 @@ async function scrapeStyles(page, opts = {}) {
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
     // 1ページ目: グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
     if (pageNum === 1) {
       const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
       if (sel.selected) {
         await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       }
     }
 
@@ -4435,12 +4435,12 @@ async function scrapePhotoGallery(page, opts = {}) {
   let url;
   try { url = new URL('/CNK/draft/photoGalleryEdit', 'https://salonboard.com').toString(); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
   const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
   if (sel.selected) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   }
 
   const pageData = await page.evaluate(() => {
@@ -4526,7 +4526,7 @@ async function scrapePhotoGallery(page, opts = {}) {
  */
 async function scrapeEquipment(page, opts = {}) {
   await page.goto(EQUIP_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   const raw = await page.evaluate(() => {
     function val(el) {
@@ -4596,7 +4596,7 @@ async function scrapeSalonInfo(page, opts = {}) {
       timeout: 30_000,
     })
     .catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   const data = await page.evaluate(() => {
     const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const val = (name) => {
@@ -4684,7 +4684,7 @@ async function scrapeStaff(page, opts = {}) {
     return scrapeStylists(page, opts);
   }
   await page.goto(STAFF_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // ----------------------------------------------------------------
   // SalonBoard 「スタッフ掲載情報一覧」の DOM 仕様 (確認済み):
@@ -5238,7 +5238,7 @@ async function postBlogViaForm(page, payload, opts = {}) {
   let formUrl;
   try { formUrl = new URL('/KLP/blog/blog/', baseUrl).toString(); } catch (_e) { formUrl = BLOG_FORM_URL; }
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -5396,7 +5396,7 @@ async function postBlogViaForm(page, payload, opts = {}) {
       return fail(`ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
     await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
       confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
     ]);
     await page.waitForTimeout(1500);
@@ -5411,7 +5411,7 @@ async function postBlogViaForm(page, payload, opts = {}) {
     await finalBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
     if ((await finalBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmed = true;
@@ -5490,7 +5490,7 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
       : new URL(`/KLP/review/reviewReply/?reviewId=${encodeURIComponent(reviewId)}`, baseUrl).toString();
 
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -5534,7 +5534,7 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
       return fail(`口コミ返信の「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
     await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
       confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
     ]);
     await page.waitForTimeout(1500);
@@ -5551,7 +5551,7 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
     await finalBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
     if ((await finalBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmed = true;
@@ -5582,7 +5582,7 @@ async function scrapeBlogs(page, opts = {}) {
   // 詳細ページから本文を取得する最大件数 (順次アクセスのため負荷に注意)
   const maxDetails = Number.isFinite(opts.maxDetails) ? opts.maxDetails : 60;
   await page.goto(BLOG_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // ----------------------------------------------------------------
   // SalonBoard ブログ一覧の DOM 仕様 (確認済み):
@@ -5764,7 +5764,7 @@ async function scrapeBlogs(page, opts = {}) {
   for (const r of targets) {
     try {
       await page.goto(r.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       const detail = await page.evaluate(() => {
         function txt(el) {
           return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : '';
@@ -5868,7 +5868,7 @@ async function scrapeCustomerDetails(page, options = {}) {
 
   // 既に予約一覧ページが開かれている前提だが、念のため遷移
   await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // 予約一覧から顧客詳細リンク URL を全部集める
   const customerLinks = await page.evaluate(() => {
@@ -5902,7 +5902,7 @@ async function scrapeCustomerDetails(page, options = {}) {
         return u.toString();
       }, item.href);
       await page.goto(detail, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
       const data = await page.evaluate(() => {
         function txt(el) {
@@ -5990,7 +5990,7 @@ const SCHEDULE_URL = 'https://salonboard.com/KLP/schedule/salonSchedule/';
 
 async function scrapeShifts(page) {
   await page.goto(SCHEDULE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   const raw = await page.evaluate(() => {
     function txt(el) {
@@ -6138,7 +6138,7 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
   let listUrl;
   try { listUrl = new URL('/KLP/blog/blogList/', baseUrl).toString(); } catch (_e) { listUrl = BLOG_LIST_URL; }
   await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -6196,7 +6196,7 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
     await yesBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
     if ((await yesBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         yesBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmClicked = true;
@@ -6219,7 +6219,7 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
   let stillPresent = true;
   try {
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     stillPresent = await page.evaluate((id) => {
       const hit = (sel) => Array.from(document.querySelectorAll(sel)).some((a) => (a.getAttribute('href') || '').includes(id));
       return hit('a[href*="blogId="]') || hit('a.mod_btn_delete_01');
@@ -6310,7 +6310,7 @@ async function ensureSalonSelected(page, opts = {}) {
     beforeUrl,
     { timeout: 15_000 },
   ).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   if (/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
     return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
@@ -6445,7 +6445,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   let formUrl;
   try { formUrl = new URL('/CNK/draft/photoGalleryEdit', baseUrl).toString(); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直してから入り直す。
   {
@@ -6456,7 +6456,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
     }
     if (sel.selected) {
       await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 12_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
   }
 
@@ -6565,7 +6565,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
       return fail(`フォトギャラリーの「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
     await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
       regBtn.click({ timeout: 12_000 }).catch(() => {}),
     ]);
     clickedRegister = true;
@@ -6574,7 +6574,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
     const finalBtn = page.locator('a:has-text("登録する"):visible, a.accept:visible, input[type="submit"][value*="登録"]:visible, img.jscButtonRegister:visible').first();
     if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       await page.waitForTimeout(1200);
@@ -6807,7 +6807,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   try {
     const listUrl = new URL('/CNB/draft/styleList/', baseUrl).toString();
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直す。
     const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
     if (!sel.ok) {
@@ -6817,7 +6817,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     if (sel.selected) {
       // サロン選択後にスタイル一覧へ入り直す。
       await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
   } catch (_e) { /* noop */ }
 
@@ -6829,7 +6829,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   const addBtn = page.locator('a[onclick*="addStyle"], a:has(img[alt="スタイル新規追加"])').first();
   if ((await addBtn.count().catch(() => 0)) > 0) {
     await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {}),
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
       addBtn.click({ timeout: 10_000 }).catch(() => {}),
     ]);
     await page.waitForTimeout(800);
@@ -6837,7 +6837,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     // ボタンが無ければ styleEdit に直接遷移を試みる。
     try {
       await page.goto(new URL('/CNB/draft/styleEdit/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     } catch (_e) { /* noop */ }
   }
 
@@ -7036,12 +7036,12 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     ).first();
     if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
       await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {}),
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       await page.waitForTimeout(1200);
     } else {
-      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
   } finally {
     page.off('dialog', onDialog);
@@ -7524,7 +7524,7 @@ async function scrapeReviews(page, opts = {}) {
 
   for (let i = 0; i < maxPages; i++) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     await page.waitForSelector('table.mod_table03', { timeout: 8_000 }).catch(() => {});
     visited++;
 
@@ -7640,6 +7640,701 @@ async function scrapeReviews(page, opts = {}) {
   };
 }
 
+/**
+ * 設備 (席/ベッド) を SalonBoard に書き込む。/CNK/set/equipList/ のインラインフォームで
+ * external_id (equipmentId) 一致行を更新。無ければ「追加」して新規作成。
+ * payload: { external_id?, name, max_rsv_num?, sort_no? }
+ * opts.enablePush=false → 確認のみ (登録ボタンを押さない)。
+ */
+async function pushEquipmentViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const extId = String(p.external_id || p.salonboard_equipment_external_id || p.equipment_id || '').trim();
+  const name = String(p.name || p.equipment_name || '').trim();
+  const maxRsv = p.max_rsv_num ?? p.maxRsvNum ?? null;
+  const sortNo = p.sort_no ?? p.sortNo ?? null;
+  if (!extId && !name) return fail('設備の external_id も name もありません', 'UNKNOWN_ERROR', true);
+
+  await page.goto(new URL('/CNK/set/equipList/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if ((await page.locator('form#equipListForm').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'equipment', 'no_form', { diagnostics: { url: page.url() } });
+    return fail(`設備編集フォーム (equipListForm) に到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  const applied = await page.evaluate(({ extId, name, maxRsv, sortNo }) => {
+    const setVal = (el, v) => {
+      if (!el) return false;
+      el.value = String(v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    let idx = -1;
+    const hids = document.querySelectorAll('input[type="hidden"][name^="frmEquipListDtoList"][name$=".equipmentId"]');
+    if (extId) {
+      for (const h of hids) {
+        if (h.value === extId) { const m = h.name.match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
+      }
+    }
+    let created = false;
+    if (idx < 0) {
+      if (typeof addRowEquipment === 'function') { try { addRowEquipment(); created = true; } catch (_e) { /* noop */ } }
+      const names = document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]');
+      idx = names.length - 1;
+    }
+    if (idx < 0) return { ok: false, reason: 'row_not_found' };
+    const byField = (field) =>
+      document.querySelector(`[name="frmEquipListDtoList[${idx}].${field}"]`) ||
+      document.getElementById(`frmEquipListDtoList${idx}.${field}`);
+    const r = { idx, created };
+    if (name) r.name = setVal(byField('equipmentName'), name);
+    if (maxRsv != null) {
+      const sel = byField('maxRsvNum');
+      if (sel) { sel.value = String(maxRsv); sel.dispatchEvent(new Event('change', { bubbles: true })); r.maxRsv = sel.value === String(maxRsv); }
+    }
+    if (sortNo != null) r.sortNo = setVal(byField('sortNo'), sortNo);
+    return { ok: true, ...r };
+  }, { extId, name, maxRsv, sortNo });
+
+  if (!applied || !applied.ok) {
+    const cap = await captureScrapeDebug(page, 'equipment', 'no_row', { diagnostics: { applied } });
+    return fail(`設備行を特定/作成できませんでした (${applied?.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // dirty state を確実に立てるため locator.fill で実入力し直す (JS の value 代入だけでは
+  // SalonBoard が変更を検知せず submit に含めないことがある)。
+  if (name && applied.idx != null && applied.idx >= 0) {
+    const nameSel = `[name="frmEquipListDtoList[${applied.idx}].equipmentName"]`;
+    await page.fill(nameSel, '', { timeout: 6000 }).catch(() => {});
+    await page.fill(nameSel, name, { timeout: 6000 }).catch(() => {});
+    await page.locator(nameSel).first().dispatchEvent('change').catch(() => {});
+  }
+
+  if (!enablePush) return { status: 'confirm_only', confirmed: applied };
+
+  const beforeUrl = page.url();
+  const dialogMsgs = [];
+  const onDialog = async (d) => { dialogMsgs.push(String(d.message() || '').slice(0, 120)); try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    const btn = page.locator('a#registBtn').first();
+    if ((await btn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'equipment', 'no_regist', { diagnostics: { url: page.url() } });
+      return fail(`設備の登録ボタン (#registBtn) が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      btn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(2500);
+    // 送信直後の実ページを捕捉 (確認HTMLページの有無を判定)
+    const afterClickUrl = page.url();
+    const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ').slice(0, 400);
+    // 確認HTMLページ (本文に「確認/設定してよろしい/以下の内容」) で最終ボタンが残っていれば押下
+    let finalClicked = false;
+    const finalBtn = page.locator('a:has-text("設定する"):visible, a:has-text("登録する"):visible, a:has-text("この内容で"):visible, a.accept:visible, input[type="submit"][value*="設定"], input[type="submit"][value*="登録"]').first();
+    if (/確認|設定してよろしい|以下の内容|この内容で/.test(afterBody) && (await finalBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      finalClicked = true;
+      await page.waitForTimeout(2000);
+    }
+    const postFinalUrl = page.url();
+    const postFinalBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ').slice(0, 250);
+    const dumpCap = await captureScrapeDebug(page, 'equipment', 'post_submit', { diagnostics: { afterClickUrl, afterBody, finalClicked, postFinalUrl, postFinalBody } });
+    // 送信後に一覧へ戻し、対象設備名が新値で保存されているか再確認
+    await page.goto(new URL('/CNK/set/equipList/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const reRead = await page.evaluate((wantName) => {
+      const el = Array.from(document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]')).find((x) => (x.value || '') === wantName);
+      const all = Array.from(document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]')).map((x) => x.value);
+      return { persisted: !!el, names: all };
+    }, name).catch(() => ({ persisted: false, names: [] }));
+    page.off('dialog', onDialog);
+    const diag = { dialogMsgs, beforeUrl, afterClickUrl, afterBody, finalClicked, postFinalUrl, postFinalBody, dumpCap, reRead };
+    if (name && !reRead.persisted) {
+      const cap = await captureScrapeDebug(page, 'equipment', 'not_persisted', { diagnostics: diag });
+      return { status: 'failed', reason: `設備名が保存されませんでした (dialog=${JSON.stringify(dialogMsgs)}, names=${JSON.stringify(reRead.names)}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+    }
+    return { status: 'ok', externalId: extId || null, confirmed: { ...applied, diag } };
+  } finally {
+    page.off('dialog', onDialog);
+  }
+}
+
+/**
+ * スタッフの掲載/並び順/PickUp を SalonBoard に書き込む。/CNK/draft/staffList のインライン。
+ * external_id (staffId) 一致行を更新 → 「変更内容を登録する」。
+ * payload: { external_id, is_published?|present_flg?, sort_no?, pickup? }
+ * 注: 氏名/職種/キャッチコピー等の詳細編集は staffEdit ページが別途必要 (本実装は一覧の掲載/順序)。
+ */
+async function pushStaffViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const extId = String(p.external_id || p.salonboard_staff_external_id || p.staff_id || '').trim();
+  if (!extId) return fail('スタッフの external_id (staffId) がありません', 'UNKNOWN_ERROR', true);
+  const presentFlg = p.present_flg ?? (p.is_published == null ? null : (p.is_published ? 1 : 0));
+  const sortNo = p.sort_no ?? p.sortNo ?? null;
+  const pickup = p.pickup ?? p.pickup_flg ?? null;
+
+  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if ((await page.locator('input[name^="frmStaffListStafferDtoList"][name$=".staffId"]').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'staff', 'no_form', { diagnostics: { url: page.url() } });
+    return fail(`スタッフ一覧フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  const applied = await page.evaluate(({ extId, presentFlg, sortNo, pickup }) => {
+    let idx = -1;
+    const hids = document.querySelectorAll('input[type="hidden"][name^="frmStaffListStafferDtoList"][name$=".staffId"]');
+    for (const h of hids) {
+      if (h.value === extId) { const m = h.name.match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
+    }
+    if (idx < 0) return { ok: false, reason: 'staff_not_found' };
+    const byField = (f) => document.querySelector(`[name="frmStaffListStafferDtoList[${idx}].${f}"]`);
+    const r = { idx };
+    if (sortNo != null) { const el = byField('sortNo'); if (el) { el.value = String(sortNo); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); r.sortNo = true; } }
+    if (presentFlg != null) { const el = byField('presentFlg'); if (el) { el.value = String(presentFlg); r.presentFlg = true; } }
+    if (pickup != null) { const cb = byField('pickupFlg'); if (cb) { cb.checked = !!pickup; cb.dispatchEvent(new Event('change', { bubbles: true })); r.pickup = true; } }
+    return { ok: true, ...r };
+  }, { extId, presentFlg, sortNo, pickup });
+
+  if (!applied || !applied.ok) {
+    const cap = await captureScrapeDebug(page, 'staff', 'no_row', { diagnostics: { applied } });
+    return fail(`スタッフ行を特定できませんでした (${applied?.reason || ''}, capture=${cap || '?'})`, 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+  // sortNo は locator.fill で実入力 (dirty state を確実に立てる)
+  if (sortNo != null && applied.idx != null && applied.idx >= 0) {
+    const sel = `[name="frmStaffListStafferDtoList[${applied.idx}].sortNo"]`;
+    await page.fill(sel, '', { timeout: 6000 }).catch(() => {});
+    await page.fill(sel, String(sortNo), { timeout: 6000 }).catch(() => {});
+  }
+  if (!enablePush) return { status: 'confirm_only', confirmed: applied };
+
+  let dialogAccepted = false;
+  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    // 並び順は staffSortForm(doSort)、掲載は staffPresentForm(doPresent) を直接 submit する。
+    const formId = sortNo != null ? 'staffSortForm' : (presentFlg != null ? 'staffPresentForm' : 'staffSortForm');
+    const hasForm = await page.evaluate((fid) => !!document.getElementById(fid), formId).catch(() => false);
+    if (!hasForm) {
+      const cap = await captureScrapeDebug(page, 'staff', 'no_form2', { diagnostics: { url: page.url(), formId } });
+      return fail(`スタッフ保存フォーム (${formId}) が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      page.evaluate((fid) => { const f = document.getElementById(fid); if (f) f.submit(); }, formId),
+    ]);
+    await page.waitForTimeout(1800);
+    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("設定する"):visible').first();
+    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1500); }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
+  // 送信後に staffList を再取得し、sortNo が保存されているか確認
+  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  const reRead = await page.evaluate(({ extId, wantSort }) => {
+    let idx = -1;
+    for (const h of document.querySelectorAll('input[type="hidden"][name^="frmStaffListStafferDtoList"][name$=".staffId"]')) {
+      if (h.value === extId) { const m = (h.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
+    }
+    if (idx < 0) return { persisted: false, current: null };
+    const el = document.querySelector(`[name="frmStaffListStafferDtoList[${idx}].sortNo"]`);
+    const cur = el ? (el.value || '') : null;
+    return { persisted: wantSort == null || cur === String(wantSort), current: cur };
+  }, { extId, wantSort: sortNo }).catch(() => ({ persisted: false, current: null }));
+  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
+  if (sortNo != null && !reRead.persisted) {
+    const cap = await captureScrapeDebug(page, 'staff', 'not_persisted', { diagnostics: diag });
+    return { status: 'failed', reason: `スタッフの並び順が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
+}
+
+/**
+ * メニューを SalonBoard に書き込む。/CNK/draft/menuEdit のインライン。
+ * menuId 一致行 (無ければ menuName 一致) を更新 → 「登録」(a.jsc_menuEdit_btn_reg)。
+ * payload: { external_id?(menuId), name, price?, duration_min?, sort_no? }
+ */
+async function pushMenuViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const extId = String(p.external_id || p.menu_id || '').trim();
+  const name = String(p.name || p.menu_name || '').trim();
+  if (!extId && !name) return fail('メニューの external_id も name もありません', 'UNKNOWN_ERROR', true);
+  const price = p.price ?? null;
+  const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
+  const sortNo = p.sort_no ?? p.sortNo ?? null;
+
+  await page.goto(new URL('/CNK/draft/menuEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if ((await page.locator('form#menuEditForm').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'menu', 'no_form', { diagnostics: { url: page.url() } });
+    return fail(`メニュー編集フォーム (menuEditForm) に到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  const applied = await page.evaluate(({ extId, name, price, dur, sortNo }) => {
+    const setVal = (el, v) => { if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    const idxOf = (el) => { const m = (el.name || '').match(/\[(\d+)\]/); return m ? parseInt(m[1], 10) : -1; };
+    let idx = -1;
+    if (extId) {
+      for (const h of document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]')) {
+        if (h.value === extId) { idx = idxOf(h); break; }
+      }
+    }
+    if (idx < 0 && name) {
+      for (const el of document.querySelectorAll('[name^="frmMenuEditMenuDetailList"][name$=".menuName"]')) {
+        if ((el.value || '').trim() === name) { idx = idxOf(el); break; }
+      }
+    }
+    if (idx < 0) return { ok: false, reason: 'menu_not_found' };
+    const byField = (f) => document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].${f}"]`);
+    const r = { idx };
+    if (name) r.name = setVal(byField('menuName'), name);
+    if (price != null) r.price = setVal(byField('price'), price);
+    if (dur != null) r.dur = setVal(byField('sejyutsuAimTime'), dur);
+    if (sortNo != null) r.sortNo = setVal(byField('sortNo'), sortNo);
+    return { ok: true, ...r };
+  }, { extId, name, price, dur, sortNo });
+
+  if (!applied || !applied.ok) {
+    const cap = await captureScrapeDebug(page, 'menu', 'no_row', { diagnostics: { applied } });
+    return fail(`メニュー行を特定できませんでした (${applied?.reason || ''}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  // dirty state を確実に立てるため text 系は locator.fill で実入力し直す。
+  if (applied.idx != null && applied.idx >= 0) {
+    const base = `[name="frmMenuEditMenuDetailList[${applied.idx}].`;
+    if (name) { await page.fill(`${base}menuName"]`, '', { timeout: 6000 }).catch(() => {}); await page.fill(`${base}menuName"]`, name, { timeout: 6000 }).catch(() => {}); }
+    if (price != null) { await page.fill(`${base}price"]`, String(price), { timeout: 6000 }).catch(() => {}); }
+  }
+  if (!enablePush) return { status: 'confirm_only', confirmed: applied };
+
+  let dialogAccepted = false;
+  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    const btn = page.locator('a.jsc_menuEdit_btn_reg, a#registBtn, a:has-text("登録する")').first();
+    if ((await btn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'menu', 'no_regist', { diagnostics: { url: page.url() } });
+      return fail(`メニューの登録ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      btn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible').first();
+    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
+  // 送信後に menuEdit を再取得し、menuId 行の名前が新値で保存されているか確認
+  await page.goto(new URL('/CNK/draft/menuEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  const reRead = await page.evaluate(({ extId, wantName }) => {
+    let idx = -1;
+    for (const h of document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]')) {
+      if (h.value === extId) { const m = (h.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
+    }
+    if (idx < 0) return { persisted: false, current: null };
+    const el = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuName"]`);
+    const cur = el ? (el.value || '') : null;
+    return { persisted: cur === wantName, current: cur };
+  }, { extId, wantName: name }).catch(() => ({ persisted: false, current: null }));
+  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
+  if (name && !reRead.persisted) {
+    const cap = await captureScrapeDebug(page, 'menu', 'not_persisted', { diagnostics: diag });
+    return { status: 'failed', reason: `メニュー名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  return { status: 'ok', externalId: extId || null, confirmed: { ...applied, diag } };
+}
+
+/**
+ * クーポンを SalonBoard に書き込む。/CNK/draft/couponList → #couponEditForm に couponId を
+ * セットして submit → couponEdit (frmCouponEditCnkDto.*) を更新 → 登録。
+ * payload: { external_id(couponId), name?, price?, duration_min?, content? }
+ */
+async function pushCouponViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const extId = String(p.external_id || p.coupon_id || '').trim();
+  if (!extId) return fail('クーポンの external_id (couponId) がありません', 'UNKNOWN_ERROR', true);
+  const name = String(p.name || p.coupon_name || '').trim();
+  const price = p.price ?? null;
+  const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
+  const content = p.content ?? p.content_explanation ?? null;
+
+  await page.goto(new URL('/CNK/draft/couponList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  // couponEditForm に couponId をセットして submit (read scraper と同手順)
+  const submitted = await page.evaluate((couponId) => {
+    const form = document.querySelector('#couponEditForm');
+    if (!form) return false;
+    let idInput = form.querySelector('input[name="couponId"]');
+    if (!idInput) { idInput = document.createElement('input'); idInput.type = 'hidden'; idInput.name = 'couponId'; form.appendChild(idInput); }
+    idInput.value = couponId;
+    form.submit();
+    return true;
+  }, extId).catch(() => false);
+  if (!submitted) {
+    const cap = await captureScrapeDebug(page, 'coupon', 'no_list_form', { diagnostics: { url: page.url() } });
+    return fail(`クーポン一覧の couponEditForm が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  await page.waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 }).catch(() => {});
+  if ((await page.locator('input[name="frmCouponEditCnkDto.couponName"]').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'coupon', 'no_edit_form', { diagnostics: { url: page.url() } });
+    return fail(`クーポン編集ページに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  const applied = await page.evaluate(({ name, price, dur, content }) => {
+    const setVal = (sel, v) => { const el = document.querySelector(sel); if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    const r = {};
+    if (name) r.name = setVal('input[name="frmCouponEditCnkDto.couponName"]', name);
+    if (price != null) r.price = setVal('input[name="frmCouponEditCnkDto.price"]', price);
+    if (dur != null) r.dur = setVal('input[name="frmCouponEditCnkDto.sejyutsuAimTime"]', dur);
+    if (content != null) r.content = setVal('textarea[name="frmCouponEditCnkDto.contentExplanation"]', content);
+    return { ok: true, ...r };
+  }, { name, price, dur, content });
+
+  // dirty state: couponName を locator.fill で実入力し直す
+  if (name) {
+    await page.fill('input[name="frmCouponEditCnkDto.couponName"]', '', { timeout: 6000 }).catch(() => {});
+    await page.fill('input[name="frmCouponEditCnkDto.couponName"]', name, { timeout: 6000 }).catch(() => {});
+  }
+
+  if (!enablePush) return { status: 'confirm_only', confirmed: applied };
+
+  let dialogAccepted = false;
+  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    const btn = page.locator('a#registBtn, a.jsc_couponEdit_btn_reg, a[onclick*="regist" i]:visible, a[onclick*="doRegist" i]:visible, a[onclick*="submit" i]:visible, img[alt*="登録"], input[type="image"][alt*="登録"], input[type="submit"][value*="登録"], input[type="button"][value*="登録"], a:has-text("確認する"):visible, a:has-text("登録する"):visible').first();
+    if ((await btn.count().catch(() => 0)) === 0) {
+      const btns = await page.evaluate(() => Array.from(document.querySelectorAll('a,input,img,button')).filter((e) => /登.?録|設定|確認|reflect/.test((e.textContent || '') + (e.getAttribute('alt') || '') + (e.getAttribute('value') || '') + (e.getAttribute('onclick') || ''))).slice(0, 12).map((e) => ({ tag: e.tagName, t: (e.textContent || '').trim().slice(0, 12), alt: e.getAttribute('alt'), oc: (e.getAttribute('onclick') || '').slice(0, 50), id: e.id, cls: (e.className || '').slice(0, 30) }))).catch(() => []);
+      const cap = await captureScrapeDebug(page, 'coupon', 'no_regist', { diagnostics: { url: page.url(), btns } });
+      return { status: 'failed', reason: `クーポンの登録ボタンが見つかりません (capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, btns };
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      btn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a#regist:visible, a:has-text("登録する"):visible, a:has-text("登録・反映"):visible').first();
+    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
+  // 送信後に couponEdit を再取得し couponName が保存されているか確認 (couponList→couponEditForm submit)
+  await page.goto(new URL('/CNK/draft/couponList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await page.evaluate((couponId) => {
+    const form = document.querySelector('#couponEditForm');
+    if (!form) return;
+    let i = form.querySelector('input[name="couponId"]');
+    if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'couponId'; form.appendChild(i); }
+    i.value = couponId; form.submit();
+  }, extId).catch(() => {});
+  await page.waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 }).catch(() => {});
+  const reRead = await page.evaluate((wantName) => {
+    const el = document.querySelector('input[name="frmCouponEditCnkDto.couponName"]');
+    const cur = el ? (el.value || '') : null;
+    return { persisted: cur === wantName, current: cur };
+  }, name).catch(() => ({ persisted: false, current: null }));
+  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
+  if (name && !reRead.persisted) {
+    const cap = await captureScrapeDebug(page, 'coupon', 'not_persisted', { diagnostics: diag });
+    return { status: 'failed', reason: `クーポン名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
+}
+
+/**
+ * 勤務パターン（早番/遅番など）を SalonBoard に登録する。
+ * 画面: /KLP/set/workPatternSetup/「勤務パターン登録」。登録フォーム行(select を含む tr)に
+ * シフト名称/短縮名/設定時間(開始H:M〜終了H:M)/備考 を入力し「追加する」。登録済み一覧
+ * (input[name=deleteShiftIds] を持つ行) に同名があればスキップ(重複防止)。
+ * payload: { patterns: [{ name, short_name, start:"HH:MM", end:"HH:MM", note? }] } または単一 {name,...}
+ */
+async function pushWorkPatternViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const patterns = Array.isArray(p.patterns) ? p.patterns : (p.name ? [p] : []);
+  if (patterns.length === 0) return fail('勤務パターンが指定されていません (patterns)', 'UNKNOWN_ERROR', true);
+
+  // 勤務パターン登録画面へ到達 (scrapeShiftPatterns と同じロジック)
+  const isReached = async () =>
+    (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0 ||
+    (await page.locator('tr:has(select)').count().catch(() => 0)) > 0;
+  let reached = false;
+  for (const path of ['/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
+    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    if (await isReached()) { reached = true; break; }
+  }
+  if (!reached) {
+    for (const sp of ['/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
+      await page.goto(new URL(sp, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      const link = page.locator('a:has-text("勤務パターン"), a[href*="workPatternSetup"]').first();
+      if ((await link.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+          link.click({ timeout: 10_000 }).catch(() => {}),
+        ]);
+      }
+      if (await isReached()) { reached = true; break; }
+    }
+  }
+  if (!reached) return fail(`勤務パターン登録画面に到達できませんでした (url=${page.url().replace('https://salonboard.com', '')})`, 'SHIFT_PATTERNS_UNREACHABLE', true);
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+
+  // 登録済み判定: 名称一致 OR 設定時間(開始AND終了)一致。Admin プリセット名(例 平日早番)と
+  // SB 既存名(例 平日早)が異なっても、時間一致なら同一パターンとみなし重複登録を防ぐ。
+  const tableHas = (wantName, wantStart, wantEnd) => page.evaluate(({ n, s, e }) => {
+    for (const b of document.querySelectorAll('input[name="deleteShiftIds"]')) {
+      let tr = b; while (tr && tr.tagName !== 'TR') tr = tr.parentElement;
+      if (!tr) continue;
+      const t = (tr.innerText || '');
+      if (n && t.includes(n)) return true;
+      if (s && e && t.includes(s) && t.includes(e)) return true;
+    }
+    return false;
+  }, { n: wantName, s: wantStart, e: wantEnd }).catch(() => false);
+
+  const results = [];
+  for (const pat of patterns) {
+    const name = String(pat.name || '').trim();
+    const shortName = String(pat.short_name || pat.shortName || '').trim();
+    const start = String(pat.start || pat.start_time || '').trim();
+    const end = String(pat.end || pat.end_time || '').trim();
+    if (!name || !/^\d{1,2}:\d{2}$/.test(start) || !/^\d{1,2}:\d{2}$/.test(end)) {
+      results.push({ name, status: 'skipped', reason: 'name/start/end(HH:MM) 不足' });
+      continue;
+    }
+    if (await tableHas(name, start, end)) { results.push({ name, status: 'exists' }); continue; }
+    const [sh, sm] = start.split(':');
+    const [eh, em] = end.split(':');
+
+    const filled = await page.evaluate(({ name, shortName, sh, sm, eh, em, note }) => {
+      // select を含む tr = 登録入力行 (登録済み一覧行は select を持たない)
+      let row = null;
+      for (const tr of document.querySelectorAll('tr')) { if (tr.querySelector('select')) { row = tr; break; } }
+      if (!row) return { ok: false, reason: 'no_input_row' };
+      const texts = Array.from(row.querySelectorAll('input[type="text"], input:not([type]):not([type="checkbox"])'));
+      const selects = Array.from(row.querySelectorAll('select'));
+      const setText = (el, v) => { if (!el) return false; el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+      const setSel = (el, v) => {
+        if (!el) return false;
+        const cands = [v, String(Number(v)), String(v).padStart(2, '0')];
+        const o = Array.from(el.options).find((o) => cands.includes(o.value) || cands.includes((o.textContent || '').trim()));
+        if (!o) return false;
+        el.value = o.value; el.dispatchEvent(new Event('change', { bubbles: true })); return true;
+      };
+      const r = { texts: texts.length, selects: selects.length };
+      r.name = setText(texts[0], name);                       // シフト名称
+      if (shortName) r.short = setText(texts[1], shortName);   // 短縮名
+      if (note && texts[2]) r.note = setText(texts[2], note);  // 備考
+      r.sh = setSel(selects[0], sh); r.sm = setSel(selects[1], sm); // 開始 H:M
+      r.eh = setSel(selects[2], eh); r.em = setSel(selects[3], em); // 終了 H:M
+      return { ok: true, ...r };
+    }, { name, shortName, sh, sm, eh, em, note: String(pat.note || '') });
+
+    if (!filled || !filled.ok) { results.push({ name, status: 'failed', reason: filled?.reason || 'fill_failed', filled }); continue; }
+    // シフト名称を locator.fill で確実に dirty 化
+    const nameLoc = page.locator('tr:has(select) input[type="text"], tr:has(select) input:not([type])').first();
+    await nameLoc.fill('', { timeout: 5000 }).catch(() => {});
+    await nameLoc.fill(name, { timeout: 5000 }).catch(() => {});
+
+    if (!enablePush) { results.push({ name, status: 'confirm_only', confirmed: filled }); continue; }
+
+    let dialogAccepted = false;
+    const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+    page.on('dialog', onDialog);
+    try {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        page.locator('a:has-text("追加する"):visible, input[type="submit"][value*="追加"], input[type="button"][value*="追加"], input[type="image"][alt*="追加"], button:has-text("追加"), a[onclick*="add" i]:visible').first().click({ timeout: 12_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1500);
+      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("追加する"):visible').first();
+      if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
+    } finally {
+      page.off('dialog', onDialog);
+    }
+    const persisted = await tableHas(name);
+    if (!persisted) {
+      const cap = await captureScrapeDebug(page, 'workpattern', 'not_persisted', { diagnostics: { name, dialogAccepted, filled } });
+      results.push({ name, status: 'failed', reason: `勤務パターンが登録一覧に反映されませんでした (capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true });
+    } else {
+      results.push({ name, status: 'ok' });
+    }
+  }
+
+  const anyFail = results.some((r) => r.status === 'failed');
+  const anyOk = results.some((r) => r.status === 'ok' || r.status === 'exists' || r.status === 'confirm_only');
+  return { status: anyFail ? 'failed' : (anyOk ? 'ok' : 'failed'), results };
+}
+
+/**
+ * スタッフの全プロフィールを SalonBoard に書き込む。
+ * 画面: /CNK/draft/staffList の該当行 詳細(onclick=staffEdit('Wxxx')) → /CNK/draft/staffEdit。
+ * 「掲載済みを別スタッフとして上書き登録しない」ため、必ず既存行の編集経路で入る。
+ * 名前/フリガナ/性別/キャッチ/自己紹介/職種/指名 をラベルベースで入力 →「登録」→ reRead。
+ * payload: { external_id, name?, furigana?, gender?('male'|'female'|'男性'|'女性'),
+ *            catch_copy?, bio?, role?, nomination?('可能'|'不可') }
+ */
+async function pushStaffProfileViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const extId = String(p.external_id || p.salonboard_staff_external_id || p.staff_id || '').trim();
+  if (!extId) return fail('スタッフの external_id (staffId) がありません', 'UNKNOWN_ERROR', true);
+  const name = p.name != null ? String(p.name).trim() : null;
+  const furigana = p.furigana ?? p.kana ?? null;
+  const genderRaw = (p.gender ?? '').toString().toLowerCase();
+  const gender = genderRaw === 'male' || genderRaw === 'm' || genderRaw === '男性' || genderRaw === '男' ? '男性'
+    : (genderRaw === 'female' || genderRaw === 'f' || genderRaw === '女性' || genderRaw === '女' ? '女性' : null);
+  const catchCopy = p.catch_copy ?? p.catch ?? null;
+  const bio = p.bio ?? p.self_intro ?? p.introduction ?? null;
+  const role = p.role ?? p.job_type ?? p.position ?? null;
+  const nomination = p.nomination ?? p.shimei ?? null; // '可能' | '不可'
+
+  // staffList → 該当行の staffEdit へ遷移
+  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+
+  // 詳細リンク(onclick に extId を含む a) をクリック。無ければ staffEdit(extId) を直接呼ぶ。
+  const navLink = page.locator(`a[onclick*="${extId}"]`).first();
+  if ((await navLink.count().catch(() => 0)) > 0) {
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}),
+      navLink.click({ timeout: 10_000 }).catch(() => {}),
+    ]);
+  } else {
+    await page.evaluate((id) => { try { if (typeof staffEdit === 'function') staffEdit(id); } catch (_e) { /* noop */ } }, extId).catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
+  }
+  await page.waitForTimeout(800);
+  // staffEdit 到達確認 (名前 or フリガナ ラベルの入力欄)
+  const onEdit = (await page.locator('tr:has(th:has-text("名前")) input, tr:has(th:has-text("フリガナ")) input').count().catch(() => 0)) > 0
+    || /staffEdit/i.test(page.url());
+  if (!onEdit) {
+    const cap = await captureScrapeDebug(page, 'staffprofile', 'no_edit_page', { diagnostics: { url: page.url(), extId } });
+    return fail(`スタッフ編集画面(staffEdit)に到達できませんでした (capture=${cap || '?'})`, 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+
+  // ラベルベースで各欄を入力 (th ラベルと同じ行の入力欄)
+  const fillText = async (label, value) => {
+    if (value == null || value === '') return false;
+    const loc = page.locator(`tr:has(th:has-text("${label}")) input[type="text"], tr:has(th:has-text("${label}")) input:not([type]), tr:has(th:has-text("${label}")) textarea`).first();
+    if ((await loc.count().catch(() => 0)) === 0) return false;
+    await loc.fill('', { timeout: 5000 }).catch(() => {});
+    await loc.fill(String(value), { timeout: 5000 }).catch(() => {});
+    return true;
+  };
+  const applied = {};
+  applied.name = await fillText('名前', name);
+  applied.furigana = await fillText('フリガナ', furigana);
+  applied.catch = await fillText('キャッチ', catchCopy);
+  applied.bio = await fillText('自己紹介', bio);
+  applied.role = await fillText('職種', role);
+  if (gender) {
+    const gloc = page.locator(`tr:has(th:has-text("性別")) input[type="radio"]`);
+    const idx = gender === '男性' ? 0 : 1; // 表示順: 男性, 女性
+    if ((await gloc.count().catch(() => 0)) > idx) { await gloc.nth(idx).check({ timeout: 4000 }).catch(() => {}); applied.gender = true; }
+  }
+  if (nomination != null) {
+    const sloc = page.locator(`tr:has(th:has-text("指名")) select`).first();
+    if ((await sloc.count().catch(() => 0)) > 0) { await sloc.selectOption({ label: String(nomination) }).catch(() => {}); applied.nomination = true; }
+  }
+
+  if (!enablePush) return { status: 'confirm_only', confirmed: applied };
+
+  let dialogAccepted = false;
+  const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    const btn = page.locator('a:has-text("登録"):visible, input[type="submit"][value*="登録"], input[type="image"][alt*="登録"], input[type="button"][value*="登録"], button:has-text("登録")').first();
+    if ((await btn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'staffprofile', 'no_regist', { diagnostics: { url: page.url() } });
+      return fail(`スタッフ編集の登録ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      btn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("OK"):visible').first();
+    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正|文字数).{0,30}/);
+  // reRead: staffEdit を再度開き 名前 が保存されているか
+  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  const re = page.locator(`a[onclick*="${extId}"]`).first();
+  if ((await re.count().catch(() => 0)) > 0) {
+    await Promise.all([page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}), re.click({ timeout: 10_000 }).catch(() => {})]);
+    await page.waitForTimeout(800);
+  }
+  const reRead = await page.evaluate((wantName) => {
+    const loc = document.querySelector('tr input[type="text"]');
+    // 名前ラベル行の最初の入力欄
+    let cur = null;
+    for (const tr of document.querySelectorAll('tr')) {
+      const th = tr.querySelector('th');
+      if (th && (th.textContent || '').includes('名前')) { const i = tr.querySelector('input[type="text"], input:not([type])'); cur = i ? (i.value || '') : null; break; }
+    }
+    return { persisted: wantName == null || cur === wantName, current: cur };
+  }, name).catch(() => ({ persisted: false, current: null }));
+  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
+  if (name && !reRead.persisted) {
+    const cap = await captureScrapeDebug(page, 'staffprofile', 'not_persisted', { diagnostics: diag });
+    return { status: 'failed', reason: `スタッフ名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
@@ -7655,6 +8350,8 @@ module.exports = {
   pushScheduleViaForm,
   deleteScheduleViaForm,
   pushShiftsViaForm,
+  pushWorkPatternViaForm,
+  pushStaffProfileViaForm,
   scrapeShiftPatterns,
   cancelBookingViaForm,
   changeBookingViaForm,
@@ -7662,6 +8359,10 @@ module.exports = {
   deleteBlogViaForm,
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
+  pushEquipmentViaForm,
+  pushStaffViaForm,
+  pushMenuViaForm,
+  pushCouponViaForm,
   scrapePhotoGallery,
   findReserveIdForBooking,
   // テスト用にエクスポート

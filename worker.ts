@@ -62,6 +62,12 @@ type ScrapersModule = {
   postPhotoGalleryViaForm: ScraperFn;
   deleteBlogViaForm: ScraperFn;
   postReviewReplyViaForm: ScraperFn;
+  pushEquipmentViaForm: ScraperFn;
+  pushStaffViaForm: ScraperFn;
+  pushStaffProfileViaForm: ScraperFn;
+  pushMenuViaForm: ScraperFn;
+  pushCouponViaForm: ScraperFn;
+  pushWorkPatternViaForm: ScraperFn;
   // fetch 系 (status ではなく rows/patterns を返す)
   scrapeBookings: (
     page: Page,
@@ -239,6 +245,12 @@ type JobType =
   | "push_photo_gallery"
   | "delete_blog"
   | "push_review_reply"
+  // 設定系 write (KIREIDOT→SB)。SB編集フォームへ書き込む (設備/スタッフ/メニュー/クーポン)。
+  | "push_equipment"
+  | "push_staff"
+  | "push_menu"
+  | "push_coupon"
+  | "push_shift_patterns"
   | "fetch_shift_patterns"
   // 設定系 fetch (クラウド完結/PC引退用に job 化)。worker は既存 scraper を呼び、
   // Admin callback が既存 RPC salonboard_bulk_upsert_* に取込む。
@@ -575,7 +587,18 @@ async function handleJob(job: Job): Promise<void> {
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
   try {
-    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy);
+    // 書込ジョブは residential 経由で実行(既定ON。SB_WRITE_VIA_RESIDENTIAL=0 で無効化)。
+    // 静的ISPが登録フォーム等の深い操作で Akamai ソフトチャレンジを受けハング(240sタイムアウト)
+    // するのを回避。読み(fetch)は静的のまま(住宅は従量課金なので書込のみ住宅へ)。
+    const WRITE_JOBS = new Set([
+      "push_booking", "cancel_booking", "push_shifts", "push_shift_patterns",
+      "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
+      "push_equipment", "push_staff", "push_menu", "push_coupon",
+    ]);
+    const forceResidential =
+      process.env.SB_WRITE_VIA_RESIDENTIAL !== "0" && WRITE_JOBS.has(job.job_type);
+    if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
+    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential);
     if (launch.proxy) {
       console.log(
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
@@ -861,6 +884,43 @@ async function handleJob(job: Job): Promise<void> {
       return;
     }
 
+    // 設定系 write (KIREIDOT→SB): 設備/スタッフ/メニュー/クーポン/勤務パターンの編集フォームへ書き込む。
+    if (
+      job.job_type === "push_equipment" ||
+      job.job_type === "push_staff" ||
+      job.job_type === "push_menu" ||
+      job.job_type === "push_coupon" ||
+      job.job_type === "push_shift_patterns"
+    ) {
+      const p = job.payload as Record<string, unknown>;
+      const wGenre =
+        (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      // push_staff: プロフィール欄(名前/フリガナ/キャッチ/自己紹介/職種/性別/指名)を含むなら
+      // staffEdit(全プロフィール)へ、そうでなければ staffList(並び順/掲載) へルーティング。
+      const hasStaffProfile =
+        job.job_type === "push_staff" &&
+        !!(p.name || p.furigana || p.kana || p.catch_copy || p.catch ||
+          p.bio || p.self_intro || p.role || p.job_type || p.gender || p.nomination);
+      const fnMap = {
+        push_equipment: scrapers.pushEquipmentViaForm,
+        push_staff: hasStaffProfile
+          ? scrapers.pushStaffProfileViaForm
+          : scrapers.pushStaffViaForm,
+        push_menu: scrapers.pushMenuViaForm,
+        push_coupon: scrapers.pushCouponViaForm,
+        push_shift_patterns: scrapers.pushWorkPatternViaForm,
+      } as const;
+      const result = await fnMap[job.job_type](page, p, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+        genre: wGenre,
+      });
+      await reportScraperResult(job, job.job_type, result, {
+        external_id: p.external_id ?? null,
+      });
+      return;
+    }
+
     if (job.job_type === "fetch_bookings") {
       // genre / shop_name は Admin がジョブ top-level に同梱済み (jobs/route.ts)。
       // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
@@ -1095,34 +1155,140 @@ type ResolvedLaunch = {
  */
 // プロキシIPプールの round-robin 割当て用カウンタ。
 let _proxyRrCounter = 0;
-/**
- * SB_PROXY_POOL=host:port,host:port,... が設定されていれば round-robin で1つ返す。
- * 単一IP酷使による評判劣化 (ERR_TUNNEL_CONNECTION_FAILED) を避け、各IPの休息を増やす
- * (複数店舗スケール時の必須対策)。未設定なら従来の SB_PROXY_SERVER。
- */
-function pickPooledProxyServer(): string {
-  const pool = (process.env.SB_PROXY_POOL || "")
+// IP プール ヘルスチェック結果 (フラグ/到達不可IPを使わないためのバックオフ)。
+let _healthyProxies: string[] | null = null;
+let _lastProxyCheck = 0;
+const PROXY_CHECK_INTERVAL_MS =
+  Number(process.env.PROXY_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
+
+function proxyPoolList(): string[] {
+  return (process.env.SB_PROXY_POOL || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (pool.length === 0) return process.env.SB_PROXY_SERVER || "";
-  const pick = pool[_proxyRrCounter % pool.length];
-  _proxyRrCounter += 1;
-  return pick;
+}
+
+/**
+ * プール内の各IPが salonboard に到達できるか軽量HTTPで検査し、健全なものだけを使う。
+ * Akamai に評判劣化 (フラグ) されたIPを叩き続けるとフラグが延命する (連鎖フラグ) ため、
+ * フラグIPはバックオフ。全IPフラグ時は処理を止めてIPを休ませる (回復を妨げない)。
+ */
+async function refreshHealthyProxies(): Promise<void> {
+  const pool = proxyPoolList();
+  if (pool.length === 0) {
+    _healthyProxies = null;
+    return;
+  }
+  const pw = await import("playwright");
+  const results = await Promise.all(
+    pool.map(async (server) => {
+      try {
+        const ctx = await pw.request.newContext({
+          proxy: {
+            server: /:\/\//.test(server) ? server : `http://${server}`,
+            username: process.env.SB_PROXY_USERNAME ?? undefined,
+            password: process.env.SB_PROXY_PASSWORD ?? undefined,
+          },
+          timeout: 12_000,
+          ignoreHTTPSErrors: true,
+        });
+        const resp = await ctx
+          .get("https://salonboard.com/KLP/top/", { timeout: 12_000 })
+          .catch(() => null);
+        await ctx.dispose().catch(() => {});
+        return resp ? server : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+  _healthyProxies = results.filter((x): x is string => !!x);
+  _lastProxyCheck = Date.now();
+  console.log(
+    `[proxy] health-check: ${_healthyProxies.length}/${pool.length} healthy` +
+      (_healthyProxies.length === 0 ? " — 全IPフラグ中、処理を待機しIP回復を待つ" : "")
+  );
+}
+
+function fallbackConfigured(): boolean {
+  return !!(process.env.SB_PROXY_FALLBACK_SERVER || "").trim();
+}
+
+/**
+ * 使用するプロキシを1つ選ぶ (server + 認証)。
+ *  ① 静的プール(SB_PROXY_POOL)に健全IPがあれば round-robin で返す (IP認証=user/pass)。
+ *  ② 健全な静的IPが無く SB_PROXY_FALLBACK_SERVER があれば **Residential フォールバック**
+ *     (gate.decodo.com 等・user/pass認証) を返す → 全static フラグでもクラウド書込を止めない。
+ *  ③ プール未設定なら従来の SB_PROXY_SERVER。
+ * 静的(ISP)は IP認証、住宅は user/pass認証で別系統なので、選択と同時に認証も切替える。
+ */
+function pickProxy(forceResidential?: boolean): { server: string; username?: string; password?: string } {
+  // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
+  // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
+  if (forceResidential && fallbackConfigured()) {
+    return {
+      server: (process.env.SB_PROXY_FALLBACK_SERVER || "").trim(),
+      username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
+      password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
+    };
+  }
+  const pool = proxyPoolList();
+  if (pool.length === 0) {
+    return {
+      server: process.env.SB_PROXY_SERVER || "",
+      username: process.env.SB_PROXY_USERNAME || undefined,
+      password: process.env.SB_PROXY_PASSWORD || undefined,
+    };
+  }
+  const healthy =
+    _healthyProxies && _healthyProxies.length > 0 ? _healthyProxies : null;
+  if (healthy) {
+    const pick = healthy[_proxyRrCounter % healthy.length];
+    _proxyRrCounter += 1;
+    return {
+      server: pick,
+      username: process.env.SB_PROXY_USERNAME || undefined,
+      password: process.env.SB_PROXY_PASSWORD || undefined,
+    };
+  }
+  // 健全な静的IPが無い → Residential フォールバック (設定時)
+  if (fallbackConfigured()) {
+    if (_proxyRrCounter % 20 === 0)
+      console.log("[proxy] 全static IPフラグ → Residential フォールバックを使用");
+    _proxyRrCounter += 1;
+    return {
+      server: (process.env.SB_PROXY_FALLBACK_SERVER || "").trim(),
+      username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
+      password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
+    };
+  }
+  return { server: "" }; // フォールバック無し → 健全IP無し (呼び出し側で待機)
 }
 
 function resolveLaunchOptions(
-  credProxy?: { server: string; username?: string | null; password?: string | null } | null
+  credProxy?: { server: string; username?: string | null; password?: string | null } | null,
+  forceResidential?: boolean
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
-  const rawServer = credProxy?.server || pickPooledProxyServer();
-  const proxy = rawServer
+  // forceResidential(書込ジョブ等) は credProxy/静的IPより residential を最優先。
+  // 無ければ「ジョブ固有プロキシ優先、無ければ pickProxy(静的健全IP→Residentialフォールバック)」。
+  const picked =
+    forceResidential && fallbackConfigured()
+      ? pickProxy(true)
+      : credProxy?.server
+      ? {
+          server: credProxy.server,
+          username: credProxy.username ?? undefined,
+          password: credProxy.password ?? undefined,
+        }
+      : pickProxy();
+  const proxy = picked.server
     ? {
         // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
-        server: /:\/\//.test(rawServer) ? rawServer : `http://${rawServer}`,
-        username: credProxy?.username ?? process.env.SB_PROXY_USERNAME ?? undefined,
-        password: credProxy?.password ?? process.env.SB_PROXY_PASSWORD ?? undefined,
+        server: /:\/\//.test(picked.server) ? picked.server : `http://${picked.server}`,
+        username: picked.username ?? undefined,
+        password: picked.password ?? undefined,
       }
     : undefined;
   return { launch: { headless, channel, proxy }, realChrome: !!channel };
@@ -1485,7 +1651,7 @@ async function tryLogin(
       await loc.click({ timeout: 5_000 }).catch(() => {});
       break;
     }
-    await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
     // 2) クリックで遷移しなかった (まだログインフォームに居る) 場合は、password 欄で
     //    Enter (onkeypress="enterActionLogin") を送る。両方試すことで、ボタンの
     //    onclick が効かない / Enter が効かない どちらの環境でもログインを通す。
@@ -1494,7 +1660,7 @@ async function tryLogin(
       /login/i.test(page.url())
     ) {
       await pwInput.press("Enter").catch(() => {});
-      await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
     }
   } catch (e) {
     return { status: "failed", reason: `submit: ${e instanceof Error ? e.message : e}` };
@@ -1510,7 +1676,7 @@ async function tryLogin(
   await page
     .waitForURL((u) => !/doLogin/i.test(u.toString()), { timeout: 15_000 })
     .catch(() => {});
-  await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
 
   // 肯定的なログイン成否判定:
   //  - password 欄が再表示 → 認証拒否
@@ -1719,7 +1885,7 @@ async function pushBlog(page: Page, job: Job): Promise<PushBlogResult> {
   const beforeUrl = page.url();
   try {
     await Promise.all([
-      page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {}),
+      page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {}),
       submit.click({ timeout: 15_000 }),
     ]);
   } catch (e) {
@@ -2184,7 +2350,7 @@ async function pushBooking(
   // domcontentloaded 直後にはグリッド未描画のことがある。proven な scrapeBookings と
   // 同様に networkidle を待ち、さらにグリッド要素の出現を明示的に待ってから判定する
   // (即 count()===0 だと一時的な未描画を「グリッドなし」と誤判定する)。
-  await page.waitForLoadState("networkidle", { timeout: 12_000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
   const grid = page.locator(SCHEDULE.grid.selector).first();
   await grid.waitFor({ state: "attached", timeout: 12_000 }).catch(() => {});
   if ((await grid.count().catch(() => 0)) === 0) {
@@ -2305,7 +2471,7 @@ async function pushBooking(
       { waitUntil: "domcontentloaded", timeout: 25_000 },
       "register-form",
     );
-    await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
   } catch (e) {
     return fail(
       `予約登録フォームを開けません: ${e instanceof Error ? e.message : e}`,
@@ -2856,7 +3022,7 @@ async function pushBooking(
         return {
           status: "ok",
           externalId: recovered,
-          detailUrl: `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
           alreadyExists: false,
           confirmed,
         };
@@ -2880,7 +3046,7 @@ async function pushBooking(
       externalId = found;
       detailUrl =
         detailUrl ||
-        `${baseUrl.replace(/\/$/, "")}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+        `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
     }
   }
 
@@ -3084,6 +3250,21 @@ async function openRegisterForm(
 // メインループ
 // ------------------------------------------------------------
 async function pollOnce(): Promise<number> {
+  // IPプール設定時: ヘルスチェック(古ければ更新)。健全IPが無ければこのサイクルは処理せず
+  // 待機し、フラグIPを叩き続けてフラグを延命させない (連鎖フラグ防止・IP回復を待つ)。
+  if (proxyPoolList().length > 0) {
+    if (
+      _healthyProxies === null ||
+      Date.now() - _lastProxyCheck > PROXY_CHECK_INTERVAL_MS
+    ) {
+      await refreshHealthyProxies();
+    }
+    // 健全な静的IPが無く、Residential フォールバックも未設定なら処理せず待機
+    // (フラグIPを叩き続けない)。フォールバック設定時は pickProxy が住宅へ切替えるので続行。
+    if (_healthyProxies && _healthyProxies.length === 0 && !fallbackConfigured()) {
+      return 0;
+    }
+  }
   let jobs: Job[];
   try {
     jobs = await fetchJobs(1);
@@ -3093,7 +3274,28 @@ async function pollOnce(): Promise<number> {
   }
   if (jobs.length === 0) return 0;
   for (const job of jobs) {
-    await handleJob(job);
+    // per-job タイムアウト: Chrome/Akamai ハングで単一スレッドのキューが無期限に
+    // ブロックされるのを防ぐ。超過時は process.exit → コンテナ再起動 (restart=unless-stopped)
+    // で自己復旧。孤立した running ジョブは maintenance cron が再キューし、push_booking は
+    // preflight で二重登録を防ぐ。
+    const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 240_000;
+    let to: ReturnType<typeof setTimeout> | null = null;
+    const timeoutP = new Promise<never>((_, rej) => {
+      to = setTimeout(() => rej(new Error("JOB_TIMEOUT")), JOB_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([handleJob(job), timeoutP]);
+    } catch (e) {
+      if (e instanceof Error && e.message === "JOB_TIMEOUT") {
+        console.error(
+          `[poll] JOB TIMEOUT ${JOB_TIMEOUT_MS}ms on ${job.job_type} ${job.id} — exiting to recover (container restart re-queues orphan)`
+        );
+        process.exit(1);
+      }
+      throw e;
+    } finally {
+      if (to) clearTimeout(to);
+    }
   }
   return jobs.length;
 }
@@ -3377,6 +3579,129 @@ async function directCancel(shopId: string): Promise<void> {
   }
 }
 
+/**
+ * キュー非依存の汎用 push ジョブ検証 (one-shot)。
+ * SALONBOARD_DIRECT_JOB_TYPE (push_shifts/push_review_reply/push_staff/push_menu/push_coupon/push_equipment)
+ * + SALONBOARD_DIRECT_JOB_PAYLOAD (JSON) で対応 scraper を実行。
+ * SALONBOARD_ENABLE_PUSH=OFF (既定) なら確認のみ (実書き込みしない)。
+ */
+async function directJob(shopId: string): Promise<void> {
+  const baseUrl = "https://salonboard.com/";
+  const jobType = (process.env.SALONBOARD_DIRECT_JOB_TYPE || "").trim();
+  const genre =
+    process.env.SALONBOARD_DIRECT_SCRAPE_GENRE === "hair" ? "hair" : "esthetic";
+  const { launch, realChrome } = resolveLaunchOptions(null);
+  console.log(
+    `[job1] shop=${shopId} type=${jobType} channel=${launch.channel ?? "chromium"} headless=${launch.headless} ENABLE_PUSH=${ENABLE_PUSH ? "ON" : "OFF"}`
+  );
+  const ctx = await launchStealthContext({ launch, realChrome, shopId });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let auth = await isLoggedIn(page, baseUrl);
+    if (auth !== "logged_in") {
+      const did = process.env.SALONBOARD_DIRECT_LOGIN_ID;
+      const dpw = process.env.SALONBOARD_DIRECT_PASSWORD;
+      if (did && dpw) {
+        console.log(`[job1] 未ログイン → 認証情報でログイン試行`);
+        const lr = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: did,
+          password: dpw,
+        });
+        console.log(`[job1] tryLogin => ${lr.status}`);
+        auth = await isLoggedIn(page, baseUrl);
+      }
+      if (auth !== "logged_in") {
+        console.log(`[job1] 未ログイン (auth=${auth})。認証情報を確認。`);
+        return;
+      }
+    }
+    // UTF-8 安全のため base64 経由を優先 (printf %q / SSM / docker -e で日本語が壊れるのを回避)
+    const b64 = process.env.SALONBOARD_DIRECT_JOB_PAYLOAD_B64;
+    const raw = b64
+      ? Buffer.from(b64, "base64").toString("utf8")
+      : process.env.SALONBOARD_DIRECT_JOB_PAYLOAD;
+    if (!raw) {
+      console.log(`[job1] SALONBOARD_DIRECT_JOB_PAYLOAD(_B64) が未指定。`);
+      return;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch (e) {
+      console.log(`[job1] payload JSON parse 失敗:`, String(e).slice(0, 200));
+      return;
+    }
+    console.log(
+      `[job1] payload name=${JSON.stringify((payload as { name?: string; reply_body?: string }).name ?? (payload as { reply_body?: string }).reply_body ?? "").slice(0, 50)}`
+    );
+    const s = scrapers as unknown as Record<
+      string,
+      (p: unknown, payload: unknown, opts: unknown) => Promise<unknown>
+    >;
+    let result: unknown;
+    if (jobType === "push_shifts") {
+      result = await s.pushShiftsViaForm(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+      });
+    } else if (jobType === "push_review_reply") {
+      result = await s.postReviewReplyViaForm(page, payload, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+      });
+    } else if (jobType === "push_staff") {
+      const pp = payload as Record<string, unknown>;
+      const staffFn =
+        pp.name || pp.furigana || pp.kana || pp.catch_copy || pp.catch ||
+        pp.bio || pp.self_intro || pp.role || pp.job_type || pp.gender || pp.nomination
+          ? s.pushStaffProfileViaForm
+          : s.pushStaffViaForm;
+      result = await staffFn(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+        genre,
+      });
+    } else if (jobType === "push_shift_patterns") {
+      result = await s.pushWorkPatternViaForm(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+      });
+    } else if (jobType === "push_menu") {
+      result = await s.pushMenuViaForm(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+        genre,
+      });
+    } else if (jobType === "push_coupon") {
+      result = await s.pushCouponViaForm(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+        genre,
+      });
+    } else if (jobType === "push_equipment") {
+      result = await s.pushEquipmentViaForm(page, payload, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+      });
+    } else {
+      console.log(`[job1] 未対応 job_type=${jobType}`);
+      return;
+    }
+    console.log(
+      `[job1] ✅ ${jobType} => status=${(result as { status?: string })?.status}`
+    );
+    console.log(`[job1] result:`, JSON.stringify(result).slice(0, 1500));
+    const dumpFile = process.env.SALONBOARD_DIRECT_DUMP_FILE;
+    if (dumpFile) {
+      const fs = await import("node:fs/promises");
+      await fs.writeFile(dumpFile, JSON.stringify(result, null, 2));
+      console.log(`[job1] result dumped => ${dumpFile}`);
+    }
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
@@ -3402,6 +3727,13 @@ async function main() {
   const directCancelShop = process.env.SALONBOARD_DIRECT_CANCEL_SHOP;
   if (directCancelShop) {
     await directCancel(directCancelShop);
+    return;
+  }
+
+  // 直接 汎用 push ジョブモード (キュー非依存・confirm-only 検証用)。
+  const directJobShop = process.env.SALONBOARD_DIRECT_JOB_SHOP;
+  if (directJobShop) {
+    await directJob(directJobShop);
     return;
   }
 
