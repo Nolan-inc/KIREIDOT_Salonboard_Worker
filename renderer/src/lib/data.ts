@@ -869,6 +869,9 @@ export type ExecutionLogRow = {
   startedAt: string | null;
   completedAt: string | null;
   attempts: number;
+  lockedAt: string | null;
+  lockedBy: string | null;
+  runAt: string | null;
 };
 
 /**
@@ -885,7 +888,7 @@ export async function fetchExecutionLogs(opts?: {
   let q = supabase
     .from('salonboard_sync_jobs')
     .select(
-      'id, organization_id, shop_id, job_type, status, error, result, created_at, started_at, completed_at, attempts, ' +
+      'id, organization_id, shop_id, job_type, status, error, result, created_at, started_at, completed_at, attempts, locked_at, locked_by, run_at, ' +
         'organizations(name), shops(name)',
     )
     .order('created_at', { ascending: false })
@@ -896,28 +899,60 @@ export async function fetchExecutionLogs(opts?: {
     console.warn('[data] fetchExecutionLogs error:', error.message);
     return [];
   }
-  return ((data ?? []) as any[]).map((r) => {
-    const result = r.result ?? null;
-    const resultSummary =
-      result && typeof result === 'object'
-        ? typeof result.summary === 'string'
-          ? result.summary
-          : null
-        : null;
-    return {
-      id: String(r.id),
-      organizationId: r.organization_id ?? null,
-      organizationName: (r.organizations as any)?.name ?? '(会社不明)',
-      shopId: r.shop_id ?? null,
-      shopName: (r.shops as any)?.name ?? '(店舗不明)',
-      jobType: String(r.job_type ?? ''),
-      status: String(r.status ?? ''),
-      error: r.error ?? null,
-      resultSummary,
-      createdAt: r.created_at,
-      startedAt: r.started_at ?? null,
-      completedAt: r.completed_at ?? null,
-      attempts: Number(r.attempts ?? 0),
-    };
-  });
+  return ((data ?? []) as any[]).map(mapJobRow);
+}
+
+function mapJobRow(r: any): ExecutionLogRow {
+  const result = r.result ?? null;
+  const resultSummary =
+    result && typeof result === 'object'
+      ? typeof result.summary === 'string'
+        ? result.summary
+        : null
+      : null;
+  return {
+    id: String(r.id),
+    organizationId: r.organization_id ?? null,
+    organizationName: (r.organizations as any)?.name ?? '(会社不明)',
+    shopId: r.shop_id ?? null,
+    shopName: (r.shops as any)?.name ?? '(店舗不明)',
+    jobType: String(r.job_type ?? ''),
+    status: String(r.status ?? ''),
+    error: r.error ?? null,
+    resultSummary,
+    createdAt: r.created_at,
+    startedAt: r.started_at ?? null,
+    completedAt: r.completed_at ?? null,
+    attempts: Number(r.attempts ?? 0),
+    lockedAt: r.locked_at ?? null,
+    lockedBy: r.locked_by ?? null,
+    runAt: r.run_at ?? null,
+  };
+}
+
+/**
+ * 現在のキュー状態(実行中=running / 待機中=queued のジョブ)だけを取得する。
+ * 「今走っているキュー」を上部に集約表示し、数秒ごとにポーリングするための軽量版。
+ * RLS で権限内のみ。run_at 昇順(次に動くものが上)。
+ */
+export async function fetchActiveQueue(opts?: {
+  orgId?: string | null;
+}): Promise<ExecutionLogRow[]> {
+  let q = supabase
+    .from('salonboard_sync_jobs')
+    .select(
+      'id, organization_id, shop_id, job_type, status, error, result, created_at, started_at, completed_at, attempts, locked_at, locked_by, run_at, ' +
+        'organizations(name), shops(name)',
+    )
+    .in('status', ['running', 'queued'])
+    .order('status', { ascending: true }) // queued < running (アルファベット順) なので running が後…
+    .order('run_at', { ascending: true })
+    .limit(500);
+  if (opts?.orgId) q = q.eq('organization_id', opts.orgId);
+  const { data, error } = await q;
+  if (error) {
+    console.warn('[data] fetchActiveQueue error:', error.message);
+    return [];
+  }
+  return ((data ?? []) as any[]).map(mapJobRow);
 }

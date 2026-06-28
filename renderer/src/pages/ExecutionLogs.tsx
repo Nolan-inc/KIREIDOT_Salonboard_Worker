@@ -1,9 +1,29 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, RefreshCcw, ScrollText } from 'lucide-react';
+import { Loader2, RefreshCcw, ScrollText, Activity } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../components/Card';
 import { useAuth } from '../lib/auth-context';
 import { useSelection } from '../lib/selection-context';
-import { fetchExecutionLogs, type ExecutionLogRow } from '../lib/data';
+import {
+  fetchExecutionLogs,
+  fetchActiveQueue,
+  type ExecutionLogRow,
+} from '../lib/data';
+
+// 現在のキューを自動更新する間隔(ms)。
+const QUEUE_POLL_MS = 5000;
+
+// ISO時刻から「何分/秒前か」を出す。
+function ago(iso: string | null): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'まもなく';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分前`;
+  const hr = Math.floor(min / 60);
+  return `${hr}時間${min % 60}分前`;
+}
 
 // job_type を「何をしようとしたか」の日本語に変換する。
 const JOB_LABEL: Record<string, string> = {
@@ -65,19 +85,42 @@ export function ExecutionLogs() {
   const { selectedOrgId } = useSelection();
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<ExecutionLogRow[]>([]);
+  const [queue, setQueue] = useState<ExecutionLogRow[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
+  // 経過時間(○分前)を再描画するためのティック。
+  const [, setTick] = useState(0);
 
   const role = auth.status === 'signed-in' ? auth.scope.role : 'user';
   const isGlobal = role === 'super_owner' || role === 'admin';
+  const orgFilter = isGlobal ? selectedOrgId ?? null : null;
+
+  // 現在のキュー(running/queued)を数秒ごとにポーリングして自動更新。
+  useEffect(() => {
+    if (auth.status !== 'signed-in') return;
+    let cancelled = false;
+    const load = () => {
+      fetchActiveQueue({ orgId: orgFilter }).then((data) => {
+        if (!cancelled) setQueue(data);
+      });
+    };
+    load();
+    const timer = setInterval(load, QUEUE_POLL_MS);
+    // ○分前表示を1秒ごとに更新。
+    const tickTimer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      clearInterval(tickTimer);
+    };
+  }, [auth.status, orgFilter, reloadKey]);
 
   useEffect(() => {
     if (auth.status !== 'signed-in') return;
     let cancelled = false;
     setLoading(true);
     // 全社が見えるロール(super_owner/admin)は会社で絞らず全件、
-    // それ以外は RLS で自組織に限定される(orgId を渡しても二重に効くだけ)。
-    const orgId = isGlobal ? selectedOrgId ?? null : null;
-    fetchExecutionLogs({ orgId, limit: 500 })
+    // それ以外は RLS で自組織に限定される(orgFilter を渡しても二重に効くだけ)。
+    fetchExecutionLogs({ orgId: orgFilter, limit: 500 })
       .then((data) => {
         if (!cancelled) setRows(data);
       })
@@ -87,7 +130,7 @@ export function ExecutionLogs() {
     return () => {
       cancelled = true;
     };
-  }, [auth.status, isGlobal, selectedOrgId, reloadKey]);
+  }, [auth.status, orgFilter, reloadKey]);
 
   // 会社ごとにグループ化 (会社名でソート)。
   const groups = useMemo(() => {
@@ -121,6 +164,75 @@ export function ExecutionLogs() {
         </button>
       </div>
 
+      {/* 現在のキュー (実行中/待機中) — 数秒ごとに自動更新 */}
+      <Card className="overflow-hidden border-brand-300/60">
+        <CardHeader
+          title="現在のキュー"
+          subtitle={`実行中・待機中のジョブ ${queue.length} 件（${QUEUE_POLL_MS / 1000}秒ごとに自動更新）`}
+          action={
+            <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-600">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+              </span>
+              自動更新中
+            </span>
+          }
+        />
+        <CardBody className="p-0">
+          {queue.length === 0 ? (
+            <div className="flex items-center gap-2 px-5 py-6 text-[12px] text-ink-soft">
+              <Activity className="h-4 w-4 text-ink-soft/50" />
+              現在実行中・待機中のジョブはありません。
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead className="bg-brand-light/30 text-ink-soft">
+                  <tr>
+                    <th className="whitespace-nowrap px-4 py-2.5 text-left font-semibold">状態</th>
+                    <th className="px-4 py-2.5 text-left font-semibold">会社</th>
+                    <th className="px-4 py-2.5 text-left font-semibold">店舗</th>
+                    <th className="px-4 py-2.5 text-left font-semibold">内容</th>
+                    <th className="whitespace-nowrap px-4 py-2.5 text-left font-semibold">経過</th>
+                    <th className="whitespace-nowrap px-4 py-2.5 text-left font-semibold">処理機</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-hairline">
+                  {queue.map((r) => {
+                    const sm = statusMeta(r.status);
+                    const isRunning = r.status === 'running';
+                    return (
+                      <tr key={r.id} className="hover:bg-brand-light/10">
+                        <td className="whitespace-nowrap px-4 py-2.5">
+                          <span className={`inline-flex items-center gap-1 font-semibold ${sm.className}`}>
+                            {isRunning && <Loader2 className="h-3 w-3 animate-spin" />}
+                            {sm.label}
+                          </span>
+                          {r.attempts > 1 && (
+                            <span className="ml-1 text-[10px] text-ink-soft">({r.attempts}回目)</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 text-ink-soft">{r.organizationName}</td>
+                        <td className="px-4 py-2.5 text-ink-soft">{r.shopName}</td>
+                        <td className="px-4 py-2.5 font-semibold text-ink">{jobLabel(r.jobType)}</td>
+                        <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-ink-soft">
+                          {isRunning ? ago(r.lockedAt) : `予定 ${ago(r.runAt)}`}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-2.5 text-[11px] text-ink-soft">
+                          {r.lockedBy ?? '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {/* 実行履歴 (全件) */}
       {loading ? (
         <Card>
           <div className="flex items-center gap-2 px-5 py-10 text-[13px] text-ink-soft">
