@@ -717,33 +717,30 @@ async function handleJob(job: Job): Promise<void> {
 
     // 2) ジョブ実行
     if (job.job_type === "push_blog") {
-      const result = await pushBlog(page, job);
-      if (result.status === "ok") {
-        await report({
-          job_id: job.id,
-          status: "succeeded",
-          summary: `push_blog posted (external_id=${result.externalId})`,
-          external_id: result.externalId,
-        });
-        console.log(`[job] done  ${tag} (blog posted ${result.externalId})`);
-      } else if (result.status === "warning") {
-        // 投稿はできたが external_id が拾えなかった。仮 ID は送らない。
-        await report({
-          job_id: job.id,
-          status: "succeeded",
-          summary: `push_blog likely posted; external_id missing (${result.reason})`,
-        });
-        console.log(`[job] done  ${tag} (blog posted but id missing)`);
-      } else {
-        await report({
-          job_id: job.id,
-          status: result.statusCode,
-          error: result.reason,
-        });
-        console.log(
-          `[job] done  ${tag} (push_blog ${result.statusCode}: ${result.reason})`
-        );
-      }
+      // worker.ts 独自 pushBlog は誤った blog index URL(/KLP/blog/, /CNF/blog/, /blog/)を叩き
+      // 'blog index not reachable' で失敗していた(実機 2026-06-28)。正しい URL(/KLP/blog/blog/)を
+      // 持つ scrapers.postBlogViaForm(proven 実装)に委譲する。
+      const p = job.payload as Record<string, unknown>;
+      const result = await (
+        scrapers as unknown as {
+          postBlogViaForm: (
+            pg: Page,
+            pl: Record<string, unknown>,
+            o: { baseUrl: string; enablePost: boolean; salonId: string | null; shopName: string | null },
+          ) => Promise<ScraperResult>;
+        }
+      ).postBlogViaForm(page, p, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+        salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
+        shopName: (job as { shop_name?: string | null }).shop_name ?? null,
+      });
+      await reportScraperResult(job, "push_blog", result, {
+        content_post_id: p.content_post_id ?? null,
+        ...(result.status === "ok"
+          ? { external_id: result.externalId ?? null }
+          : {}),
+      });
       return;
     }
 
