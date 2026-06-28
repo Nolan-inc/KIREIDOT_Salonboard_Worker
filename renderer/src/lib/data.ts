@@ -806,3 +806,118 @@ export async function fetchDashboardSummary(scope: StaffScope): Promise<Dashboar
     newCustomersToday: 0, // TODO: 当日の new customers ロジック (customers + profiles)
   };
 }
+
+// =========================
+// 口コミAI返信の設定 (salonboard_review_reply_settings)
+// =========================
+
+export type ReviewReplySettings = {
+  include_staff: boolean;
+  include_shop: boolean;
+  include_voice_memo: boolean;
+  include_karte: boolean;
+};
+
+/** 店舗の口コミAI返信設定を取得 (無ければ既定値)。 */
+export async function getReviewReplySettings(shopId: string): Promise<ReviewReplySettings> {
+  const { data } = await supabase
+    .from('salonboard_review_reply_settings')
+    .select('include_staff, include_shop, include_voice_memo, include_karte')
+    .eq('shop_id', shopId)
+    .maybeSingle();
+  return {
+    include_staff: (data as any)?.include_staff !== false,
+    include_shop: (data as any)?.include_shop !== false,
+    include_voice_memo: (data as any)?.include_voice_memo === true,
+    include_karte: (data as any)?.include_karte === true,
+  };
+}
+
+/** 店舗の口コミAI返信設定を保存 (upsert)。 */
+export async function saveReviewReplySettings(
+  shopId: string,
+  settings: ReviewReplySettings,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('salonboard_review_reply_settings').upsert(
+    {
+      shop_id: shopId,
+      include_staff: !!settings.include_staff,
+      include_shop: !!settings.include_shop,
+      include_voice_memo: !!settings.include_voice_memo,
+      include_karte: !!settings.include_karte,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'shop_id' },
+  );
+  return { error: error ? error.message : null };
+}
+
+// =========================
+// 実行ログ (salonboard_sync_jobs)
+// =========================
+export type ExecutionLogRow = {
+  id: string;
+  organizationId: string | null;
+  organizationName: string;
+  shopId: string | null;
+  shopName: string;
+  jobType: string;
+  status: string;
+  error: string | null;
+  resultSummary: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  attempts: number;
+};
+
+/**
+ * 実行ログ(SalonBoard同期ジョブ)を取得する。成功/失敗とも全件。
+ * RLS で super_owner/admin は全社、owner 以下は自組織のみ見える。
+ * orgId を渡すと(全社が見えるロールでも)その会社に絞る。
+ */
+export async function fetchExecutionLogs(opts?: {
+  orgId?: string | null;
+  limit?: number;
+}): Promise<ExecutionLogRow[]> {
+  const limit = opts?.limit ?? 500;
+  // 関連(会社/店舗)を join で名前解決。RLS が自動で権限を絞る。
+  let q = supabase
+    .from('salonboard_sync_jobs')
+    .select(
+      'id, organization_id, shop_id, job_type, status, error, result, created_at, started_at, completed_at, attempts, ' +
+        'organizations(name), shops(name)',
+    )
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (opts?.orgId) q = q.eq('organization_id', opts.orgId);
+  const { data, error } = await q;
+  if (error) {
+    console.warn('[data] fetchExecutionLogs error:', error.message);
+    return [];
+  }
+  return ((data ?? []) as any[]).map((r) => {
+    const result = r.result ?? null;
+    const resultSummary =
+      result && typeof result === 'object'
+        ? typeof result.summary === 'string'
+          ? result.summary
+          : null
+        : null;
+    return {
+      id: String(r.id),
+      organizationId: r.organization_id ?? null,
+      organizationName: (r.organizations as any)?.name ?? '(会社不明)',
+      shopId: r.shop_id ?? null,
+      shopName: (r.shops as any)?.name ?? '(店舗不明)',
+      jobType: String(r.job_type ?? ''),
+      status: String(r.status ?? ''),
+      error: r.error ?? null,
+      resultSummary,
+      createdAt: r.created_at,
+      startedAt: r.started_at ?? null,
+      completedAt: r.completed_at ?? null,
+      attempts: Number(r.attempts ?? 0),
+    };
+  });
+}

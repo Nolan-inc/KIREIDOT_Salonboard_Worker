@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Loader2, MessageSquareText, RefreshCcw, Sparkles, Copy, Check, ExternalLink } from 'lucide-react';
+import { Loader2, MessageSquareText, RefreshCcw, Sparkles, Copy, Check, ExternalLink, Settings2, X } from 'lucide-react';
 import { Card } from '../components/Card';
 import { useEffectiveScope } from '../lib/selection-context';
-import { fetchReviewList, saveReviewAiReply, type ReviewRow } from '../lib/data';
+import {
+  fetchReviewList,
+  saveReviewAiReply,
+  getReviewReplySettings,
+  saveReviewReplySettings,
+  type ReviewRow,
+  type ReviewReplySettings,
+} from '../lib/data';
 import { generateReviewReply } from '../lib/salonboard';
 import { useSyncController } from '../lib/sync-controller';
 
@@ -18,6 +25,7 @@ export function Reviews() {
   const [genId, setGenId] = useState<string | null>(null); // 生成中の review.id
   const [errById, setErrById] = useState<Record<string, string>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (!scope) return;
@@ -112,6 +120,16 @@ export function Reviews() {
               未返信のみ
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            disabled={!scope?.shopId}
+            title={scope?.shopId ? 'AI返信に読み込ませる情報を設定' : '先に店舗を選択してください'}
+            className="inline-flex h-9 items-center gap-1.5 rounded-[12px] border border-hairline bg-white/80 px-4 text-[12px] font-semibold text-ink-soft hover:bg-brand-light/40 disabled:opacity-50"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            返信設定
+          </button>
           <button
             type="button"
             onClick={syncReviews}
@@ -255,6 +273,119 @@ export function Reviews() {
           ))}
         </div>
       )}
+
+      {settingsOpen && scope?.shopId && (
+        <ReviewReplySettingsModal shopId={scope.shopId} onClose={() => setSettingsOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// 口コミAI返信に読み込ませる情報 (スタッフ/店舗/ボイスメモ/カルテ) を店舗ごとに設定する。
+function ReviewReplySettingsModal({ shopId, onClose }: { shopId: string; onClose: () => void }) {
+  const [settings, setSettings] = useState<ReviewReplySettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    getReviewReplySettings(shopId)
+      .then((s) => alive && setSettings(s))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [shopId]);
+
+  async function save() {
+    if (!settings) return;
+    setSaving(true);
+    setErr(null);
+    setSavedMsg(null);
+    const res = await saveReviewReplySettings(shopId, settings);
+    setSaving(false);
+    if (res.error) setErr(res.error);
+    else {
+      setSavedMsg('保存しました');
+      setTimeout(() => setSavedMsg(null), 2500);
+    }
+  }
+
+  const items: { key: keyof ReviewReplySettings; label: string; desc: string }[] = [
+    { key: 'include_staff', label: 'スタッフ情報', desc: '担当スタイリストのプロフィール・得意分野・勤続年数' },
+    { key: 'include_shop', label: '店舗情報', desc: '店名・住所・営業時間・お店の紹介' },
+    { key: 'include_voice_memo', label: 'ボイスメモ', desc: '紐付けたお客様の施術メモ(要約)。紐付け済みの口コミのみ' },
+    { key: 'include_karte', label: 'カルテ', desc: '紐付けたお客様のカルテ(直近)。紐付け済みの口コミのみ' },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-[18px] bg-white p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-[15px] font-bold text-ink">
+            <Settings2 className="h-4 w-4 text-brand" /> 口コミ返信の設定
+          </h2>
+          <button type="button" onClick={onClose} className="text-muted hover:text-ink">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <p className="mb-3 text-[12px] text-ink-soft">
+          AI返信案を作成するときに、どの情報を読み込ませるかを選べます。ボイスメモ・カルテは、口コミにお客様を紐付けると反映されます。
+        </p>
+
+        {loading || !settings ? (
+          <div className="flex items-center gap-2 py-8 text-[13px] text-ink-soft">
+            <Loader2 className="h-4 w-4 animate-spin" /> 読み込み中…
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {items.map((it) => (
+              <label
+                key={it.key}
+                className="flex cursor-pointer items-start gap-3 rounded-[12px] border border-hairline p-3 hover:bg-brand-light/30"
+              >
+                <input
+                  type="checkbox"
+                  checked={!!settings[it.key]}
+                  onChange={(e) => setSettings({ ...settings, [it.key]: e.target.checked })}
+                  className="mt-0.5 h-4 w-4"
+                />
+                <span>
+                  <span className="block text-[13px] font-semibold text-ink">{it.label}</span>
+                  <span className="block text-[11px] text-muted">{it.desc}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {err && <p className="mt-2 text-[11px] text-red-600">{err}</p>}
+        {savedMsg && <p className="mt-2 text-[11px] text-emerald-600">{savedMsg}</p>}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-[12px] px-4 py-2 text-[12px] text-ink-soft hover:bg-brand-light/40"
+          >
+            閉じる
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving || !settings}
+            className="inline-flex items-center gap-1.5 rounded-[12px] bg-brand px-4 py-2 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} 保存
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

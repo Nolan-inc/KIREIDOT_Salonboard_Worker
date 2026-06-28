@@ -12,6 +12,7 @@ import {
   Settings as SettingsIcon,
   Store,
   Bed,
+  ScrollText,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -28,7 +29,8 @@ export type NavKey =
   | 'blog'
   | 'reviews'
   | 'salonboard'
-  | 'settings';
+  | 'settings'
+  | 'execution_logs';
 
 export type NavItem = {
   key: NavKey;
@@ -115,6 +117,12 @@ export const NAV_ITEMS: NavItem[] = [
     label: '設定',
     description: 'アカウント・各種設定',
     icon: SettingsIcon,
+  },
+  {
+    key: 'execution_logs',
+    label: '実行ログ',
+    description: '会社ごとのSalonBoard連携の実行履歴',
+    icon: ScrollText,
   },
 ];
 
