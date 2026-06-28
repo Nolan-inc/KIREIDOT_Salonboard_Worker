@@ -204,6 +204,27 @@ console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
 );
 
+// OpenClaw 自己修復: ANTHROPIC_API_KEY が env に無ければコンテナ内ファイルから読む。
+// 環境変数で渡すには container 再作成が必要で per-shop セッション(userDataDir)が消える
+// (再ログイン嵐 → IP フラグ) ため、restart だけで済むファイル方式にする。
+// SSM の /kireidot/worker/anthropic/api_key を EC2 側でこのファイルへ書き込む運用。
+if (!process.env.ANTHROPIC_API_KEY) {
+  try {
+    const keyPath =
+      process.env.ANTHROPIC_API_KEY_FILE ||
+      "/home/pwuser/.kireidot/anthropic_api_key";
+    if (existsSync(keyPath)) {
+      const k = readFileSync(keyPath, "utf8").trim();
+      if (k) process.env.ANTHROPIC_API_KEY = k;
+    }
+  } catch {
+    /* noop: キー読込失敗時は OpenClaw OFF のまま継続 */
+  }
+}
+console.log(
+  `[cfg] OpenClaw 自己修復=${process.env.ANTHROPIC_API_KEY ? "ARMED (キー検出・セレクタ崩壊時に発動)" : "OFF (キー無し)"}`,
+);
+
 function requireEnv(k: string): string {
   const v = process.env[k];
   if (!v) {
@@ -728,7 +749,33 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
-      const result = await pushBookingViaProvenForm(page, job, payload);
+      // action=update かつ reserveId 有り → 予約変更フロー(changeBookingViaForm)を使う。
+      // これが無いと update でも新規登録フォームを叩き "新規予約の登録" として扱われ、
+      // 重複/容量超過で失敗する (実機検証 2026-06-28: YG81931151 の 16:00→15:00 が失敗)。
+      // 変更では reserveId(YG...) は不変なので、ok 時は payload の値を保持して callback に渡す。
+      const isBookingUpdate =
+        (payload as { action?: string }).action === "update" &&
+        String(payload.external_booking_id ?? "").trim().length > 0;
+      let result: PushBookingResult;
+      if (isBookingUpdate) {
+        const cr = await (
+          scrapers as unknown as {
+            changeBookingViaForm: (
+              pg: Page,
+              pl: PushBookingPayload,
+              opts: { baseUrl: string; enableChange: boolean },
+            ) => Promise<PushBookingResult>;
+          }
+        ).changeBookingViaForm(page, payload, { baseUrl, enableChange: ENABLE_PUSH });
+        if (cr.status === "ok") {
+          cr.externalId = payload.external_booking_id ?? null;
+          cr.detailUrl = `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
+          cr.alreadyExists = false;
+        }
+        result = cr;
+      } else {
+        result = await pushBookingViaProvenForm(page, job, payload);
+      }
 
       if (result.status === "ok") {
         await report({
