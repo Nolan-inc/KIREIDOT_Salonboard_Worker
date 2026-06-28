@@ -910,11 +910,42 @@ async function handleJob(job: Job): Promise<void> {
         push_coupon: scrapers.pushCouponViaForm,
         push_shift_patterns: scrapers.pushWorkPatternViaForm,
       } as const;
-      const result = await fnMap[job.job_type](page, p, {
-        baseUrl,
-        enablePush: ENABLE_PUSH,
-        genre: wGenre,
-      });
+      let result: any;
+      try {
+        result = await fnMap[job.job_type](page, p, {
+          baseUrl,
+          enablePush: ENABLE_PUSH,
+          genre: wGenre,
+        });
+      } catch (e) {
+        // OpenClaw 自己修復フォールバック: 固定セレクタがHTML変化で壊れた時、Claudeに
+        // 画面(screenshot+a11y)を見せてタスクを自律実行させる。ANTHROPIC_API_KEY 設定時のみ
+        // 作動し、未設定なら従来通り throw する(完全休眠=安全)。
+        const msg = String((e as any)?.message ?? e);
+        if (
+          process.env.ANTHROPIC_API_KEY &&
+          /selector|locator|timeout|not found|element|visible|frame|click/i.test(msg)
+        ) {
+          const { selfHealTask } = require("./selfHeal.cjs");
+          const taskMap: Record<string, string> = {
+            push_equipment: `設備「${String(p.equipment_name ?? p.name ?? p.external_id ?? "")}」の受付可能数/並び順を編集フォームで更新し登録する`,
+            push_staff: `スタッフ「${String(p.name ?? p.staff_name ?? p.external_id ?? "")}」の情報を編集フォームで更新し登録する`,
+            push_menu: `メニュー「${String(p.menu_name ?? p.name ?? p.external_id ?? "")}」を編集フォームで更新し登録する`,
+            push_coupon: `クーポン「${String(p.coupon_name ?? p.name ?? p.external_id ?? "")}」を編集フォームで更新し登録する`,
+            push_shift_patterns: `勤務パターンを編集フォームで登録する`,
+          };
+          console.log(`[openclaw] ${job.job_type} 自己修復フォールバック起動 (${msg.slice(0, 80)})`);
+          const heal = await selfHealTask(page, {
+            task: taskMap[job.job_type] ?? String(job.job_type),
+            apiKey: process.env.ANTHROPIC_API_KEY,
+          });
+          result = heal.success
+            ? { status: "ok", summary: `OpenClaw自己修復で完了 (${heal.steps}手): ${heal.note ?? ""}`.slice(0, 160) }
+            : { status: "error", error: `OpenClaw自己修復失敗: ${heal.reason ?? "?"}` };
+        } else {
+          throw e;
+        }
+      }
       await reportScraperResult(job, job.job_type, result, {
         external_id: p.external_id ?? null,
       });
