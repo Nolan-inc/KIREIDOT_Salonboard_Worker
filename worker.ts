@@ -608,16 +608,20 @@ async function handleJob(job: Job): Promise<void> {
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
   try {
-    // 書込ジョブは residential 経由で実行(既定ON。SB_WRITE_VIA_RESIDENTIAL=0 で無効化)。
-    // 静的ISPが登録フォーム等の深い操作で Akamai ソフトチャレンジを受けハング(240sタイムアウト)
-    // するのを回避。読み(fetch)は静的のまま(住宅は従量課金なので書込のみ住宅へ)。
+    // 書込ジョブのプロキシ方針 (2026-06-29 インシデント修正):
+    // 旧: residential gateway(gate.decodo.com, rotating)を既定ON。しかし IP ローテで
+    //   そのIPに Akamai セッション(_abck)が無く isLoggedIn=未ログイン → /login/ →
+    //   ERR_HTTP_RESPONSE_CODE_FAILURE(4xx) で書込が全滅した(fetch は ISP pool で正常)。
+    // 新: 書込も fetch と同じ ISP pool(isp.decodo.com, sticky)を使う(forceResidential 既定OFF)。
+    //   頻繁な fetch が _abck 信頼を維持しているので有効セッションで /login/ を踏まない。
+    //   residential を強制したい場合のみ SB_WRITE_VIA_RESIDENTIAL=1。
     const WRITE_JOBS = new Set([
       "push_booking", "cancel_booking", "push_shifts", "push_shift_patterns",
       "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
     ]);
     const forceResidential =
-      process.env.SB_WRITE_VIA_RESIDENTIAL !== "0" && WRITE_JOBS.has(job.job_type);
+      process.env.SB_WRITE_VIA_RESIDENTIAL === "1" && WRITE_JOBS.has(job.job_type);
     if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
     const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential);
     if (launch.proxy) {
