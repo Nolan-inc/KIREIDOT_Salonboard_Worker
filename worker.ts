@@ -1243,6 +1243,27 @@ let _proxyRrCounter = 0;
 // IP プール ヘルスチェック結果 (フラグ/到達不可IPを使わないためのバックオフ)。
 let _healthyProxies: string[] | null = null;
 let _lastProxyCheck = 0;
+
+// ── 店舗レーン並行処理 (Phase 1: scale-out) ──────────────────────────────
+// claim関数(salonboard_claim_next_job)の per-shop mutex が「1店舗あたり同時1ジョブ」を
+// 保証するので、ここでは「プロセス全体の同時実行数」だけを上限管理する。別店舗(=別ISP
+// IP/別セッション)は安全に並行可能(店舗→IPは pickProxy で sticky)。
+const _inFlight = new Map<string, Promise<unknown>>();
+// 同時実行数。env追加はコンテナ再作成(=全店セッション消失)になるため、ファイルでも上書き可。
+// 既定は控えめ。Decodo IP数(現状10)が真の上限。インスタンス増強後はファイルで引き上げる。
+function maxConcurrency(): number {
+  const fromEnv = Number(process.env.SB_MAX_CONCURRENCY || 0);
+  if (fromEnv > 0) return Math.min(fromEnv, 12);
+  try {
+    const n = Number(
+      readFileSync("/home/pwuser/.kireidot/max_concurrency", "utf8").trim()
+    );
+    if (Number.isFinite(n) && n > 0) return Math.min(n, 12);
+  } catch {
+    /* ファイル無し → 既定 */
+  }
+  return 1; // 既定は直列(安全)。インスタンス増強後に max_concurrency ファイルで引き上げる。
+}
 const PROXY_CHECK_INTERVAL_MS =
   Number(process.env.PROXY_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
 
@@ -3400,16 +3421,29 @@ async function pollOnce(): Promise<number> {
       return 0;
     }
   }
+  // 空きスロット分だけ claim する。claim関数が別店舗(=別レーン)のジョブを per-shop mutex で
+  // 返すため、返ってきたジョブは互いに別店舗で安全に並行できる。
+  const slots = maxConcurrency() - _inFlight.size;
+  if (slots <= 0) return 0;
   let jobs: Job[];
   try {
-    jobs = await fetchJobs(1);
+    jobs = await fetchJobs(slots);
   } catch (e) {
     console.error(`[poll] fetch error: ${e instanceof Error ? e.message : e}`);
     return 0;
   }
   if (jobs.length === 0) return 0;
   for (const job of jobs) {
-    await handleJobGuarded(job);
+    // await しない: 別店舗レーンを並行処理。handleJobGuarded は必ず callback を返し、
+    // 例外も内部で握って running を解除する(取りこぼし防止)。
+    const p = handleJobGuarded(job)
+      .catch((e) =>
+        console.error(`[job] guarded uncaught ${job.id.slice(0, 8)}: ${e}`)
+      )
+      .finally(() => {
+        _inFlight.delete(job.id);
+      });
+    _inFlight.set(job.id, p);
   }
   return jobs.length;
 }
@@ -3911,15 +3945,21 @@ async function main() {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  // メインループ: 1ジョブ処理 -> ポーリング間隔待機
+  // メインループ: 空きスロット分を claim して並行処理 -> ポーリング間隔待機。
+  // 処理中(別店舗レーン)がある間は短めに回してスロットを埋め続ける。
+  console.log(`[boot] 店舗レーン並行: 同時実行数(max)=${maxConcurrency()}`);
   while (!stopping) {
     const processed = await pollOnce();
     if (stopping) break;
-    // ジョブがあった直後は連続で処理するため短めの待機。
-    // アイドル時の claim 待ちは最大5秒に抑える(単発の書込同期を速くする。POLL_MS=15s だと
-    // 1変更あたり最大15s の claim 遅延になっていた。2026-06-29 同期レイテンシ短縮)。
-    const wait = processed > 0 ? 1_000 : Math.min(POLL_MS, 5_000);
+    // ジョブがあった/進行中なら短め(スロットを埋める)。完全アイドル時のみ最大5s。
+    const busy = processed > 0 || _inFlight.size > 0;
+    const wait = busy ? 1_000 : Math.min(POLL_MS, 5_000);
     await sleep(wait);
+  }
+  // シャットダウン時は進行中ジョブの完了を待つ(callback を取りこぼさない)。
+  if (_inFlight.size > 0) {
+    console.log(`[boot] draining ${_inFlight.size} in-flight job(s)...`);
+    await Promise.allSettled(Array.from(_inFlight.values()));
   }
   console.log("[boot] bye");
 }
