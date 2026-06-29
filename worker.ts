@@ -652,6 +652,18 @@ async function handleJob(job: Job): Promise<void> {
     }
 
     if (auth !== "logged_in") {
+      // 自動ログイン抑制時: doLogin を叩かず retryable で待つ。Akamai は cloud の自動
+      // ログインを弾き、doLogin 試行が劣化セッションを再フラグして回復を遅らせるため。
+      if (autoLoginDisabled()) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "retryable_failed",
+          error: `セッション未確立(auth=${auth})。自動ログイン抑制中のため再試行待ち(永続セッションの回復/再シードを待つ)。`,
+        });
+        console.log(`[job] done  ${tag} (session not ready, auto-login disabled -> retryable)`);
+        return;
+      }
       const loginUrl = new URL("/login/", baseUrl).toString();
       let loginResult = await tryLogin(page, loginUrl, {
         loginId: job.credentials.login_id,
@@ -1263,6 +1275,20 @@ function maxConcurrency(): number {
     /* ファイル無し → 既定 */
   }
   return 1; // 既定は直列(安全)。インスタンス増強後に max_concurrency ファイルで引き上げる。
+}
+
+// 自動ログイン(tryLogin/doLogin)抑制フラグ。Akamai は cloud の自動ログインを弾く上、
+// **doLogin 試行回数こそがフラグの主因**。flaky/劣化セッションで login を叩くと再フラグして
+// 回復を遅らせる悪循環になるため、抑制時は isLoggedIn=false でも login せず retryable で待つ
+// (永続セッション + reads の温めで回復を待つ / 本当に切れていれば人間の再シードを待つ)。
+// env SB_DISABLE_AUTO_LOGIN=1 or ファイル /home/pwuser/.kireidot/disable_auto_login で有効化。
+function autoLoginDisabled(): boolean {
+  if (process.env.SB_DISABLE_AUTO_LOGIN === "1") return true;
+  try {
+    return existsSync("/home/pwuser/.kireidot/disable_auto_login");
+  } catch {
+    return false;
+  }
 }
 const PROXY_CHECK_INTERVAL_MS =
   Number(process.env.PROXY_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
