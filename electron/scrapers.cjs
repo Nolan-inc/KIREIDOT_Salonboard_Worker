@@ -3775,6 +3775,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
 
   console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} submit loop done, url=${page.url()} dialog=${dialogAccepted} finalClicked=${finalConfirmClicked}`);
+  // 送信後に SalonBoard の 500/エラーページに着地 = サーバ/Akamai が POST を拒否(一時ブロックの可能性)。
+  // 予約は作られていないので manual ではなく「リトライ可能(manualRequired=false)」で返し、
+  // バックオフ後に再試行させる(叩き続けてIPフラグを悪化させない)。
+  const landedUrl = page.url();
+  if (/\/www\/ErrorDocument\/|\/ErrorDocument\/50\d|\/50\d\.html|\/error\b/i.test(landedUrl)) {
+    return fail(
+      `送信後に SalonBoard のエラーページに着地 (${landedUrl.slice(0, 80)})。一時ブロックの可能性のためバックオフ再試行。`,
+      'SB_SERVER_ERROR',
+      false,
+    );
+  }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('登録後に reCAPTCHA が表示され成否判定不能', 'RECAPTCHA_REQUIRED', true);
   }
