@@ -2006,6 +2006,12 @@ function parseJstPartsForPush(iso) {
  * 戻り値: reserveId(string) | null
  */
 async function findReserveIdViaScrape(page, target, opts = {}) {
+  return Promise.race([
+    _findReserveIdViaScrapeImpl(page, target, opts),
+    new Promise((resolve) => setTimeout(() => resolve(null), 35_000)),
+  ]).catch(() => null);
+}
+async function _findReserveIdViaScrapeImpl(page, target, opts = {}) {
   try {
     const { rows } = await scrapeBookings(page, {
       baseUrl: opts.baseUrl,
@@ -2049,7 +2055,15 @@ async function findReserveIdViaScrape(page, target, opts = {}) {
   }
 }
 
+// 間欠的に一覧検索が詰まる(Ginza等の大量予約一覧)と push ジョブ全体が 240s ハング→reaped する。
+// 全体を 35s で打ち切り(タイムアウト時は null=見つからず扱い)、ジョブ全体のハングを根絶する。
 async function findReserveIdForBooking(page, target, opts = {}) {
+  return Promise.race([
+    _findReserveIdForBookingImpl(page, target, opts),
+    new Promise((resolve) => setTimeout(() => resolve(null), 35_000)),
+  ]).catch(() => null);
+}
+async function _findReserveIdForBookingImpl(page, target, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   try {
     await page.goto(RESERVE_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 25_000 });
@@ -3364,6 +3378,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
 
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} form-ready -> fill staff/time`);
   // スタッフ指定。フォームには
   //   - 表示用セレクト select#salonStaffList (value=external_id)
   //   - 実際に送信される hidden input#staffId (value=external_id)
@@ -3621,6 +3636,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   //    SLOT_NOT_AVAILABLE になっていた。空き枠/重複の本当のエラーは「登録する」
   //    送信後にエラー領域に出るので、ここでの事前チェックは廃止する。
 
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} fields filled (equip=${equipResult}) -> before submit`);
   const confirmed = {
     confirmed_customer_name: p.customer_name ?? null,
     confirmed_staff_name: p.staff_name ?? null,
@@ -3757,6 +3773,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     page.off('dialog', onDialog);
   }
 
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} submit loop done, url=${page.url()} dialog=${dialogAccepted} finalClicked=${finalConfirmClicked}`);
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('登録後に reCAPTCHA が表示され成否判定不能', 'RECAPTCHA_REQUIRED', true);
   }
@@ -3899,6 +3916,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       externalId = found;
       detailUrl = detailUrl || `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
     }
+  }
+
+  // reserveId が最後まで取れない = SB に実登録された確証が無い。ここで ok を返すと
+  // 「reserveId無しの synced」(実際は SB 未登録) になり差分が残り続ける(2026-06-29: 佐久間14:30 等)。
+  // manual_required に倒して偽synced を防ぐ。再実行は preflight_required で重複登録を回避する。
+  if (!externalId) {
+    return fail(
+      '登録の完了サインは出ましたが reserveId を確認できませんでした。SalonBoard に実登録された確証が無いため手動確認が必要です。',
+      'CONFIRMATION_MISMATCH',
+      true,
+    );
   }
 
   return { status: 'ok', externalId, detailUrl, confirmed };
