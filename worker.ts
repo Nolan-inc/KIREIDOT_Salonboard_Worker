@@ -2327,6 +2327,26 @@ async function pushBookingViaProvenForm(
   job: Job,
   p: PushBookingPayload,
 ): Promise<PushBookingResult> {
+  // 不完全ペイロード(Admin enrich が SBスタッフ/メニューのマッピングを解決できない予約 等)で
+  // 新規登録フォームを埋められず 240s ハング→daemon再起動するのを防ぐ。必須項目を先に検証し、
+  // 欠落時は即 manual_required で返す(旧 pushBooking と同等の防御。現行 proven 経路には欠けていた)。
+  if (!p.scheduled_at) {
+    return fail("payload に予約日時(scheduled_at)がありません — 新規登録不能", "UNKNOWN_ERROR", true);
+  }
+  if (!p.salonboard_staff_external_id) {
+    return fail(
+      "KIREIDOTスタッフに対応するSalonBoardスタッフ(external_id)が見つかりません — スタッフ連携を確認してください",
+      "STAFF_MAPPING_NOT_FOUND",
+      true,
+    );
+  }
+  if (!(p.salonboard_menu_name || p.menu_name || p.coupon_name)) {
+    return fail(
+      "SalonBoardメニュー/クーポン名が解決できません — メニュー連携を確認してください",
+      "MENU_MAPPING_NOT_FOUND",
+      true,
+    );
+  }
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
   const salonId =
     (job.credentials as { salon_id?: string | null }).salon_id ?? null;
