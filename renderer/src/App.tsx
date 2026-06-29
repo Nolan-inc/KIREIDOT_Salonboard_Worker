@@ -12,6 +12,7 @@ import { Styles } from './pages/Styles';
 import { Blog } from './pages/Blog';
 import { Reviews } from './pages/Reviews';
 import { Settings } from './pages/Settings';
+import { ExecutionLogs } from './pages/ExecutionLogs';
 import { SalonboardPage } from './pages/Salonboard';
 import { ShopList } from './pages/ShopList';
 import { Login } from './pages/Login';
@@ -61,6 +62,7 @@ function Routes() {
       {active === 'reviews' && selectedShopId && <Reviews />}
       {active === 'salonboard' && <SalonboardPage />}
       {active === 'settings' && <Settings />}
+      {active === 'execution_logs' && <ExecutionLogs />}
     </AppShell>
   );
 }

@@ -48,6 +48,8 @@ const {
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
   scrapePhotoGallery,
+  getLastErrorShot,
+  resetLastErrorShot,
 } = require('./scrapers.cjs');
 
 // =====================================================================
@@ -570,6 +572,8 @@ function slackErrorChannel() {
 // 「現在処理中の Playwright page」。postCallback は page を持たないため、
 // runOneInner がジョブ処理中の page をここに保持し、失敗時のスクショ取得に使う。
 let _errorCapturePage = null;
+// 現在処理中ジョブの「予約特定情報」(Slack エラー通知に載せる)。runOneInner が設定。
+let _currentJobInfo = null; // { shopName, when, customer }
 
 const JOB_LABEL = {
   push_booking: '予約の登録/変更',
@@ -585,26 +589,50 @@ const JOB_LABEL = {
   fetch_reviews: '口コミ取得',
 };
 
-// エラー画面のスクショ(Buffer)と本文テキストを今の page から取得する。
+// エラー画面のスクショ(Buffer)と本文テキストを取得する。
+//
+// ★最優先: 失敗が起きた「まさにその画面」を撮った _lastErrorShot
+//   (scrapers.cjs の captureScrapeDebug が失敗地点で撮る) を使う。
+//   postCallback が呼ばれる頃には画面が遷移/クローズしていて、page を再スクショ
+//   しても肝心のポップアップ/画像認証が写らないことがあるため。
+// フォールバック: フレッシュなショットが無ければ、今の page を撮る。
 async function captureErrorPageArtifacts(page) {
-  if (!page) return { buffer: null, text: '', url: '' };
   let buffer = null;
   let text = '';
   let url = '';
-  try { url = page.url(); } catch (_e) { /* noop */ }
+
+  // 1) 失敗地点で撮った最新ショットを優先採用 (このジョブ中に撮られたもの)。
+  //    撮影中なら getLastErrorShot() が撮り終わるまで待つ。
   try {
-    const shot = await Promise.race([
-      page.screenshot({ fullPage: false }),
-      new Promise((resolve) => setTimeout(() => resolve(null), 7000)),
-    ]);
-    if (shot && Buffer.isBuffer(shot)) buffer = shot;
+    const last = typeof getLastErrorShot === 'function' ? await getLastErrorShot() : null;
+    if (last && Buffer.isBuffer(last.buffer)) {
+      buffer = last.buffer;
+      url = last.url || '';
+    }
   } catch (_e) { /* noop */ }
-  try {
-    text = (await Promise.race([
-      page.evaluate(() => (document.body?.innerText ?? '').slice(0, 4000)),
-      new Promise((resolve) => setTimeout(() => resolve(''), 4000)),
-    ])) || '';
-  } catch (_e) { /* noop */ }
+
+  // 2) ショットがまだ無ければ今の page を撮る (遷移後でも無いよりマシ)。
+  if (!buffer && page) {
+    try { if (!url) url = page.url(); } catch (_e) { /* noop */ }
+    try {
+      const shot = await Promise.race([
+        page.screenshot({ fullPage: false }),
+        new Promise((resolve) => setTimeout(() => resolve(null), 7000)),
+      ]);
+      if (shot && Buffer.isBuffer(shot)) buffer = shot;
+    } catch (_e) { /* noop */ }
+  }
+
+  // 3) 画面テキストは可能なら今の page から (AI 解析の補助。失敗しても無視)。
+  if (page) {
+    try {
+      text = (await Promise.race([
+        page.evaluate(() => (document.body?.innerText ?? '').slice(0, 4000)),
+        new Promise((resolve) => setTimeout(() => resolve(''), 4000)),
+      ])) || '';
+    } catch (_e) { /* noop */ }
+    if (!url) { try { url = page.url(); } catch (_e) { /* noop */ } }
+  }
   return { buffer, text, url };
 }
 
@@ -714,9 +742,21 @@ async function uploadScreenshotToSlack({ buffer, channel, filename, comment }) {
   }
 }
 
+// エラーコード → 人が読んで分かる原因カテゴリ。
+const ERROR_CODE_CATEGORY = {
+  RECAPTCHA_REQUIRED: '🧩 画像認証(reCAPTCHA)が表示され、自動操作が止まりました。手動でログイン/認証通過が必要です。',
+  LOGIN_FAILED: '🔑 SalonBoard ログインに失敗しました。ID/パスワード、またはセッション切れの可能性。',
+  SESSION_EXPIRED: '⌛ SalonBoard のセッションが切れていました。再ログインが必要です。',
+  STORE_SELECT_REQUIRED: '🏬 グループ店舗のサロン選択に失敗しました。店舗設定のサロンID(H...)を確認してください。',
+  STAFF_MAPPING_NOT_FOUND: '👤 SalonBoard スタッフの紐付けが見つかりません。スタッフ設定を確認してください。',
+  PUSH_DISABLED: '🔒 実書き込み(実登録)がOFFのため確定していません。設定で有効化が必要です。',
+  UNKNOWN_ERROR: '❓ 想定外のエラー(ポップアップ/画面崩れ/タイムアウト等)。添付スクショで画面を確認してください。',
+};
+
 // エラー時に「スクショ + 画面テキストAI判別 + 原因推測」を Slack 専用チャンネルへ送る。
 //   毎回送る(重複抑制なし)。画像が撮れなければテキストのみ送る。
-async function reportSalonboardErrorWithScreenshot({ jobType, status, errorCode, reason }) {
+//   bookingInfo: { when?, customer?, shopName? } を渡すと予約の特定情報も載せる。
+async function reportSalonboardErrorWithScreenshot({ jobType, status, errorCode, reason, bookingInfo }) {
   if (!slackEnabled()) return;
   try {
     const page = _errorCapturePage;
@@ -730,9 +770,15 @@ async function reportSalonboardErrorWithScreenshot({ jobType, status, errorCode,
     const machine = (typeof machineId === 'function' ? machineId() : 'worker');
     const ver = (typeof appVersionFallback === 'function' ? appVersionFallback() : null);
     const label = JOB_LABEL[jobType] || jobType || 'ジョブ';
+    const category = errorCode ? ERROR_CODE_CATEGORY[errorCode] : null;
+    const bi = bookingInfo || {};
     const lines = [
       `:rotating_light: *SalonBoard エラー: ${label}*  (${machine}${ver ? ` v${ver}` : ''})`,
       `• 状態: ${status || 'failed'}${errorCode ? ` [${errorCode}]` : ''}`,
+      category ? `• 種別: ${category}` : null,
+      (bi.shopName || bi.when || bi.customer)
+        ? `• 予約: ${[bi.shopName, bi.when, bi.customer].filter(Boolean).join(' / ')}`
+        : null,
       reason ? `• Worker検知: ${String(reason).slice(0, 400)}` : null,
       url ? `• URL: ${url}` : null,
     ];
@@ -3108,6 +3154,14 @@ async function runPushJobs({ showBrowser } = {}) {
     const creds = job.credentials || {};
     const baseUrl = creds.base_url || 'https://salonboard.com/';
     const tag = `push ${String(job.id).slice(0, 8)} booking=${String(payload.booking_id || '').slice(0, 8)}`;
+    // Slack エラー通知に載せる予約特定情報 (人が「どの予約か」分かるように)。
+    _currentJobInfo = {
+      shopName: job.shop_name || null,
+      when: payload.scheduled_at
+        ? new Date(payload.scheduled_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+        : null,
+      customer: payload.customer_name || payload.customer_code || null,
+    };
     emit('log', { level: 'info', msg: `[${tag}] 開始 (enablePush=${enablePush})`, at: new Date().toISOString() });
 
     // ---- 美容室スタイル投稿(kind=style)は Chrome拡張(普段使いChrome)を優先 ----
@@ -3189,6 +3243,18 @@ async function runPushJobs({ showBrowser } = {}) {
       const page = await ctx.newPage();
       // 失敗時のエラー画面スクショ取得用に現在の page を保持 (postCallback が使う)。
       _errorCapturePage = page;
+      // 前ジョブの失敗スクショが残っていると誤って送ってしまうのでクリア。
+      // 以降 captureScrapeDebug が失敗地点で撮ったショットだけが採用される。
+      try { resetLastErrorShot?.(); } catch (_e) { /* noop */ }
+
+      // ※ ここでは page レベルの dialog ハンドラは張らない。
+      //   各フォーム helper が操作の直前に on('dialog')→直後に off('dialog') で
+      //   confirm を accept して送信確定する設計のため、ここで常駐ハンドラを足すと
+      //   (1) 登録順で先に発火して helper より早く閉じてしまい確定フローを壊す
+      //   (2) 何もしないハンドラだと Playwright の自動 dismiss が抑止され、
+      //       helper 窓外のダイアログでフリーズする —— という副作用が出る。
+      //   ポップアップ/認証で止まったケースは、失敗時の captureErrorShot による
+      //   スクショ(=その画面)で Slack に残るので、観測はそちらに任せる。
 
       // ログイン (セッション切れなら再ログイン)。
       // ★genre を渡すのが重要: 美容室(hair)で /KLP/top/ を先に開くと毎回再ログインを
@@ -3725,6 +3791,7 @@ async function runPushJobs({ showBrowser } = {}) {
       // 次のジョブに古い page が残らないようクリア (close 済みの page を
       // 後続のエラー報告が触らないように)。
       _errorCapturePage = null;
+      _currentJobInfo = null;
     }
   };
 
@@ -3828,6 +3895,7 @@ async function postCallback(body) {
         status: st,
         errorCode: body?.error_code || null,
         reason,
+        bookingInfo: _currentJobInfo,
       });
     }
   } catch (_e) { /* noop */ }

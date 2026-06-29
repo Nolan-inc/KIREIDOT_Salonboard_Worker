@@ -3386,30 +3386,53 @@ async function pollOnce(): Promise<number> {
   }
   if (jobs.length === 0) return 0;
   for (const job of jobs) {
-    // per-job タイムアウト: Chrome/Akamai ハングで単一スレッドのキューが無期限に
-    // ブロックされるのを防ぐ。超過時は process.exit → コンテナ再起動 (restart=unless-stopped)
-    // で自己復旧。孤立した running ジョブは maintenance cron が再キューし、push_booking は
-    // preflight で二重登録を防ぐ。
-    const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 240_000;
-    let to: ReturnType<typeof setTimeout> | null = null;
-    const timeoutP = new Promise<never>((_, rej) => {
-      to = setTimeout(() => rej(new Error("JOB_TIMEOUT")), JOB_TIMEOUT_MS);
-    });
-    try {
-      await Promise.race([handleJob(job), timeoutP]);
-    } catch (e) {
-      if (e instanceof Error && e.message === "JOB_TIMEOUT") {
-        console.error(
-          `[poll] JOB TIMEOUT ${JOB_TIMEOUT_MS}ms on ${job.job_type} ${job.id} — exiting to recover (container restart re-queues orphan)`
-        );
-        process.exit(1);
-      }
-      throw e;
-    } finally {
-      if (to) clearTimeout(to);
-    }
+    await handleJobGuarded(job);
   }
   return jobs.length;
+}
+
+// ジョブ全体のセーフティタイムアウト。handleJob 内のページ操作には個別 timeout が
+// あるが、enrichDurations 等が累積すると 1 ジョブが数十分 running のまま固まり、
+// callback も返らず「実行中だが進まない」状態になる。ここで上限を設け、超過したら
+// running を解除する failed callback を送って再キューさせる(reaper を待たない)。
+const JOB_SAFETY_TIMEOUT_MS = Number(
+  process.env.SB_JOB_TIMEOUT_MS ?? 8 * 60_000, // 既定 8 分
+);
+
+async function handleJobGuarded(job: Job): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), JOB_SAFETY_TIMEOUT_MS);
+  });
+  try {
+    const r = await Promise.race([handleJob(job).then(() => "done" as const), timeout]);
+    if (r === "timeout") {
+      const secs = Math.round(JOB_SAFETY_TIMEOUT_MS / 1000);
+      console.error(
+        `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — running を解除して再キューします`,
+      );
+      // handleJob 側がまだ走っていても、ここで running を解除して詰まりを断つ。
+      // (ブラウザ操作は宙に浮くが、次ループで新しいブラウザを起動する)
+      await report({
+        job_id: job.id,
+        job_type: job.job_type,
+        status: "retryable_failed",
+        error: `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため打ち切りました(自動再試行)`,
+      }).catch(() => {});
+    }
+  } catch (e) {
+    // handleJob 内で例外が漏れた場合の最終防波堤。callback を必ず送る。
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[job] uncaught ${job.job_type} ${job.id.slice(0, 8)}: ${msg}`);
+    await report({
+      job_id: job.id,
+      job_type: job.job_type,
+      status: "retryable_failed",
+      error: `[UNCAUGHT] ${msg.slice(0, 300)}`,
+    }).catch(() => {});
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // 直接スクレイプモード (検証用): ジョブキューを経由せず、seed 済み (= ログイン済み)
