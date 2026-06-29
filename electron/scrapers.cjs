@@ -3290,14 +3290,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
     // ② reserveId が無い / reserveId では見つからなかった場合は、日時+スタッフ+顧客名で
     //    一覧照合する (従来ロジック)。顧客名が空だと特定できないことがある点に注意。
-    const existing = await findReserveIdForBooking(page, {
-      yyyymmdd: when.yyyymmdd,
-      hhmm: when.hhmm,
-      staffExt: p.salonboard_staff_external_id,
-      customerName: p.customer_name,
-    }, { baseUrl }).catch(() => null);
-    if (existing) {
-      return okExisting(existing);
+    // 顧客名が空だと一覧の名前照合ができず全件スキャンで詰まる (240s ハングの一因)。
+    // 顧客名がある時だけ照合し、無ければ照合をスキップして新規登録へ進む。
+    if (p.customer_name && String(p.customer_name).trim()) {
+      const existing = await findReserveIdForBooking(page, {
+        yyyymmdd: when.yyyymmdd,
+        hhmm: when.hhmm,
+        staffExt: p.salonboard_staff_external_id,
+        customerName: p.customer_name,
+      }, { baseUrl }).catch(() => null);
+      if (existing) {
+        return okExisting(existing);
+      }
     }
   }
 

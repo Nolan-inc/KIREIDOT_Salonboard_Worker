@@ -2327,9 +2327,12 @@ async function pushBookingViaProvenForm(
   job: Job,
   p: PushBookingPayload,
 ): Promise<PushBookingResult> {
-  // 不完全ペイロード(Admin enrich が SBスタッフ/メニューのマッピングを解決できない予約 等)で
-  // 新規登録フォームを埋められず 240s ハング→daemon再起動するのを防ぐ。必須項目を先に検証し、
-  // 欠落時は即 manual_required で返す(旧 pushBooking と同等の防御。現行 proven 経路には欠けていた)。
+  // 不完全ペイロードで登録フォームが埋められずハングするのを防ぐ早期検証。
+  // scheduled_at / staff は必須(scrapers.pushBookingViaForm でも必須)。
+  // **メニューは任意** — SalonBoard 予約フォームは netCouponId 未選択(-)でも登録可能で、
+  // scrapers が menuTarget=null をスキップして「メニュー無し」で登録する(中谷雅 YG80969554 実証)。
+  // ユーザー方針(2026-06-29: KIREIDOT と SB を差分ゼロに):メニュー未選択でも SB 登録する。
+  // → メニュー検証はしない(以前 MENU_MAPPING_NOT_FOUND で誤ってブロックしていたのを撤去)。
   if (!p.scheduled_at) {
     return fail("payload に予約日時(scheduled_at)がありません — 新規登録不能", "UNKNOWN_ERROR", true);
   }
@@ -2340,13 +2343,9 @@ async function pushBookingViaProvenForm(
       true,
     );
   }
-  if (!(p.salonboard_menu_name || p.menu_name || p.coupon_name)) {
-    return fail(
-      "SalonBoardメニュー/クーポン名が解決できません — メニュー連携を確認してください",
-      "MENU_MAPPING_NOT_FOUND",
-      true,
-    );
-  }
+  // メニューは任意。KIREIDOT がメニュー未設定で予約作成できる以上、SB もメニュー無しで登録する
+  // (SB 予約フォームの netCouponId は未選択(-)でも登録可能。scrapers.pushBookingViaForm が
+  //  menuTarget=null をスキップして登録する)。よってメニュー検証はしない(2026-06-29 方針)。
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
   const salonId =
     (job.credentials as { salon_id?: string | null }).salon_id ?? null;
