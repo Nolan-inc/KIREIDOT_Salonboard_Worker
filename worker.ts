@@ -3869,8 +3869,10 @@ async function main() {
   while (!stopping) {
     const processed = await pollOnce();
     if (stopping) break;
-    // ジョブがあった直後は連続で処理するため短めの待機
-    const wait = processed > 0 ? 1_000 : POLL_MS;
+    // ジョブがあった直後は連続で処理するため短めの待機。
+    // アイドル時の claim 待ちは最大5秒に抑える(単発の書込同期を速くする。POLL_MS=15s だと
+    // 1変更あたり最大15s の claim 遅延になっていた。2026-06-29 同期レイテンシ短縮)。
+    const wait = processed > 0 ? 1_000 : Math.min(POLL_MS, 5_000);
     await sleep(wait);
   }
   console.log("[boot] bye");
