@@ -2008,7 +2008,7 @@ function parseJstPartsForPush(iso) {
 async function findReserveIdViaScrape(page, target, opts = {}) {
   return Promise.race([
     _findReserveIdViaScrapeImpl(page, target, opts),
-    new Promise((resolve) => setTimeout(() => resolve(null), 35_000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 90_000)),
   ]).catch(() => null);
 }
 async function _findReserveIdViaScrapeImpl(page, target, opts = {}) {
@@ -2060,7 +2060,7 @@ async function _findReserveIdViaScrapeImpl(page, target, opts = {}) {
 async function findReserveIdForBooking(page, target, opts = {}) {
   return Promise.race([
     _findReserveIdForBookingImpl(page, target, opts),
-    new Promise((resolve) => setTimeout(() => resolve(null), 35_000)),
+    new Promise((resolve) => setTimeout(() => resolve(null), 90_000)),
   ]).catch(() => null);
 }
 async function _findReserveIdForBookingImpl(page, target, opts = {}) {
@@ -2089,6 +2089,7 @@ async function _findReserveIdForBookingImpl(page, target, opts = {}) {
       if (wantStaff && it.staff_external_id && it.staff_external_id.toUpperCase() !== wantStaff) continue;
       cands.push({ reserveId, customer: (it.customer_raw || '').replace(/\s*様$/, '').trim() });
     }
+    console.log(`[recover] cands=${cands.length} target=${target.hhmm} cust=${(target.customerName||'').slice(0,8)}`);
     if (cands.length === 1) return cands[0].reserveId;
     // 複数候補なら顧客名で一意化
     if (cands.length > 1 && wantCust) {
