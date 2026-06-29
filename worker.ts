@@ -623,7 +623,7 @@ async function handleJob(job: Job): Promise<void> {
     const forceResidential =
       process.env.SB_WRITE_VIA_RESIDENTIAL === "1" && WRITE_JOBS.has(job.job_type);
     if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
-    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential);
+    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential, job.shop_id);
     if (launch.proxy) {
       console.log(
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
@@ -1307,7 +1307,17 @@ function fallbackConfigured(): boolean {
  *  ③ プール未設定なら従来の SB_PROXY_SERVER。
  * 静的(ISP)は IP認証、住宅は user/pass認証で別系統なので、選択と同時に認証も切替える。
  */
-function pickProxy(forceResidential?: boolean): { server: string; username?: string; password?: string } {
+// 店舗IDの決定的ハッシュ(FNV-1a)。店舗→ISP IP の sticky 割当に使う。
+function hashShop(s: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function pickProxy(forceResidential?: boolean, shopId?: string): { server: string; username?: string; password?: string } {
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
   if (forceResidential && fallbackConfigured()) {
@@ -1328,8 +1338,20 @@ function pickProxy(forceResidential?: boolean): { server: string; username?: str
   const healthy =
     _healthyProxies && _healthyProxies.length > 0 ? _healthyProxies : null;
   if (healthy) {
-    const pick = healthy[_proxyRrCounter % healthy.length];
-    _proxyRrCounter += 1;
+    // 店舗→IP を固定(sticky)。Akamai の _abck は発行時IPに紐づくため、同一店舗の
+    // login/read/write を常に同じISP IPで通す。IPローテだと別IP扱いで弾かれ500になる
+    // (2026-06-30 銀座書込500の真因)。安定indexは全poolに対するハッシュ。当該IPが
+    // 不健全なら健全集合内でハッシュ的に決定。shopId 無し(直接実行系)は従来round-robin。
+    let pick: string;
+    if (shopId) {
+      const stable = pool[hashShop(shopId) % pool.length];
+      pick = healthy.includes(stable)
+        ? stable
+        : healthy[hashShop(shopId) % healthy.length];
+    } else {
+      pick = healthy[_proxyRrCounter % healthy.length];
+      _proxyRrCounter += 1;
+    }
     return {
       server: pick,
       username: process.env.SB_PROXY_USERNAME || undefined,
@@ -1352,7 +1374,8 @@ function pickProxy(forceResidential?: boolean): { server: string; username?: str
 
 function resolveLaunchOptions(
   credProxy?: { server: string; username?: string | null; password?: string | null } | null,
-  forceResidential?: boolean
+  forceResidential?: boolean,
+  shopId?: string
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
@@ -1360,14 +1383,14 @@ function resolveLaunchOptions(
   // 無ければ「ジョブ固有プロキシ優先、無ければ pickProxy(静的健全IP→Residentialフォールバック)」。
   const picked =
     forceResidential && fallbackConfigured()
-      ? pickProxy(true)
+      ? pickProxy(true, shopId)
       : credProxy?.server
       ? {
           server: credProxy.server,
           username: credProxy.username ?? undefined,
           password: credProxy.password ?? undefined,
         }
-      : pickProxy();
+      : pickProxy(undefined, shopId);
   const proxy = picked.server
     ? {
         // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
