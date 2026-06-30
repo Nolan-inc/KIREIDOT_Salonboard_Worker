@@ -5569,13 +5569,20 @@ async function postBlogViaForm(page, payload, opts = {}) {
   // 拒否し、確認画面で入力フォームに差し戻す(2026-06-30 実機: BIOPHYTO ブログが🌿✨多用で
   // confirmed=false・最終ボタン出ず)。投稿可能にするため絵文字・異体字セレクタ・ZWJ・国旗を
   // 除去する。★☆等のJIS記号は Extended_Pictographic ではないため温存される。
-  // ★☆♪♫♬ は JIS X 0208 標準の装飾記号で SB も許可するため温存(SBが拒否するのは絵文字)。
-  const KEEP_SYMBOLS = new Set(['★', '☆', '♪', '♫', '♬']);
+  // SB(Shift-JIS基盤)は JIS X 0208 外の文字を「本文に利用不可文字が含まれています」と
+  // して拒否する(2026-06-30 実機で 🌿✨🏻⃣♡ が弾かれた)。絵文字本体・肌色modifier・
+  // 結合囲みkeycap・各種記号を広く除去。★☆♪ は JIS X 0208 標準なので温存。
+  const keepJis = (ch) => ('★☆♪'.includes(ch) ? ch : '');
   const stripBlogUnsupported = (s) =>
     String(s == null ? '' : s)
-      .replace(/\p{Extended_Pictographic}/gu, (ch) => (KEEP_SYMBOLS.has(ch) ? ch : ''))
-      .replace(/[\u{FE00}-\u{FE0F}\u{200D}]/gu, '')
-      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+      .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')            // 絵文字本体+肌色modifier(🌿🏻)
+      .replace(/[\u{2600}-\u{27BF}]/gu, keepJis)         // 記号・装飾(✨♡♫☀ 等。★☆♪のみ温存)
+      .replace(/[\u{2B00}-\u{2BFF}]/gu, '')              // ⭐⬛ 等
+      .replace(/[\u{2300}-\u{23FF}]/gu, '')              // ⌚⏰ 等
+      .replace(/[\u{20D0}-\u{20FF}]/gu, '')              // 結合囲み記号(⃣ keycap)
+      .replace(/[\u{FE00}-\u{FE0F}\u{200D}]/gu, '')      // 異体字セレクタ・ZWJ
+      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')            // 国旗(地域指示子)
+      .replace(/\p{Extended_Pictographic}/gu, keepJis)   // 取りこぼし保険
       .replace(/[ \t　]{2,}/g, ' ')
       .replace(/[ \t　]+(\r?\n)/g, '$1');
 
