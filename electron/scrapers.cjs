@@ -5420,7 +5420,10 @@ async function uploadBlogCoverImage(page, coverUrl) {
       }
     }
 
-    // 5) 完了判定: imagePath* のいずれかに新しい値が入るのを最大15秒待つ。
+    // 5) 完了判定: imagePath* のいずれかに新しい値が入るのを最大40秒待つ。
+    //    SalonBoard の画像アップロードは「登録する」押下後に最大~30秒のローディングが
+    //    あり(2026-06-30 実機スクショ確認)、従来の15秒では完了前にタイムアウトして
+    //    imagePath が空のまま unconfirmed になっていた。
     const done = await page.waitForFunction((before) => {
       for (let i = 1; i <= 4; i++) {
         const el = document.getElementById('imagePath' + i);
@@ -5428,7 +5431,7 @@ async function uploadBlogCoverImage(page, coverUrl) {
         if (v && v !== before[i]) return true;
       }
       return false;
-    }, beforePaths, { timeout: 15_000 }).then(() => true).catch(() => false);
+    }, beforePaths, { timeout: 40_000 }).then(() => true).catch(() => false);
 
     if (!done) {
       await captureScrapeDebug(page, 'blog', 'image_upload_unconfirmed', {
