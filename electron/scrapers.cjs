@@ -3802,14 +3802,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
             const { wantId, wantName } = args;
             const opts = Array.from(el.options);
             const norm = (s) => (s || '').replace(/[○×\s]/g, '');
-            // 1) EQ完全一致
+            // option text 先頭の ×(満/その枠で使用不可) が付いた設備は、KIREIDOT が割り当てた
+            // ものでも選ばない。競合枠で強制選択すると「設備不足」で doComplete/500 になる
+            // (2026-06-30 実機: 佐久田/近田の予約が×ベッド固定割当で弾かれていた)。×なら
+            // null を返し、下の ○(空き) フォールバックに任せる。
+            const isUnavailable = (o) => /×/.test(o.textContent || '');
+            // 1) EQ完全一致 (×は除外)
             if (wantId) {
-              const o = opts.find((o) => o.value === wantId);
+              const o = opts.find((o) => o.value === wantId && !isUnavailable(o));
               if (o) return { value: o.value, by: 'EQ' };
             }
-            // 2) 設備名一致
+            // 2) 設備名一致 (×は除外)
             if (wantName) {
-              const o = opts.find((o) => norm(o.textContent) === norm(wantName));
+              const o = opts.find((o) => norm(o.textContent) === norm(wantName) && !isUnavailable(o));
               if (o) return { value: o.value, by: 'name' };
             }
             return null;
