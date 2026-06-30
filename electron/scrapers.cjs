@@ -5557,8 +5557,11 @@ async function postBlogViaForm(page, payload, opts = {}) {
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
-  const title = (p.title && String(p.title).trim()) || '';
+  let title = (p.title && String(p.title).trim()) || '';
   if (!title) return fail('ブログのタイトルが空です', 'UNKNOWN_ERROR', true);
+  // SalonBoard のブログタイトルは全角25文字以内。超過分は切り詰めて投稿可能にする
+  // (2026-06-30: AI生成タイトルが25字超で「タイトルは全角25文字以内」エラー多発)。
+  if (title.length > 25) title = title.slice(0, 25).trim();
   // 本文: HTML タグを除いたプレーン化 (SalonBoard の textarea はプレーンテキスト想定)。
   const bodyPlain = String(p.body_html || '')
     .replace(/<br\s*\/?>/gi, '\n')
