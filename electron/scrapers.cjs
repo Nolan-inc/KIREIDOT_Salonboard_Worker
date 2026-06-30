@@ -3971,7 +3971,24 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 
   const beforeUrl = page.url();
   let finalConfirmClicked = false;
+  // Phase3-lite (2026-06-30): 書込submit前の人間化。Akamai は _abck センサーで
+  // mouse/timing テレメトリを採点し、機械的な即クリックを bot とみなして高リスクな
+  // 登録POSTを間欠的に 500/challenge する(銀座書込500の一因)。submit直前に少量の
+  // マウス移動+hover+ランダム間(人間の確認時間)を挟みセンサースコアを上げ書込500を抑える。
+  const humanizeBeforeSubmit = async () => {
+    const jit = (a, b) => a + Math.floor(Math.random() * (b - a));
+    try {
+      const vp = page.viewportSize() || { width: 1280, height: 800 };
+      await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+      await page.waitForTimeout(jit(120, 380));
+      await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+      await registerBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await registerBtn.hover().catch(() => {});
+      await page.waitForTimeout(jit(700, 1700)); // 人間の "内容確認" 時間
+    } catch (_e) { /* 人間化は best-effort */ }
+  };
   try {
+    await humanizeBeforeSubmit();
     await registerBtn.click({ timeout: 15_000 }).catch(() => {});
     // 1回目送信後を最大15秒ポーリング: doComplete(2段階確認ページ) / 一覧遷移(=容量余裕で即完了) /
     // 完了文言・詳細リンク のいずれかが出たら抜ける。
