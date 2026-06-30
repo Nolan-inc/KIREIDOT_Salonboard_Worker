@@ -5565,19 +5565,35 @@ async function postBlogViaForm(page, payload, opts = {}) {
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
-  let title = (p.title && String(p.title).trim()) || '';
+  // SalonBoard のブログは絵文字(🌿✨ 等)を「本文に利用不可文字が含まれています」として
+  // 拒否し、確認画面で入力フォームに差し戻す(2026-06-30 実機: BIOPHYTO ブログが🌿✨多用で
+  // confirmed=false・最終ボタン出ず)。投稿可能にするため絵文字・異体字セレクタ・ZWJ・国旗を
+  // 除去する。★☆等のJIS記号は Extended_Pictographic ではないため温存される。
+  // ★☆♪♫♬ は JIS X 0208 標準の装飾記号で SB も許可するため温存(SBが拒否するのは絵文字)。
+  const KEEP_SYMBOLS = new Set(['★', '☆', '♪', '♫', '♬']);
+  const stripBlogUnsupported = (s) =>
+    String(s == null ? '' : s)
+      .replace(/\p{Extended_Pictographic}/gu, (ch) => (KEEP_SYMBOLS.has(ch) ? ch : ''))
+      .replace(/[\u{FE00}-\u{FE0F}\u{200D}]/gu, '')
+      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+      .replace(/[ \t　]{2,}/g, ' ')
+      .replace(/[ \t　]+(\r?\n)/g, '$1');
+
+  let title = stripBlogUnsupported((p.title && String(p.title).trim()) || '').trim();
   if (!title) return fail('ブログのタイトルが空です', 'UNKNOWN_ERROR', true);
   // SalonBoard のブログタイトルは全角25文字以内。超過分は切り詰めて投稿可能にする
   // (2026-06-30: AI生成タイトルが25字超で「タイトルは全角25文字以内」エラー多発)。
   if (title.length > 25) title = title.slice(0, 25).trim();
   // 本文: HTML タグを除いたプレーン化 (SalonBoard の textarea はプレーンテキスト想定)。
-  const bodyPlain = String(p.body_html || '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|h[1-6]|li)>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const bodyPlain = stripBlogUnsupported(
+    String(p.body_html || '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|h[1-6]|li)>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim(),
+  ).trim();
 
   let formUrl;
   try { formUrl = new URL('/KLP/blog/blog/', baseUrl).toString(); } catch (_e) { formUrl = BLOG_FORM_URL; }
