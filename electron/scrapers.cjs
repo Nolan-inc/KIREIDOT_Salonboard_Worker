@@ -3720,7 +3720,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       return out || s;
     };
 
-    const rawName = (p.customer_name && String(p.customer_name).trim()) || 'ゲスト';
+    // 末尾の敬称(さん/様/ちゃん/くん等)を除去。SBは表示時に「様」を付けるため、氏名に
+    // 敬称が残ると「マキサン 様 様」のように二重になる(2026-06-30 Makiさん事例)。
+    const stripHonorific = (s) =>
+      String(s || '')
+        .replace(/[\s　]*(さん|サン|ｻﾝ|様|さま|サマ|ちゃん|チャン|君|くん|クン)[\s　]*$/u, '')
+        .trim();
+    const rawName = stripHonorific((p.customer_name && String(p.customer_name).trim()) || 'ゲスト') || 'ゲスト';
     const cleaned = cleanName(rawName) || 'ゲスト';
     const parts = cleaned.split(/[\s　]+/).filter(Boolean);
     const sei = toSafeName(parts[0] || cleaned || 'ゲスト');
