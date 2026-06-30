@@ -3690,12 +3690,42 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         .replace(/\s+/g, ' ')
         .trim();
 
+    // 英字(ローマ字)→全角カタカナ 簡易変換。SBの氏名欄は英字を拒否する(2026-06-30 Makiさん事例:
+    // 英字"Maki"で doComplete「まだ登録されていません」が一貫発生)ため、英字を含む氏名
+    // (インフルエンサーのハンドル名等)はカナ化して登録可能にする。
+    const romaToKata = (roma) => {
+      const m = {kya:'キャ',kyu:'キュ',kyo:'キョ',gya:'ギャ',gyu:'ギュ',gyo:'ギョ',sha:'シャ',shu:'シュ',sho:'ショ',sya:'シャ',syu:'シュ',syo:'ショ',jya:'ジャ',jyu:'ジュ',jyo:'ジョ',cha:'チャ',chu:'チュ',cho:'チョ',cya:'チャ',cyu:'チュ',cyo:'チョ',nya:'ニャ',nyu:'ニュ',nyo:'ニョ',hya:'ヒャ',hyu:'ヒュ',hyo:'ヒョ',bya:'ビャ',byu:'ビュ',byo:'ビョ',pya:'ピャ',pyu:'ピュ',pyo:'ピョ',mya:'ミャ',myu:'ミュ',myo:'ミョ',rya:'リャ',ryu:'リュ',ryo:'リョ',fa:'ファ',fi:'フィ',fe:'フェ',fo:'フォ',shi:'シ',chi:'チ',tsu:'ツ',ja:'ジャ',ju:'ジュ',jo:'ジョ',
+        ka:'カ',ki:'キ',ku:'ク',ke:'ケ',ko:'コ',ga:'ガ',gi:'ギ',gu:'グ',ge:'ゲ',go:'ゴ',sa:'サ',si:'シ',su:'ス',se:'セ',so:'ソ',za:'ザ',zi:'ジ',ji:'ジ',zu:'ズ',ze:'ゼ',zo:'ゾ',ta:'タ',ti:'チ',tu:'ツ',te:'テ',to:'ト',da:'ダ',di:'ヂ',du:'ヅ',de:'デ',do:'ド',na:'ナ',ni:'ニ',nu:'ヌ',ne:'ネ',no:'ノ',ha:'ハ',hi:'ヒ',fu:'フ',hu:'フ',he:'ヘ',ho:'ホ',ba:'バ',bi:'ビ',bu:'ブ',be:'ベ',bo:'ボ',pa:'パ',pi:'ピ',pu:'プ',pe:'ペ',po:'ポ',ma:'マ',mi:'ミ',mu:'ム',me:'メ',mo:'モ',ya:'ヤ',yu:'ユ',yo:'ヨ',ra:'ラ',ri:'リ',ru:'ル',re:'レ',ro:'ロ',wa:'ワ',wo:'ヲ',
+        a:'ア',i:'イ',u:'ウ',e:'エ',o:'オ',n:'ン'};
+      const r = String(roma).toLowerCase().replace(/[^a-z]/g, '');
+      let out = ''; let i = 0;
+      while (i < r.length) {
+        let hit = false;
+        for (const L of [3, 2, 1]) { const sub = r.substr(i, L); if (m[sub]) { out += m[sub]; i += L; hit = true; break; } }
+        if (!hit) { if (r[i] === r[i + 1] && /[bcdfghjklmpqrstvwxyz]/.test(r[i])) { out += 'ッ'; i++; } else { i++; } }
+      }
+      return out;
+    };
+    const hiraToKata = (s) => String(s).replace(/[ぁ-ゖ]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x60));
+    // 英字を含む氏名 → 英字部=ローマ字カナ化 / ひらがな=カナ化 / 漢字・カナ・長音=維持。英字無しは素通し。
+    const toSafeName = (s) => {
+      const str = String(s || '').replace(/[Ａ-Ｚａ-ｚ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+      if (!/[A-Za-z]/.test(str)) return s;
+      let out = ''; let i = 0;
+      while (i < str.length) {
+        const ch = str[i];
+        if (/[A-Za-z]/.test(ch)) { let j = i; while (j < str.length && /[A-Za-z]/.test(str[j])) j++; out += romaToKata(str.slice(i, j)); i = j; }
+        else { out += hiraToKata(ch); i++; }
+      }
+      return out || s;
+    };
+
     const rawName = (p.customer_name && String(p.customer_name).trim()) || 'ゲスト';
     const cleaned = cleanName(rawName) || 'ゲスト';
     const parts = cleaned.split(/[\s　]+/).filter(Boolean);
-    const sei = parts[0] || cleaned || 'ゲスト';
-    const mei = parts.slice(1).join('') || '様';
-    // カナ: 元名のカナ部分が取れればそれ、無ければ汎用カナ
+    const sei = toSafeName(parts[0] || cleaned || 'ゲスト');
+    const mei = toSafeName(parts.slice(1).join('') || '様');
+    // カナ: SB-safe 化済の氏名からカナを抽出。無ければ汎用カナ。
     const seiKana = cleanKana(sei) || 'ヨヤク';
     const meiKana = cleanKana(mei) || 'キャクサマ';
 
