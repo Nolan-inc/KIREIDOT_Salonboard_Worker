@@ -3436,11 +3436,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const p = payload || {};
-  const fail = (reason, errorCode, manualRequired) => {
-    // 失敗した「まさにその画面」(ポップアップ/画像認証/エラー表示) をメモリに
-    // スクショして Slack 通知で使えるようにする (非ブロッキング)。
-    captureErrorShot(page, `push_fail_${errorCode || 'err'}`);
-    return { status: 'failed', reason, errorCode, manualRequired };
+  const fail = async (reason, errorCode, manualRequired) => {
+    // 失敗した「まさにその画面」を撮って result に載せる(per-job=店舗レーン並行でも混線しない)。
+    // Slack 通知に添付するため base64 で返す。best-effort(撮影失敗しても登録失敗の返却は継続)。
+    let errorCaptureB64 = null;
+    try {
+      const shot = await Promise.race([
+        page.screenshot({ fullPage: false, timeout: 6_000 }).catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 7_000)),
+      ]);
+      if (shot && Buffer.isBuffer(shot)) errorCaptureB64 = shot.toString('base64');
+    } catch (_e) { /* best-effort */ }
+    return { status: 'failed', reason, errorCode, manualRequired, errorCaptureB64 };
   };
 
   if (!p.booking_id || !p.scheduled_at) {

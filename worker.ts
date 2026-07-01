@@ -365,6 +365,8 @@ type CallbackBody = {
   sales?: unknown;
   external_id?: string;
   block?: { until: string; reason: string };
+  // 失敗時の「直前画面」スクショ(base64 PNG)。Admin が Storage へ保存し Slack 通知に添付する。
+  error_capture_b64?: string;
 
   // --- push_booking 専用フィールド ---
   job_type?: JobType;
@@ -463,6 +465,31 @@ async function fetchJobs(limit = 1): Promise<Job[]> {
 }
 
 async function report(body: CallbackBody): Promise<void> {
+  // 失敗系コールバックには失敗地点のスクショ(メモリbuffer)を base64 で同梱する。
+  // Admin が Storage に保存し、Slack 通知に画像として添付できるようにする(best-effort)。
+  try {
+    const st = String((body as { status?: string }).status ?? "");
+    const isFail = st !== "" && !["succeeded", "ok", "confirm_only"].includes(st);
+    if (isFail && !(body as { error_capture_b64?: string }).error_capture_b64) {
+      const shot = await (
+        scrapers as {
+          getLastErrorShot?: () => Promise<{ buffer?: Buffer; at?: number } | null>;
+        }
+      ).getLastErrorShot?.();
+      // 直近(<20s)の失敗ショットのみ採用 (古い別ジョブのショット誤添付を防ぐ)。
+      if (
+        shot &&
+        shot.buffer &&
+        Buffer.isBuffer(shot.buffer) &&
+        Date.now() - Number(shot.at ?? 0) < 20_000
+      ) {
+        (body as { error_capture_b64?: string }).error_capture_b64 =
+          shot.buffer.toString("base64");
+      }
+    }
+  } catch (_e) {
+    /* スクショ添付は best-effort: 失敗してもコールバックは送る */
+  }
   const res = await fetch(`${API}/api/salonboard/callback`, {
     method: "POST",
     headers: {
@@ -844,6 +871,8 @@ async function handleJob(job: Job): Promise<void> {
           error_code: result.errorCode,
           error: result.reason,
           manual_required: toManual,
+          error_capture_b64: (result as { errorCaptureB64?: string })
+            .errorCaptureB64,
           ...(isCaptcha
             ? {
                 block: {
