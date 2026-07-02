@@ -555,7 +555,9 @@ async function reportScraperResult(
   }
   // failed
   const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
-  const exhausted = job.attempts + 1 >= cap;
+  // job.attempts は claim RPC がインクリメント済みの値 (=今回が何回目の試行か)。
+  // +1 すると1回分リトライを取りこぼす (max_attempts=3 が実質2回になる)。
+  const exhausted = job.attempts >= cap;
   const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
   const toManual = !!result.manualRequired || exhausted;
   await report({
@@ -855,7 +857,7 @@ async function handleJob(job: Job): Promise<void> {
         // 自動リトライ上限を超えていれば強制的に manual_required。
         // 上限はジョブ側の max_attempts を正とし、未指定時のみ既定値を使う。
         const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
-        const exhausted = job.attempts + 1 >= cap;
+        const exhausted = job.attempts >= cap;
         const toManual = result.manualRequired || exhausted;
         const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
         await report({
@@ -1143,7 +1145,7 @@ async function handleJob(job: Job): Promise<void> {
         const err = e as { code?: string; message?: string };
         const code = err?.code ?? "UNKNOWN_ERROR";
         const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
-        const exhausted = job.attempts + 1 >= cap;
+        const exhausted = job.attempts >= cap;
         const isCaptcha = code === "RECAPTCHA_REQUIRED";
         const noRetry =
           isCaptcha ||
@@ -1219,7 +1221,7 @@ async function handleJob(job: Job): Promise<void> {
           const err = e as { code?: string; message?: string };
           const code = err?.code ?? "UNKNOWN_ERROR";
           const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
-          const exhausted = job.attempts + 1 >= cap;
+          const exhausted = job.attempts >= cap;
           const isCaptcha = code === "RECAPTCHA_REQUIRED";
           const noRetry = isCaptcha || exhausted;
           await report({
