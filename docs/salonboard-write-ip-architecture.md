@@ -55,3 +55,45 @@ SBは **Akamai Bot Manager**(`_abck` センサーCookie)で防御。Akamaiはア
 
 ## 即時の運用
 失敗した書込は worker のバックオフで再試行(良い窓で成功)。Phase 3の暫定対策で改善。Phase 1(Site Unblocker)が恒久解。
+
+## 2026-07-02 追記: 10006出口IP死亡インシデントと店舗別退避
+
+### 事象
+`isp.decodo.com:10006` の出口IPが **SalonBoard にのみ到達不能** になった (他サイトは疎通、
+curl/実Chromeとも SBだけ 20s タイムアウト)。FNV-1a hash sticky で同IPに割当たる
+新宿三丁目 + WAO表参道 が2日間全滅 (login `chrome-error://chromewebdata` / JOB_TIMEOUT連発)。
+
+### なぜ自動検知できなかったか
+- worker のプロキシヘルスチェック (playwright request probe → `/KLP/top/`) は **同じIPで 200 を返し続けた**。
+  実Chrome (TLS指紋/HTTP2) と request probe (Node HTTP) で Akamai 側の遮断挙動が異なるため、
+  probe では「健全」に見える。→ probe合格は実Chrome到達可能を保証しない。
+- さらに JOB_TIMEOUT で放置された孤児 Chrome が profile の SingletonLock を握り、
+  後続 launch が `browser has been closed` で失敗する二次障害が連鎖した。
+
+### 対処 (PR#21)
+1. **店舗別プロキシ退避ファイル** `/home/pwuser/.kireidot/proxy-shop-override.json`
+   (`{"<shop_id>": "isp.decodo.com:10003"}`)。pickProxy が毎回読むため編集即反映・再起動不要。
+   probe では検知できない「実Chromeだけ死ぬIP」から特定店舗を手動退避する運用弁。
+2. **孤児Chrome kill+再試行**: launch が `has been closed` で失敗したら該当プロファイルの
+   Chrome を pkill → 2s → 1回だけ再launch (per-shop mutex により同店舗の正当な並行Chromeは無い)。
+3. ヘルスチェックは `resp.ok()` まで確認 (403ブロックページを健全と誤判定しない)。
+
+### 運用手順 (再発時)
+1. ポート別に SB到達性を確認: `curl -m 15 -x http://isp.decodo.com:100XX https://salonboard.com/KLP/top/` (EC2上)
+2. 死んだポートに hash される店舗を特定 (hash表は下記) → override JSON に空きポートを割当
+3. 対象店舗の profile/auth を `.bak` 退避 (新IPでは旧セッション無効) → 自動ログインが再シード
+4. 該当 fetch ジョブを `status='queued', run_at=now(), attempts=0` で即時再実行
+
+### hash割当表 (2026-07-02 時点)
+| port | 店舗 |
+|---|---|
+| 10001 | WAO新宿 |
+| 10002 | 中目黒, ADER鯖江, マグサロン (3店衝突・要注意) |
+| 10003 | (空き→新宿三丁目をoverride退避) |
+| 10004 | 代官山 |
+| 10005 | 銀座 |
+| 10006 | ~~新宿三丁目, WAO表参道~~ (死亡IP・退避済) |
+| 10007 | なんば |
+| 10008 | (空き→WAO表参道をoverride退避) |
+| 10009 | B:ALL表参道 |
+| 10010 | 代々木上原 |
