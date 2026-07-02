@@ -3852,8 +3852,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           let opt = opts.find((o) => isBed(o) && /○/.test(o.textContent || ''));
           // 2) ×(満)でないベッド/席
           if (!opt) opt = opts.find((o) => isBed(o) && !/×/.test(o.textContent || ''));
-          // 3) とにかくベッド/席
-          if (!opt) opt = opts.find((o) => isBed(o));
+          // 3) ベッド/席の名前でなくても ○(空き) の設備があれば選ぶ
+          if (!opt) opt = opts.find((o) => /○/.test(o.textContent || ''));
+          // ×(使用中)しか残っていなければ選ばない。×のまま送信すると doComplete
+          // 「まだ登録されていません」の原因不明な失敗になる (2026-07-05 ゆな実例:
+          // 全ベッド×の枠で旧実装が「とにかくベッド」で×ベッド1を選んで送信していた)。
+          // null を返し、直後の送信前ガードで EQUIPMENT_FULL として確定させる。
           return opt ? opt.value : null;
         }).catch(() => null);
         if (bedVal) {
@@ -3872,6 +3876,24 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         setCount > 0
           ? (setBy === 'EQ' ? `EQ指定(${setCount}行)` : setBy === 'name' ? `name一致(${setCount}行)` : `ベッド設定(${setCount}行)`)
           : noOption ? 'option無し' : keptCount > 0 ? '既存維持' : '行なし';
+
+      // 送信前ガード: いずれかの設備行で ×(使用中) が選択されたまま (全設備×で差し替え先が
+      // 無い / SBの既定選択が×のまま) なら、送信しても doComplete「まだ登録されていません」
+      // の原因不明な失敗になるだけ (2026-07-05 ゆな実例)。送信せず EQUIPMENT_FULL として
+      // 確定させる。fail() のスクショに×の設備プルダウンが写るので満床が一目で分かる。
+      const unavailableSelected = await page.evaluate((selCss) => {
+        return Array.from(document.querySelectorAll(selCss))
+          .map((el) => el.options[el.selectedIndex])
+          .filter((o) => o && o.value && /×/.test(o.textContent || ''))
+          .map((o) => (o.textContent || '').trim());
+      }, equipSelector).catch(() => []);
+      if (unavailableSelected.length > 0) {
+        return await fail(
+          `設備がこの時間帯すべて使用中 (${unavailableSelected.join(' / ')}) のため SalonBoard 側に空きがありません。SB のスケジュールで設備/時間を調整のうえ手動登録してください。`,
+          'EQUIPMENT_FULL',
+          true,
+        );
+      }
     }
   } catch (_e) {
     equipResult = 'エラー';
