@@ -22,6 +22,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from "playwright";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -1359,7 +1360,8 @@ async function refreshHealthyProxies(): Promise<void> {
           .get("https://salonboard.com/KLP/top/", { timeout: 12_000 })
           .catch(() => null);
         await ctx.dispose().catch(() => {});
-        return resp ? server : null;
+        // 403 等の Akamai ブロックページも「応答あり」になるため ok() まで見る。
+        return resp && resp.ok() ? server : null;
       } catch {
         return null;
       }
@@ -1395,6 +1397,26 @@ function hashShop(s: string): number {
   return h >>> 0;
 }
 
+// 店舗別プロキシの手動オーバーライド (運用ファイル)。ハッシュ sticky が割り当てた IP が
+// SalonBoard 側でフラグ/遮断されたとき、特定店舗だけを別 IP へ退避させる。
+// JSON 形式: {"<shop_id>": "isp.decodo.com:10003", ...}
+// env と違いコンテナ再作成 (=全店セッション消失) なしで編集でき、毎回読むので即反映。
+// 例: 2026-07-02 に 10006 の出口IPが SB 到達不能となり 新宿三丁目/WAO表参道 (共に
+// hash→10006) が2日間全滅。ヘルスチェック(request probe)は通るため自動退避が効かなかった。
+function proxyShopOverride(shopId?: string): string | null {
+  if (!shopId) return null;
+  try {
+    const raw = readFileSync(
+      "/home/pwuser/.kireidot/proxy-shop-override.json",
+      "utf8"
+    );
+    const v = (JSON.parse(raw) as Record<string, unknown>)[shopId];
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch {
+    return null; // ファイル無し/壊れ → オーバーライドなし
+  }
+}
+
 function pickProxy(forceResidential?: boolean, shopId?: string): { server: string; username?: string; password?: string } {
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
@@ -1403,6 +1425,14 @@ function pickProxy(forceResidential?: boolean, shopId?: string): { server: strin
       server: (process.env.SB_PROXY_FALLBACK_SERVER || "").trim(),
       username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
       password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
+    };
+  }
+  const shopOverride = proxyShopOverride(shopId);
+  if (shopOverride) {
+    return {
+      server: shopOverride,
+      username: process.env.SB_PROXY_USERNAME || undefined,
+      password: process.env.SB_PROXY_PASSWORD || undefined,
     };
   }
   const pool = proxyPoolList();
@@ -1570,7 +1600,7 @@ async function launchStealthContext(opts: {
       `[cfg] Chrome profile seed: ${JSON.stringify(seedUserChromeProfile(userDataDir))}`
     );
   }
-  const ctx = await chromium.launchPersistentContext(userDataDir, {
+  const launchOptions = {
     headless: opts.launch.headless,
     channel: opts.launch.channel,
     proxy: opts.launch.proxy,
@@ -1591,7 +1621,29 @@ async function launchStealthContext(opts: {
           userAgent:
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
         }),
-  });
+  };
+  let ctx: BrowserContext;
+  try {
+    ctx = await chromium.launchPersistentContext(userDataDir, launchOptions);
+  } catch (e) {
+    if (!/has been closed/.test(String(e))) throw e;
+    // JOB_TIMEOUT で宙に浮いた前ジョブの孤児 Chrome が SingletonLock を握っていると、
+    // 新しい Chrome はプロファイル使用中と判断して即終了し、この形の起動失敗になる
+    // (2026-07-02 新宿三丁目/WAO表参道で連鎖)。per-shop mutex により同店舗で正当に
+    // 並行する Chrome は存在しないため、該当プロファイルの Chrome を kill して1回再試行。
+    console.warn(
+      `[launch] 孤児 Chrome を kill して再試行 shop=${opts.shopId.slice(0, 8)}`
+    );
+    try {
+      execSync(`pkill -f -- "--user-data-dir=${userDataDir}"`, {
+        stdio: "ignore",
+      });
+    } catch {
+      /* 対象プロセス無し (pkill exit 1) は無視 */
+    }
+    await new Promise((r) => setTimeout(r, 2_000));
+    ctx = await chromium.launchPersistentContext(userDataDir, launchOptions);
+  }
   await ctx
     .addInitScript(() => {
       try {
