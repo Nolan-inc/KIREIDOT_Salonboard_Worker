@@ -4304,12 +4304,33 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
     `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
   ];
-  let onDetail = false;
-  for (const path of detailCandidates) {
-    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-    // ★高速化: networkidleを待たず、キャンセルボタンが出たら即進む。
-    await page.waitForSelector('#fnc_cancel', { timeout: 10_000 }).catch(() => {});
-    if ((await page.locator('#fnc_cancel').count().catch(() => 0)) > 0) { onDetail = true; break; }
+  const tryOpenDetail = async () => {
+    for (const path of detailCandidates) {
+      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      // ★高速化: networkidleを待たず、キャンセルボタンが出たら即進む。
+      await page.waitForSelector('#fnc_cancel', { timeout: 10_000 }).catch(() => {});
+      if ((await page.locator('#fnc_cancel').count().catch(() => 0)) > 0) return true;
+      // 冪等: 既にキャンセル済みの詳細ページ(ボタン無し)は有効。エラーページのみ次候補へ。
+      const t = (await page.title().catch(() => '')) || '';
+      if (!/エラー/.test(t)) {
+        const body = (await page.locator('body').innerText().catch(() => '')) || '';
+        if (/ステータス[\s\S]{0,30}(キャンセル|取消)/.test(body)) return true;
+      }
+    }
+    return false;
+  };
+  let onDetail = await tryOpenDetail();
+  if (!onDetail) {
+    // 2026-07-02 夕方から、SB が ext/extReserveDetail への「素の直リンク」を
+    // 汎用エラーページ (KPCL009V01) で弾くようになった (電話予約YGのキャンセル7連敗)。
+    // 予約一覧を一度開いて一覧コンテキスト (トークン/Cookie) を作ってから再試行すると
+    // 通る (一覧検索を経由した 07-03 23:50 のキャンセルは成功している)。
+    try {
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      await page.goto(new URL('/KLP/reserve/reserveList/init', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(1_000);
+      onDetail = await tryOpenDetail();
+    } catch (_e) { /* フォールバック失敗は従来どおり下の判定で fail */ }
   }
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
