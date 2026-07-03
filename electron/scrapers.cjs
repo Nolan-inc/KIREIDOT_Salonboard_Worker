@@ -6693,19 +6693,30 @@ async function ensureSalonSelected(page, opts = {}) {
   });
   if (!stores.length) return { ok: false, selected: false, reason: 'group_top_no_stores' };
 
+  // 特定失敗時にエラーへ含める候補一覧 (H-code=サロン名)。これを見て
+  // salonboard_credentials.salonboard_salon_id を設定すれば次回から確実に選択できる。
+  const candidates = stores
+    .slice(0, 8)
+    .map((s) => `${s.id}=${(s.name || '').slice(0, 30)}`)
+    .join(' / ');
+
   let target = null;
   if (salonId) {
     target = stores.find((s) => s.id === salonId) || null;
-    if (!target) return { ok: false, selected: false, reason: `salon_id_not_in_group(${salonId})` };
+    if (!target) {
+      return { ok: false, selected: false, reason: `salon_id_not_in_group(${salonId}) (候補: ${candidates})` };
+    }
   } else if (shopName) {
     const want = shopName.replace(/\s+/g, '');
     target =
       stores.find((s) => s.name && (s.name === want || s.name.includes(want) || want.includes(s.name))) || null;
-    if (!target) return { ok: false, selected: false, reason: 'group_top_name_unmatched' };
+    if (!target) {
+      return { ok: false, selected: false, reason: `group_top_name_unmatched (候補: ${candidates})` };
+    }
   } else {
     // salon_id も店舗名も無く、グループが1店舗だけならそれを選ぶ。複数なら特定不能。
     if (stores.length === 1) target = stores[0];
-    else return { ok: false, selected: false, reason: 'group_top_no_target' };
+    else return { ok: false, selected: false, reason: `group_top_no_target (候補: ${candidates})` };
   }
 
   // サロンのリンクは <a href="javascript:void(0);" id="H..."> で、クリックで
