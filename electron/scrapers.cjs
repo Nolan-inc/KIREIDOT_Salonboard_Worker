@@ -7046,15 +7046,30 @@ const PHOTO_GALLERY_EDIT_URL = 'https://salonboard.com/CNK/draft/photoGalleryEdi
  */
 async function downloadImageToTmp(page, url, tag, opts = {}) {
   try {
-    const resp = await page.context().request.get(url, { timeout: 20_000 });
-    if (!resp.ok()) {
-      await captureScrapeDebug(page, tag, 'image_download_failed', {
-        diagnostics: { url, status: resp.status() },
-      }).catch(() => {});
-      return null;
+    // ★ソース画像は KIREIDOT(Supabase storage)ホスト = SalonBoard ではない。SB用の Decodo
+    //   ISPプロキシを経由すると Supabase 側が 503 で弾く(2026-07-04 郡山 実測)。よって
+    //   まず node の直接 fetch(プロキシ非経由=EC2の素の回線)で取得し、失敗時のみ
+    //   page.context().request(プロキシ経由)へフォールバックする。
+    let buf = null;
+    let ct = '';
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (r.ok) { buf = Buffer.from(await r.arrayBuffer()); ct = (r.headers.get('content-type') || '').toLowerCase(); }
+      else { await captureScrapeDebug(page, tag, 'image_download_failed', { diagnostics: { url, status: r.status, via: 'direct' } }).catch(() => {}); }
+    } catch (e2) {
+      await captureScrapeDebug(page, tag, 'image_download_error', { diagnostics: { url, error: e2?.message ?? String(e2), via: 'direct' } }).catch(() => {});
     }
-    const buf = await resp.body();
-    const ct = (resp.headers()['content-type'] || '').toLowerCase();
+    if (!buf) {
+      const resp = await page.context().request.get(url, { timeout: 20_000 });
+      if (!resp.ok()) {
+        await captureScrapeDebug(page, tag, 'image_download_failed', {
+          diagnostics: { url, status: resp.status(), via: 'proxy' },
+        }).catch(() => {});
+        return null;
+      }
+      buf = await resp.body();
+      ct = (resp.headers()['content-type'] || '').toLowerCase();
+    }
     let ext = 'jpg';
     if (ct.includes('png')) ext = 'png';
     else if (ct.includes('gif')) ext = 'gif';
@@ -7760,6 +7775,45 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
 }
 
 /**
+ * 画像を最大1280pxへ「縮小のみ」JPEG再圧縮した Buffer を返す。
+ * ★SBページ内 canvas は CSP(blob:読込)で silent 失敗するため、CSPの無い about:blank の
+ *   一時ページで実行する(2026-07-04 郡山で確定)。失敗時は null(呼び出し側で原画像)。
+ */
+async function downscaleJpegViaBlank(page, file, maxDim = 1280, quality = 0.8) {
+  try {
+    const buf = fs.readFileSync(file);
+    const tmp = await page.context().newPage();
+    try {
+      await tmp.goto('about:blank', { timeout: 10_000 }).catch(() => {});
+      const out = await tmp.evaluate(async ({ b64, mime, maxDim, quality }) => {
+        const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+        try {
+          const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
+          const url = URL.createObjectURL(srcBlob);
+          const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+          const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+          const scale = Math.min(1, maxDim / Math.max(w || 1, h || 1));
+          const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
+          const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
+          canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+          URL.revokeObjectURL(url);
+          const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', quality));
+          if (!outBlob || !outBlob.size) return null;
+          const bytes = new Uint8Array(await outBlob.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          return { b64: btoa(bin), size: bytes.length, w: cw, h: ch };
+        } catch (_e) { return null; }
+      }, { b64: buf.toString('base64'), mime: 'image/jpeg', maxDim, quality });
+      if (out && out.b64) {
+        return { buf: Buffer.from(out.b64, 'base64'), mime: 'image/jpeg', name: path.basename(file).replace(/\.[^.]+$/, '') + '.jpg', w: out.w, h: out.h, srcBytes: buf.length };
+      }
+    } finally { await tmp.close().catch(() => {}); }
+  } catch (_e) { /* fallthrough */ }
+  return null;
+}
+
+/**
  * styleEdit の FRONT 枠に画像を1枚アップロードする。
  * 未設定の FRONT 画像(img#FRONT_IMG_ID_IMG.img_new_no_photo)をクリック→
  * CN_CMN_imageUploaderModal で画像をアップロード。
@@ -7848,8 +7902,14 @@ async function uploadHairStyleFrontImage(page, file) {
   //      Akamai に弾かれて HTTP undefined/タイムアウト(direct_post_blocked)になりやすい。
   //      切り分け用に残すだけ。既定では使わない。
   // ============================================================
-  const PREFER_DIRECT_POST = /^(1|true|yes)$/i.test(process.env.SALONBOARD_DIRECT_POST ?? '');
-  if (!chooserDone && PREFER_DIRECT_POST) {
+  // ★2026-07-04 方針転換: 美容室(CNB)の doUpload は「登録する」クリックのブラウザXHRだと
+  //   window.waitImgeFile が空のまま送られてサーバが終わらない multipart を待ちハングする
+  //   (実測 102KB でも 180s 無応答→abort。銀座=エステCNKはXHRで通る)。StylePost 等の
+  //   外部ツールと同様、**worker から doUpload へ直接POST(multipartを自前で確定構築)**を
+  //   主経路にする。imgUpload GET は 200 で通っている=同一Cookieの直接POSTは通る見込み。
+  //   直接POSTが「ネットワークで撃てない(all_retries_failed)」ときだけブラウザXHRへ退避。
+  let directPostBlocked = false;
+  if (!chooserDone) {
     // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ (AJAXで遅れて入るため十分待つ)。
     await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
@@ -7892,16 +7952,16 @@ async function uploadHairStyleFrontImage(page, file) {
 
     if (params && params.hasForm && params.targetActionId) {
       try {
-        const buf = fs.readFileSync(file);
-        const name = path.basename(file);
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        // ★縮小(約100KB)して送る。原寸2.2MBだと遅い回線でタイムアウトしやすい。
+        const small = await downscaleJpegViaBlank(page, file).catch(() => null);
+        const buf = small ? small.buf : fs.readFileSync(file);
+        const name = small ? small.name : path.basename(file);
+        const mime = small ? small.mime : ((name.split('.').pop() || 'jpg').toLowerCase() === 'png' ? 'image/png' : 'image/jpeg');
+        imgregLog.push({ direct_post_primary: true, sendBytes: buf.length, downscaled: !!small, w: small && small.w, h: small && small.h, srcBytes: small && small.srcBytes });
         const absUrl = new URL(params.url, page.url()).toString();
         const pageUrl = page.url();
-        // ★Akamai Bot Manager 対策: doUpload は Akamai 配下で、自動化リクエストだと
-        //   ホールドされて 60s タイムアウトすることがある(_abck 等のcookieあり)。
-        //   ブラウザの $.ajax に近いヘッダ(referer/origin/x-requested-with)を付け、
-        //   タイムアウト/中断時は短い間隔で最大3回リトライする(Akamaiは断続的)。
+        // ブラウザの $.ajax に近いヘッダ(referer/origin/x-requested-with)を付け、
+        // タイムアウト/中断時は短い間隔で最大3回リトライする。
         const buildMultipart = () => ({
           formFile: { name, mimeType: mime, buffer: buf },
           setImgId: params.setImgId,
@@ -7921,25 +7981,26 @@ async function uploadHairStyleFrontImage(page, file) {
         let resp = null;
         let lastErr = '';
         for (let attempt = 1; attempt <= 3; attempt++) {
+          const _ts = Date.now();
           try {
             resp = await page.context().request.post(absUrl, {
-              timeout: 25_000,
+              timeout: 60_000,
               headers: reqHeaders,
               multipart: buildMultipart(),
             });
+            imgregLog.push({ direct_post_ok: attempt, status: resp.status(), tookMs: Date.now() - _ts });
             break; // 応答が返れば(2xx/4xx/5xx問わず)ループ終了
           } catch (e) {
             lastErr = e?.message?.split('\n')[0] ?? String(e);
-            imgregLog.push({ direct_post_retry: attempt, error: lastErr });
+            imgregLog.push({ direct_post_retry: attempt, error: lastErr, tookMs: Date.now() - _ts });
             await page.waitForTimeout(1200).catch(() => {});
           }
         }
         if (!resp) {
-          // 3回ともタイムアウト/中断 → Akamai にブロックされている可能性。
-          page.off('response', onResp); page.off('requestfailed', onReqFail);
+          // 3回ともタイムアウト/中断 → ブラウザXHRへ退避(フォールバック)。
           imgregLog.push({ direct_post: 'all_retries_failed', lastErr });
-          return { ok: false, reason: 'direct_post_blocked', imgreg: imgregLog };
-        }
+          directPostBlocked = true;
+        } else {
         const html = await resp.text().catch(() => '');
         // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT_IMG_ID)へ反映する。
         const applied = await page.evaluate((resHtml) => {
@@ -7989,19 +8050,28 @@ async function uploadHairStyleFrontImage(page, file) {
           let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
           return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
         }
-        // HTTP 200 だが imageId が取れない → レスポンス構造を診断ログに出す(ブラウザXHRには落とさない)。
+        // HTTP 200 だが imageId が取れない → レスポンス構造を診断ログに出す。
         imgregLog.push({ via: 'direct_post', status: resp.status(), applied: applied?.fields || applied, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 400) });
         if (resp.status() === 200) {
-          // 200 なのに反映できないだけ。ブラウザXHRで二重送信せず、ここで失敗を返す。
+          // 200 なのに反映できない → 二重送信せずここで失敗を返す(userError等)。
           page.off('response', onResp); page.off('requestfailed', onReqFail);
           return { ok: false, reason: 'direct_post_200_no_imageid', imgreg: imgregLog };
         }
+        // 非200(4xx/5xx) → ブラウザXHRへ退避。
+        directPostBlocked = true;
+        } // end else (resp あり)
       } catch (e) {
-        imgregLog.push({ url: params.url, failed: `direct_post_error: ${e?.message ?? e}` });
+        imgregLog.push({ url: params && params.url, failed: `direct_post_error: ${e?.message ?? e}` });
+        directPostBlocked = true;
       }
+    } else {
+      // フォーム params が取れない → ブラウザXHRへ。
+      directPostBlocked = true;
     }
-    // 直接POSTが使えない/失敗 → 下のブラウザXHR方式にフォールバック。
+    // 直接POSTが撃てなかった時のみ、下のブラウザXHR方式にフォールバックする。
+    // (directPostBlocked=false のまま imageId 取得済みは上で return 済み)
   }
+  if (chooserDone) directPostBlocked = false;
 
   // 実DOM (CN_CMN_imageUploaderModal, #imageUploaderModalBody 内):
   //   ドロップ領域: .jscImageUploaderModalDropArea (ここに drop / クリックで file 選択)
