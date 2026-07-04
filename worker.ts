@@ -1105,6 +1105,8 @@ async function handleJob(job: Job): Promise<void> {
         shopName,
         loginId: job.credentials.login_id,
         password: job.credentials.password,
+        // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
+        relogin: makeRelogin(page, baseUrl, job.credentials),
       });
       // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
       // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
@@ -1804,6 +1806,48 @@ async function isLoggedIn(
     // この候補では判定できず → 次の候補を試す(全滅で needs_login)。
   }
   return "needs_login";
+}
+
+/**
+ * 失効セッションの自己回復用 relogin コールバックを作る (scrapers に opts.relogin で渡す)。
+ * scrapers 側が「有効期限切れ」ページを踏んだときのみ呼ばれ、同一ジョブ内で
+ * logout(/CNC/logout=サーバ側セッション破棄) → fresh login をやり直す。
+ * 失効時限定なので doLogin 乱発にはならない (IPフラグ対策)。
+ * 背景(2026-07-04 郡山): 同一SBアカウントの他セッション操作等で店舗文脈が突然失効し、
+ * ジョブ冒頭の isLoggedIn は通るのに深部で expired を踏んで丸ごと失敗していた。
+ */
+function makeRelogin(
+  page: Page,
+  baseUrl: string,
+  creds: { login_id: string; password: string },
+): () => Promise<boolean> {
+  return async () => {
+    if (autoLoginDisabled()) {
+      console.log("[relogin] auto-login 抑制中のためスキップ");
+      return false;
+    }
+    try {
+      await page
+        .goto(new URL("/CNC/logout", baseUrl).toString(), {
+          waitUntil: "domcontentloaded",
+          timeout: 20_000,
+        })
+        .catch(() => {});
+      const r = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+        loginId: creds.login_id,
+        password: creds.password,
+      });
+      console.log(
+        `[relogin] status=${r.status}${
+          r.status !== "ok" ? ` (${(r as { reason?: string }).reason ?? ""})` : ""
+        }`,
+      );
+      return r.status === "ok";
+    } catch (e) {
+      console.log(`[relogin] error: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  };
 }
 
 /**
@@ -2563,6 +2607,7 @@ async function pushBookingViaProvenForm(
           salonId: string | null;
           shopName: string | null;
           genre: string;
+          relogin?: () => Promise<boolean>;
         },
       ) => Promise<PushBookingResult>;
     }
@@ -2572,6 +2617,8 @@ async function pushBookingViaProvenForm(
     salonId,
     shopName,
     genre,
+    // 失効時の同一ジョブ内自己回復 (スケジュール到達時に expired を踏んだら1回だけ再ログイン)。
+    relogin: makeRelogin(page, baseUrl, job.credentials),
   });
   return result;
 }

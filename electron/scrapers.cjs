@@ -706,25 +706,62 @@ async function scrapeHairBookings(page, opts = {}) {
   // SB が無効セッション扱い(「有効期限切れ/再度ログイン」エラー画面)にするため(実機 2026-06-28)、
   // UI の「本日のスケジュール」リンクをクリックして遷移し、セッション文脈を確立する。
   // 確立後は日付の ?date= goto が通る。単一店(既にスケジュール文脈)では no-op に近い。
-  try {
-    await captureScrapeDebug(page, 'bookings', 'hair_top_before_sched', {
-      diagnostics: { url: page.url() },
-    }).catch(() => null);
-    const schedLink = page
-      .locator('a[href*="/CLP/bt/schedule/salonSchedule"], a:has-text("本日のスケジュール")')
-      .first();
-    if ((await schedLink.count().catch(() => 0)) > 0) {
-      await schedLink.click({ timeout: 10_000 }).catch(() => {});
-      await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
-      await page.waitForTimeout(1500);
-      diag.push(`hair: schedule warmup click -> ${page.url()}`);
-      console.log(`[scrape] hair schedule warmup -> ${page.url()}`);
-    } else {
-      diag.push(`hair: schedule link not found (url=${page.url()})`);
-      console.log(`[scrape] hair schedule link not found (url=${page.url()})`);
+  //
+  // ★失効の自己回復(2026-07-04 郡山): 同一SBアカウントの他セッション操作等で、ジョブ冒頭の
+  //   ログイン確認は通るのにここで「有効期限切れ」を踏むことがある(キャプチャで確定)。
+  //   その場合は opts.relogin (worker 提供: logout→fresh login) → サロン再選択で
+  //   1回だけやり直す(失効時限定なので doLogin 乱発にはならない)。
+  const isExpiredPage = () =>
+    page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+  for (let warmTry = 1; warmTry <= 2; warmTry++) {
+    try {
+      // 失効ページに居るなら warmup(リンク探し)は無駄 → 即 relogin 分岐へ。
+      if (!(await isExpiredPage())) {
+        await captureScrapeDebug(page, 'bookings', 'hair_top_before_sched', {
+          diagnostics: { url: page.url(), warmTry },
+        }).catch(() => null);
+        const schedLink = page
+          .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
+          .first();
+        // ★サロン選択直後は POST リダイレクトの余韻で locator が空振りする(実行コンテキスト
+        //   破棄→catch→0)ことがある(実DOMにはリンクが存在するのに not found と誤判定していた)。
+        //   attached を最大10秒待ってからクリックする。
+        await schedLink.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {});
+        if ((await schedLink.count().catch(() => 0)) > 0) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+            schedLink.click({ timeout: 10_000 }).catch(() => {}),
+          ]);
+          await page.waitForTimeout(1500);
+          diag.push(`hair: schedule warmup click -> ${page.url()}`);
+          console.log(`[scrape] hair schedule warmup -> ${page.url()}`);
+        } else {
+          // リンクが本当に無い場合も、日付付き goto (セッションを壊す) には直行せず、
+          // まず日付なしのスケジュールURLへ遷移して文脈を確立する。
+          diag.push(`hair: schedule link not found (url=${page.url()}) -> bare goto`);
+          console.log(`[scrape] hair schedule link not found (url=${page.url()}) -> bare goto`);
+          await page.goto(new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+          await page.waitForTimeout(1000);
+        }
+      }
+    } catch (_e) {
+      /* best-effort: 下の失効判定/日付ループへ */
     }
-  } catch (_e) {
-    /* best-effort: 失敗しても日付ループの直接 goto を試す */
+    if (!(await isExpiredPage())) break; // 文脈確立できた
+    if (warmTry === 1 && typeof opts.relogin === 'function') {
+      diag.push('hair: session expired at warmup -> relogin');
+      console.log('[scrape] hair warmup expired -> relogin');
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        // ログインし直したのでサロンを選び直してから再 warmup。
+        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+        continue;
+      }
+    }
+    break; // relogin 不可/失敗 → 従来どおり日付ループへ(1日目の失効判定で loggedOut 扱いになる)
   }
 
   for (let i = 0; i < MAX_DAYS; i++) {
@@ -1037,7 +1074,12 @@ async function _scrapeHairBookingsLegacy(page, opts = {}) {
 
 async function scrapeBookings(page, opts = {}) {
   const months = Number.isFinite(opts.months) ? opts.months : 3;
-  const range = defaultBookingDateRange(months);
+  // opts.range ({fromStr,toStr}) 指定時はそれを優先 (reserveId回収の対象日1日スクレイプ等)。
+  // 従来は無視して常に defaultBookingDateRange だったため、未来日(例 8/28)の登録直後の
+  // 回収が「直近3ヶ月」を嘗めて対象日に届かず reserveId を取りこぼしていた。
+  const range = (opts.range && opts.range.fromStr && opts.range.toStr)
+    ? opts.range
+    : defaultBookingDateRange(months);
   const diag = [];
 
   // グループアカウント(1ログイン複数サロン)はログイン直後 /CNC/groupTop/ (サロン一覧)に
@@ -1069,7 +1111,11 @@ async function scrapeBookings(page, opts = {}) {
   // エステ用の予約一覧フロー(reserveList navigation/検索/抽出)は通さない。
   if (opts.genre === 'hair') {
     try {
-      return await scrapeHairBookings(page, { range, diag, baseUrl: opts.baseUrl });
+      return await scrapeHairBookings(page, {
+        range, diag, baseUrl: opts.baseUrl,
+        // 失効時の自己回復(relogin)後にサロンを選び直すため salonId/shopName も渡す。
+        salonId: opts.salonId, shopName: opts.shopName, relogin: opts.relogin,
+      });
     } catch (e) {
       const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
         diagnostics: { url: page.url(), error: e?.message ?? String(e) },
@@ -3568,50 +3614,72 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // よって (1) 対象日のスケジュール画面を開き #rlastupdate を取得 →
   //         (2) それを付けて登録フォームを開く。
   // ジャンル別: hair=/CLP/bt/schedule/, エステ=/KLP/schedule/。
+  //
+  // ★失効の自己回復(2026-07-04 郡山): ジョブ冒頭のログイン確認は通るのに、ここで
+  //   「有効期限切れ」を踏むことがある(同一アカウントの他セッション操作等)。その場合は
+  //   opts.relogin (worker 提供: logout→fresh login) → サロン再選択で1回だけやり直す。
   let rlastupdate = '';
-  try {
-    if (genre === 'hair') {
-      // ★美容室(グループ)のセッション維持(実機 郡山で確定):
-      //   サロン選択後 /CLP/bt/top/ に居る。日付付き schedule へ直接 goto すると
-      //   「有効期限が切れました」= 無効セッション扱いになる。/CLP/bt/top/ の
-      //   「本日のスケジュール」リンク(<a href="/CLP/bt/schedule/salonSchedule/">)を
-      //   クリックして遷移し(文脈確立)、その画面の #rlastupdate を読む。
-      //   rlastupdate は日付非依存の現在時刻トークンなので、対象予約日(未来日)の
-      //   登録URLにもそのまま載せてよい。
-      const schedLink = page
-        .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
-        .first();
-      await schedLink.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
-      if ((await schedLink.count().catch(() => 0)) > 0) {
-        await Promise.all([
-          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
-          schedLink.click({ timeout: 10_000 }).catch(() => {}),
-        ]);
+  const pageExpired = () =>
+    page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+  for (let schedTry = 1; schedTry <= 2; schedTry++) {
+    try {
+      if (genre === 'hair') {
+        // ★美容室(グループ)のセッション維持(実機 郡山で確定):
+        //   サロン選択後 /CLP/bt/top/ に居る。日付付き schedule へ直接 goto すると
+        //   「有効期限が切れました」= 無効セッション扱いになる。/CLP/bt/top/ の
+        //   「本日のスケジュール」リンク(<a href="/CLP/bt/schedule/salonSchedule/">)を
+        //   クリックして遷移し(文脈確立)、その画面の #rlastupdate を読む。
+        //   rlastupdate は日付非依存の現在時刻トークンなので、対象予約日(未来日)の
+        //   登録URLにもそのまま載せてよい。
+        const schedLink = page
+          .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
+          .first();
+        await schedLink.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
+        if ((await schedLink.count().catch(() => 0)) > 0) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+            schedLink.click({ timeout: 10_000 }).catch(() => {}),
+          ]);
+        } else {
+          // リンクが無い(単一店 hair 等)ときのみ従来 goto。
+          await page.goto(new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        }
       } else {
-        // リンクが無い(単一店 hair 等)ときのみ従来 goto。
-        await page.goto(new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
+        const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
+        schedUrl.searchParams.set('date', when.yyyymmdd);
+        await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       }
-    } else {
-      // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
-      const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
-      schedUrl.searchParams.set('date', when.yyyymmdd);
-      await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      // #rlastupdate が出現したら即取得 (networkidle は待たない)。
+      await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
+      rlastupdate = (await page
+        .locator('#rlastupdate')
+        .first()
+        .textContent()
+        .catch(() => ''))?.trim() || '';
+    } catch (e) {
+      if (schedTry === 2 || typeof opts.relogin !== 'function') {
+        return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+      }
     }
-    // #rlastupdate が出現したら即取得 (networkidle は待たない)。
-    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-    rlastupdate = (await page
-      .locator('#rlastupdate')
-      .first()
-      .textContent()
-      .catch(() => ''))?.trim() || '';
-    if (!rlastupdate) {
-      // 取れなかったら診断キャプチャ (セッション/画面確認用)。
-      await captureScrapeDebug(page, 'bookings', 'sched_no_rlastupdate', {
-        diagnostics: { url: page.url(), title: await page.title().catch(() => ''), genre },
-      }).catch(() => null);
+    if (rlastupdate) break; // 取得成功
+    // 取れなかった: 失効なら relogin→サロン再選択で1回だけやり直す。
+    const expired = await pageExpired();
+    console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} sched try${schedTry} rlastupdate=なし expired=${expired}`);
+    if (schedTry === 1 && expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        await ensureReserveSalonContext(page, baseUrl, opts);
+        continue;
+      }
     }
-  } catch (e) {
-    return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+    // 診断キャプチャを残してループ終了 (rlastupdate 無しでも下の登録フォーム開きで最終判定)。
+    await captureScrapeDebug(page, 'bookings', 'sched_no_rlastupdate', {
+      diagnostics: { url: page.url(), title: await page.title().catch(() => ''), genre, schedTry },
+    }).catch(() => null);
+    break;
   }
 
   // 登録フォームを URL で開く。ジャンル別ルート + ジャンル別パラメータ。
@@ -4305,9 +4373,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       staffName: p.staff_name,
       customerName: p.customer_name,
     };
-    // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
-    let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
-    if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
+    // ★美容室(hair)はエステ用 reserveList(findReserveIdForBooking=/KLP/...)へ遷移すると
+    //   セッションを壊すため使わない。対象日1日をスケジュールスクレイプで回収する
+    //   (向井優一 実例: エステ一覧に入って cands=0 + セッション破壊 → 回収失敗していた)。
+    let found = genre === 'hair'
+      ? await findReserveIdViaScrape(page, target, { baseUrl, genre: 'hair' }).catch(() => null)
+      : await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+    if (!found && genre !== 'hair') found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
       detailUrl = detailUrl || detailUrlFor(found);
