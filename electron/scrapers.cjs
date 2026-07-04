@@ -7262,9 +7262,17 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   // 1) スタイル一覧 → 「スタイル新規追加」で styleEdit を開く。
   try {
     const listUrl = new URL('/CNB/draft/styleList/', baseUrl).toString();
+    // グループ店舗はサロン未選択のまま /CNB/draft/styleList/ へ直接遷移すると
+    // 「ユーザエラー」に着地する(groupTop に跳ね返らないため後追いの
+    // ensureSalonSelected が効かず、スタイル登録フォームに到達できず失敗する。
+    // ADER 郡山で判明)。salonId があれば先に groupTop でサロンを選んでから入る。
+    if (opts.salonId) {
+      await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    }
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-    // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直す。
+    // まだ groupTop に跳ね返された場合はサロンを選び直す。
     const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
     if (!sel.ok) {
       const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_store_select', { diagnostics: { url: page.url(), reason: sel.reason } });
