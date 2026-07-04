@@ -810,18 +810,39 @@ async function handleJob(job: Job): Promise<void> {
         String(payload.external_booking_id ?? "").trim().length > 0;
       let result: PushBookingResult;
       if (isBookingUpdate) {
+        // ジャンル/グループ対応 (登録と同じ): hair=/CLP/bt 配下 + サロン選択 + 失効時relogin。
+        const chGenre =
+          (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+        const chSalonId =
+          (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+        const chShopName = (job as { shop_name?: string | null }).shop_name ?? null;
         const cr = await (
           scrapers as unknown as {
             changeBookingViaForm: (
               pg: Page,
               pl: PushBookingPayload,
-              opts: { baseUrl: string; enableChange: boolean },
+              opts: {
+                baseUrl: string;
+                enableChange: boolean;
+                genre: string;
+                salonId: string | null;
+                shopName: string | null;
+                relogin?: () => Promise<boolean>;
+              },
             ) => Promise<PushBookingResult>;
           }
-        ).changeBookingViaForm(page, payload, { baseUrl, enableChange: ENABLE_PUSH });
+        ).changeBookingViaForm(page, payload, {
+          baseUrl,
+          enableChange: ENABLE_PUSH,
+          genre: chGenre,
+          salonId: chSalonId,
+          shopName: chShopName,
+          relogin: makeRelogin(page, baseUrl, job.credentials),
+        });
         if (cr.status === "ok") {
           cr.externalId = payload.external_booking_id ?? null;
-          cr.detailUrl = `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
+          const chRoot = chGenre === "hair" ? "/CLP/bt" : "/KLP";
+          cr.detailUrl = `${new URL(baseUrl).origin}${chRoot}/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
           cr.alreadyExists = false;
         }
         result = cr;
@@ -926,6 +947,8 @@ async function handleJob(job: Job): Promise<void> {
               salonId,
               shopName,
               genre,
+              // 失効時の同一ジョブ内自己回復。
+              relogin: makeRelogin(page, baseUrl, job.credentials),
             });
       await reportScraperResult(job, "cancel_booking", result, {
         booking_id: p.booking_id ?? null,

@@ -4472,9 +4472,14 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   //      → ページ内 HTML ダイアログ (confirm() ではない):
   //          「予約をキャンセルにします。よろしいですか？」
   //          <a class="...accept">はい</a> / <a class="...deny">いいえ</a>
+  // ジャンル別ルート (登録/変更と同じ: hair=/CLP/bt 配下、エステ=/KLP 配下)。
+  const cGenre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const cROOT = reservePathRoot(cGenre);
+  // グループ店舗は先にサロン選択で店舗文脈を確立 (未選択だとエラーページ着地)。
+  await ensureReserveSalonContext(page, baseUrl, opts);
   const detailCandidates = [
-    `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
-    `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
+    `${cROOT}/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+    `${cROOT}/reserve/net/reserveDetail/?reserveId=${reserveId}`,
   ];
   const tryOpenDetail = async () => {
     for (const path of detailCandidates) {
@@ -4493,13 +4498,31 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   };
   let onDetail = await tryOpenDetail();
   if (!onDetail) {
+    // 失効ページなら relogin (worker提供) で同一ジョブ内復旧を1回試す。
+    const expired = await page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+    if (expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        await ensureReserveSalonContext(page, baseUrl, opts);
+        onDetail = await tryOpenDetail();
+      }
+    }
+  }
+  if (!onDetail) {
     // 2026-07-02 夕方から、SB が ext/extReserveDetail への「素の直リンク」を
     // 汎用エラーページ (KPCL009V01) で弾くようになった (電話予約YGのキャンセル7連敗)。
-    // 予約一覧を一度開いて一覧コンテキスト (トークン/Cookie) を作ってから再試行すると
+    // 一覧/スケジュールを一度開いてコンテキスト (トークン/Cookie) を作ってから再試行すると
     // 通る (一覧検索を経由した 07-03 23:50 のキャンセルは成功している)。
+    // hair はエステ用 reserveList がセッションを壊すため、スケジュール(リンククリック相当の
+    // 日付なしURL) で文脈を作る。
     try {
       await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-      await page.goto(new URL('/KLP/reserve/reserveList/init', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      const ctxUrl = cGenre === 'hair'
+        ? new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString()
+        : new URL('/KLP/reserve/reserveList/init', baseUrl).toString();
+      await page.goto(ctxUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
       await page.waitForTimeout(1_000);
       onDetail = await tryOpenDetail();
     } catch (_e) { /* フォールバック失敗は従来どおり下の判定で fail */ }
@@ -4606,27 +4629,48 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMM = String(when.minute).padStart(2, '0');
 
-  // 1) 変更画面を開く (ext → net)
+  // ジャンル別ルート (登録と同じ: hair=/CLP/bt 配下、エステ=/KLP 配下)。
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const ROOT = reservePathRoot(genre);
+
+  // グループ店舗(郡山等)はサロン選択で店舗文脈を確立してから変更フォームへ。
+  await ensureReserveSalonContext(page, baseUrl, opts);
+
+  // 1) 変更画面を開く (ext → net)。失効ページに着地したら relogin→サロン再選択で1回やり直す。
   const candidates = [
-    `/KLP/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
-    `/KLP/reserve/net/reserveChange/?reserveId=${reserveId}`,
+    `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
+    `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`,
   ];
+  const formSel = 'select#jsiRsvHour, select#rsvTime, select[name="rsvTerm"], #rlastupdate, a#change, a#regist';
   let onForm = false;
-  for (const path of candidates) {
-    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
-    await page.waitForSelector('select#jsiRsvHour, #rlastupdate, a#change, a#regist', { timeout: 12_000 }).catch(() => {});
-    if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#change, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
+  for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
+    for (const path of candidates) {
+      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
+      await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
+      if ((await page.locator(formSel).count().catch(() => 0)) > 0) { onForm = true; break; }
+    }
+    if (onForm) break;
+    const expired = await page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+    if (openTry === 1 && expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) { await ensureReserveSalonContext(page, baseUrl, opts); continue; }
+    }
+    break;
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
-  const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, url: page.url() } });
+  const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, genre, url: page.url() } });
   if (!onForm) {
     return fail(`予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 2) 担当 (指定があれば更新。登録フォームと同じ select#salonStaffList + hidden #staffId)
+  // 2) 担当 (指定があれば更新)。
+  //    エステ: select#salonStaffList + hidden #staffId / 美容室: select[name="stylistId"]。
+  //    要素の存在チェック付きで両方試す (存在しない方は no-op)。
   const staffExt = (p.salonboard_staff_external_id || '').trim();
   if (staffExt) {
     await page.locator('select#salonStaffList').first().selectOption({ value: staffExt }).catch(() => {});
@@ -4634,47 +4678,62 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       const setVal = (el) => { if (el) { el.value = ext; el.dispatchEvent(new Event('change', { bubbles: true })); } };
       setVal(document.getElementById('staffId'));
       document.querySelectorAll('input[name="staffId"]').forEach(setVal);
-      for (const name of ['salonStaffList', 'staffIdList']) {
+      for (const name of ['salonStaffList', 'staffIdList', 'stylistId']) {
         const sel = document.querySelector(`select[name="${name}"]`);
         if (sel && Array.from(sel.options).some((o) => o.value === ext)) { sel.value = ext; sel.dispatchEvent(new Event('change', { bubbles: true })); }
       }
     }, staffExt).catch(() => {});
   }
 
-  // 3) 時間・所要を更新 (登録フォームと同じセレクタ)。所要は新規登録と同じ堅牢化:
-  //    JSで全selectをセット+change発火し、反映を検証してダメなら selectOption で再セット。
+  // 3) 時間・所要を更新。エステ(jsiRsvHour/Minute + jsiRsvTermHour/Minute) と
+  //    美容室(rsvTime=HHMM + rsvTerm=分) の両フィールドを存在チェック付きでセットする。
   {
     const dMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
       ? Number(p.duration_min)
       : 60;
     const thVal = String(Math.floor(dMin / 60) * 60);
     const tmVal = String(dMin % 60).padStart(2, '0');
+    const hhmm = `${String(when.hour).padStart(2, '0')}${startMM}`;
     await page.evaluate(
-      ({ hh, mm, th, tm }) => {
-        const setSel = (id, val) => {
-          const el = document.getElementById(id);
-          if (!el) return;
-          if (!Array.from(el.options).some((o) => o.value === val)) return;
+      ({ hh, mm, th, tm, hhmm, dur }) => {
+        const setSel = (el, val) => {
+          if (!el) return false;
+          if (!Array.from(el.options).some((o) => o.value === val)) return false;
           el.value = val;
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
         };
-        setSel('jsiRsvHour', hh);
-        setSel('jsiRsvMinute', mm);
-        setSel('jsiRsvTermHour', th);
-        setSel('jsiRsvTermMinute', tm);
+        const byId = (id) => document.getElementById(id);
+        // エステ
+        setSel(byId('jsiRsvHour'), hh);
+        setSel(byId('jsiRsvMinute'), mm);
+        setSel(byId('jsiRsvTermHour'), th);
+        setSel(byId('jsiRsvTermMinute'), tm);
+        // 美容室
+        setSel(byId('rsvTime') || document.querySelector('select[name="time"]'), hhmm);
+        const term = byId('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+        if (term && !setSel(term, String(dur))) {
+          const cand = Array.from(term.options).map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n >= dur).sort((a, b) => a - b)[0];
+          if (cand != null) setSel(term, String(cand));
+        }
       },
-      { hh: String(when.hour), mm: startMM, th: thVal, tm: tmVal },
+      { hh: String(when.hour), mm: startMM, th: thVal, tm: tmVal, hhmm, dur: dMin },
     ).catch(() => {});
     await page.waitForTimeout(300);
-    const ok = await page.evaluate(({ th, tm }) => {
+    const ok = await page.evaluate(({ th, tm, hhmm, dur }) => {
       const h = document.getElementById('jsiRsvTermHour');
       const m = document.getElementById('jsiRsvTermMinute');
-      return !!h && !!m && h.value === th && m.value === tm;
-    }, { th: thVal, tm: tmVal }).catch(() => false);
+      if (h && m) return h.value === th && m.value === tm;
+      const t = document.getElementById('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+      const rt = document.getElementById('rsvTime') || document.querySelector('select[name="time"]');
+      if (t) return Number(t.value) >= Number(dur) && (!rt || rt.value === hhmm);
+      return false;
+    }, { th: thVal, tm: tmVal, hhmm, dur: dMin }).catch(() => false);
     if (!ok) {
       await page.locator('select#jsiRsvTermHour').first().selectOption({ value: thVal }).catch(() => {});
       await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: tmVal }).catch(() => {});
+      await page.locator('select#rsvTermId, select[name="rsvTerm"]').first().selectOption({ value: String(dMin) }).catch(() => {});
     }
   }
 
