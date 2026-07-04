@@ -7773,20 +7773,34 @@ async function uploadHairStyleFrontImage(page, file) {
   // /imgreg/ (モーダル表示 & doUpload) のリクエスト/レスポンスを記録して、
   // 失敗時に「なぜ通信に失敗したか」を実データで確認できるようにする。
   const imgregLog = [];
+  const _t0 = Date.now();
+  // XHRホールド時の直接POSTフォールバック用に、送信バイト(縮小後)を関数スコープで保持。
+  const _sendMeta = { b64: null, mime: null, name: null };
   const onResp = async (resp) => {
     try {
       const url = resp.url();
       if (!/\/imgreg\//i.test(url)) return;
       let bodyHead = '';
       try { bodyHead = (await resp.text()).slice(0, 600); } catch (_e) { bodyHead = '(body unread)'; }
-      imgregLog.push({ url, status: resp.status(), bodyHead });
+      imgregLog.push({ url, status: resp.status(), bodyHead, tMs: Date.now() - _t0 });
     } catch (_e) { /* noop */ }
   };
   const onReqFail = (req) => {
-    try { if (/\/imgreg\//i.test(req.url())) imgregLog.push({ url: req.url(), failed: req.failure()?.errorText || 'request failed' }); } catch (_e) {}
+    try { if (/\/imgreg\//i.test(req.url())) imgregLog.push({ url: req.url(), failed: req.failure()?.errorText || 'request failed', tMs: Date.now() - _t0 }); } catch (_e) {}
+  };
+  // ★決定打診断: doUpload の POST 開始時に「実際に送られる body のバイト数」を記録する。
+  //   postBytes が multipart 相応(縮小後 ~100KB+境界)なら本当の通信ホールド、
+  //   ~1KB 程度なら formFile=空 (waitImgeFile 未セット) が真因と確定できる。
+  const onReq = (req) => {
+    try {
+      if (!/doUpload/i.test(req.url())) return;
+      const b = req.postDataBuffer && req.postDataBuffer();
+      imgregLog.push({ reqStart: req.url().replace(/^https?:\/\/[^/]+/, ''), postBytes: b ? b.length : null, tMs: Date.now() - _t0 });
+    } catch (_e) { /* noop */ }
   };
   page.on('response', onResp);
   page.on('requestfailed', onReqFail);
+  page.on('request', onReq);
 
   let chooserDone = false;
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
@@ -8023,53 +8037,81 @@ async function uploadHairStyleFrontImage(page, file) {
     //     input.files と window.waitImgeFile にセットし、change を発火する。
     //     こうすると multipart 本体がメモリから確実に送られ、アップロードが通る。
     let usedInMemory = false;
+    let sentBytes = null;
     try {
       const buf = fs.readFileSync(file);
-      const b64 = buf.toString('base64');
       const name = path.basename(file);
       const ext = (name.split('.').pop() || 'jpg').toLowerCase();
       const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-      usedInMemory = await page.evaluate(async ({ b64, name, mime }) => {
-        const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+      // (直接POSTフォールバックでも使うため関数スコープへ)
+      _sendMeta.b64 = buf.toString('base64'); _sendMeta.mime = mime; _sendMeta.name = name;
+
+      // ★縮小は SB ページ内ではなく **CSP の無い about:blank 一時ページ** で行う。
+      //   SB ページ内 canvas は CSP(blob:/data: 制限)で Image 読込が silently 失敗し、
+      //   原寸(2.2MB)のまま送って doUpload が時間切れ ERR_ABORTED になっていた
+      //   (2026-07-04 郡山 imgreg 診断 srcBytes=2229884 で確定)。
+      let sendB64 = buf.toString('base64');
+      let sendMime = mime;
+      let sendName = name;
+      try {
+        const tmp = await page.context().newPage();
         try {
-          // ★遅い住宅プロキシでも SB の doUpload(サイト側 jQuery timeout 35s)以内に送り切れるよう、
-          //   最大1440pxへ「縮小のみ」してJPEG再圧縮しアップロードバイトを削減する(数MB→数百KB)。
-          //   拡大はしないので SB の解像度チェックは通る。再圧縮に失敗したら原画像で続行。
-          let outBytes = null, outMime = mime, outName = name;
-          try {
-            const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
-            const url = URL.createObjectURL(srcBlob);
-            const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
-            const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-            const scale = Math.min(1, 1440 / Math.max(w || 1, h || 1));
-            const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
-            const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
-            canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
-            URL.revokeObjectURL(url);
-            const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', 0.82));
-            if (outBlob && outBlob.size > 0) { outBytes = new Uint8Array(await outBlob.arrayBuffer()); outMime = 'image/jpeg'; outName = name.replace(/\.[^.]+$/, '') + '.jpg'; }
-          } catch (_e) { /* 原画像で続行 */ }
-          if (!outBytes) outBytes = toBytes(atob(b64));
-          const f = new File([outBytes], outName, { type: outMime });
-          const dt = new DataTransfer();
-          dt.items.add(f);
-          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
-          if (inp) {
-            inp.files = dt.files;
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
+          await tmp.goto('about:blank', { timeout: 10_000 }).catch(() => {});
+          const out = await tmp.evaluate(async ({ b64, mime }) => {
+            const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+            try {
+              const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
+              const url = URL.createObjectURL(srcBlob);
+              const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+              const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+              const scale = Math.min(1, 1280 / Math.max(w || 1, h || 1));
+              const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
+              const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
+              canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+              URL.revokeObjectURL(url);
+              const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', 0.8));
+              if (!outBlob || !outBlob.size) return null;
+              const ab = await outBlob.arrayBuffer();
+              const bytes = new Uint8Array(ab);
+              let bin = '';
+              for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+              return { b64: btoa(bin), size: bytes.length, w: cw, h: ch };
+            } catch (_e) { return null; }
+          }, { b64: sendB64, mime });
+          if (out && out.b64) {
+            sendB64 = out.b64;
+            sendMime = 'image/jpeg';
+            sendName = name.replace(/\.[^.]+$/, '') + '.jpg';
+            sentBytes = out.size;
+            imgregLog.push({ downscaled: true, outBytes: out.size, w: out.w, h: out.h, srcBytes: buf.length });
+          } else {
+            imgregLog.push({ downscaled: false, srcBytes: buf.length });
           }
-          // 念のため waitImgeFile も同一の in-memory File に。
-          if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
-          else window.waitImgeFile = f;
-          return true;
-        } catch (_e) { return false; }
-      }, { b64, name, mime }).catch(() => false);
+        } finally {
+          await tmp.close().catch(() => {});
+        }
+      } catch (_e) { imgregLog.push({ downscaled: false, err: String(_e).slice(0, 60), srcBytes: buf.length }); }
+
+      // ★縮小済みJPEGを一時ファイルに書き、Playwright ネイティブの setInputFiles で投入する。
+      //   JS注入(File+DataTransfer+dispatchEvent)は isTrusted=false のため Akamai センサーの
+      //   評価が下がり、doUpload XHR が無期限ホールドされていた疑い(102KBでも180秒無応答)。
+      //   setInputFiles は CDP 経由の trusted な入力で、手動のファイル選択と同条件になる。
+      const smallPath = `${file}.small.jpg`;
+      try {
+        _sendMeta.b64 = sendB64; _sendMeta.mime = sendMime; _sendMeta.name = sendName;
+        fs.writeFileSync(smallPath, Buffer.from(sendB64, 'base64'));
+        await modalInput.setInputFiles(smallPath, { timeout: 8_000 });
+        usedInMemory = true; // (= 縮小ファイル投入成功。変数名は互換のため維持)
+      } catch (_e) { usedInMemory = false; }
+      // 後始末は best-effort (数百KBの tmp。失敗しても害なし)。
+      setTimeout(() => { try { fs.unlinkSync(smallPath); } catch (_e2) { /* noop */ } }, 300_000);
     } catch (_e) { /* fallthrough */ }
 
     if (!usedInMemory) {
-      // in-memory に失敗したら従来の setInputFiles。
+      // 縮小/書出しに失敗したら原画像で従来の setInputFiles。
       await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
     }
+    imgregLog.push({ inMemory: usedInMemory, sentBytes });
   }
 
   const isDone = () => page.evaluate((prev) => {
@@ -8093,6 +8135,79 @@ async function uploadHairStyleFrontImage(page, file) {
     return !!(t && (t.getAttribute('src') || '').trim());
   }, null, { timeout: 12_000 }).catch(() => {});
 
+  // ★ERR_ABORTED の真因(2026-07-04 郡山で imgreg ログにより確定):
+  //   SB の file_upload() は $.ajax(timeout:35000) で doUpload へ POST し、35秒を超えると
+  //   jQuery が XHR を abort する(= ブラウザ側では net::ERR_ABORTED、画面は「通信に失敗しました」)。
+  //   プロキシ(ISP)経由の遅いアップロードや Akamai の一時ホールドで 35 秒を超えるため、
+  //   doUpload の $.ajax だけ timeout を 180 秒へ引き上げるパッチを当ててからクリックする。
+  await page.evaluate(() => {
+    try {
+      const jq = window.jQuery || window.$;
+      if (jq && jq.ajax && !jq.__kdDoUploadPatched) {
+        const orig = jq.ajax;
+        jq.ajax = function (a, b) {
+          try {
+            const opts = (typeof a === 'object' && a) ? a : (b || {});
+            if (opts && typeof opts.url === 'string' && /doUpload/.test(opts.url)) opts.timeout = 180000;
+          } catch (_e) { /* noop */ }
+          return orig.apply(this, arguments);
+        };
+        jq.__kdDoUploadPatched = true;
+      }
+    } catch (_e) { /* noop */ }
+  }).catch(() => {});
+
+  // ★v0.2.116 確実策の復元 + 決定打診断:
+  //   SB の file_upload() は FormData.append('formFile', window.waitImgeFile) で送る。
+  //   waitImgeFile は input の change → prepareFileInfo で入るが、uploadMode フラグ等の
+  //   条件で入らないことがある。**空のまま送ると formFile=空 POST → サーバ無応答 →
+  //   クライアント timeout abort(ERR_ABORTED)** — 今回の症状と同一の既知パターン。
+  //   クリック前に waitImgeFile を検証し、空なら input.files[0] から補償する。
+  {
+    const pre = await page.evaluate(() => {
+      const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
+      const th = document.querySelector('img.jscImageUploaderModalThumbnail');
+      const w = window.waitImgeFile;
+      return {
+        inputFiles: inp && inp.files ? inp.files.length : -1,
+        thumbSet: !!(th && (th.getAttribute('src') || '').trim()),
+        waitType: typeof w,
+        waitSize: (w && typeof w === 'object' && typeof w.size === 'number') ? w.size : null,
+        uploadMode: (typeof window.uploadMode !== 'undefined') ? String(window.uploadMode) : 'undef',
+        hasUploadFn: typeof window.file_upload === 'function',
+      };
+    }).catch(() => null);
+    imgregLog.push({ pre });
+    if (!pre || !pre.waitSize) {
+      const fixed = await page.evaluate(() => {
+        try {
+          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
+          const f = inp && inp.files && inp.files[0];
+          if (!f) return { ok: false, reason: 'no_input_file' };
+          if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
+          window.waitImgeFile = window.waitImgeFile && typeof window.waitImgeFile === 'object' && window.waitImgeFile.size ? window.waitImgeFile : f;
+          const w = window.waitImgeFile;
+          return { ok: true, size: (w && w.size) || null };
+        } catch (e) { return { ok: false, reason: String(e).slice(0, 60) }; }
+      }).catch(() => ({ ok: false, reason: 'eval_failed' }));
+      imgregLog.push({ waitImgeFileCompensated: fixed });
+    }
+  }
+
+  // ★人間化 (Phase3-lite と同等): Akamai は _abck センサーでマウス軌跡等を評価し、
+  //   兆候が無いセッションの XHR POST をホールドする。予約登録では submit 前の人間化で
+  //   書込500が解消済み。画像アップロードの doUpload も同じ対策を適用する。
+  try {
+    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    const jit = (lo, hi) => lo + Math.floor(Math.random() * Math.max(1, hi - lo));
+    await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+    await page.waitForTimeout(jit(300, 800));
+    await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+    await page.waitForTimeout(jit(300, 700));
+    await page.mouse.wheel(0, jit(-80, 80)).catch(() => {});
+    await page.waitForTimeout(jit(400, 900));
+  } catch (_e) { /* 人間化は best-effort */ }
+
   // 「登録する」(jscImageUploaderModalSubmitButton) を **1回だけ** クリック。
   // 手動と同じ操作。直接 file_upload() 呼びや連打はしない(doUpload が ERR_ABORTED に
   // なる原因になりうる)。
@@ -8104,8 +8219,8 @@ async function uploadHairStyleFrontImage(page, file) {
     return { ok: false, reason: 'modal_register_not_found' };
   }
 
-  // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを最大40秒待つ。
-  // 連打せず、状態が確定するまで素直に待つ。
+  // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを待つ。
+  // doUpload の timeout を 180 秒へ延長したため、待ち上限も 190 秒 (連打はしない)。
   await page.waitForFunction((prev) => {
     const h = document.getElementById('FRONT_IMG_ID');
     const hv = h ? (h.value || '') : '';
@@ -8116,11 +8231,79 @@ async function uploadHairStyleFrontImage(page, file) {
     const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
     const err = !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(document.body?.innerText || '');
     return done || err;
-  }, before, { timeout: 40_000 }).catch(() => {});
+  }, before, { timeout: 190_000 }).catch(() => {});
 
-  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); } catch (_e) {} };
+  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); page.off('request', onReq); } catch (_e) {} };
 
   if (await hasCommError()) {
+    // ★最終フォールバック(2026-07-04 郡山): ブラウザXHRの doUpload が Akamai に
+    //   無期限ホールドされる(102KB/180秒でも無応答)ケースで、同一Cookie(成熟_abck含む)の
+    //   まま Playwright request.post で直接POSTする。銀座(エステ/CNK)ではブラウザXHRが
+    //   通るため既定経路はそのまま、失敗時のみ発動。
+    try {
+      const params = await page.evaluate(() => {
+        const f = document.querySelector('#imgUploadForm');
+        if (!f) return null;
+        const g = (n) => { const el = f.querySelector(`input[name="${n}"]`); return el ? (el.value || '') : ''; };
+        const ctx = (typeof window !== 'undefined' && window.CONTEXT_URL_STR) || '/CNB';
+        const ustr = (typeof window !== 'undefined' && window.URL_STR) || 'imgUpload/';
+        const wFlg = g('wFlg');
+        return {
+          url: ctx + '/imgreg/' + ustr + 'doUpload' + (wFlg === 'true' ? '?wFlg=true' : ''),
+          setImgId: g('setImgId'), dataKey: g('dataKey'), targetActionId: g('targetActionId'),
+          token: g('org.apache.struts.taglib.html.TOKEN'), storeId: g('STORE_ID'),
+          modified: g('modified'), pubManageId: g('pubManageId'),
+        };
+      }).catch(() => null);
+      if (params && params.targetActionId && _sendMeta.b64) {
+        const absUrl = new URL(params.url, page.url()).toString();
+        const pageUrl = page.url();
+        const resp = await page.context().request.post(absUrl, {
+          timeout: 60_000,
+          headers: {
+            referer: pageUrl,
+            origin: new URL(pageUrl).origin,
+            'x-requested-with': 'XMLHttpRequest',
+            accept: 'text/html, */*; q=0.01',
+          },
+          multipart: {
+            formFile: { name: _sendMeta.name, mimeType: _sendMeta.mime, buffer: Buffer.from(_sendMeta.b64, 'base64') },
+            setImgId: params.setImgId, dataKey: params.dataKey, targetActionId: params.targetActionId,
+            'org.apache.struts.taglib.html.TOKEN': params.token, STORE_ID: params.storeId,
+            modified: params.modified, pubManageId: params.pubManageId,
+          },
+        });
+        const html = await resp.text().catch(() => '');
+        imgregLog.push({ directPostFallback: true, status: resp.status(), tMs: Date.now() - _t0, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 160) });
+        if (resp.status() === 200) {
+          const applied = await page.evaluate((resHtml) => {
+            try {
+              const tmp = document.createElement('div');
+              tmp.innerHTML = resHtml;
+              const get = (id) => { const e = tmp.querySelector('#' + id); return e ? (e.value !== undefined ? e.value : e.textContent) : ''; };
+              if (String(get('userErrorFlg') || '0') !== '0') return { ok: false, userError: true };
+              const imageId = get('imageId');
+              if (!imageId) return { ok: false };
+              // FRONT_IMG_ID hidden / span / プレビュー img を直接反映 (setUploadImage 非依存の保険)。
+              const h = document.getElementById('FRONT_IMG_ID'); if (h) h.value = imageId;
+              const span = document.getElementById('FRONT_IMG_ID_ID'); if (span) span.textContent = imageId;
+              const fp = get('imageFilePath'); if (fp) { const img = document.getElementById('FRONT_IMG_ID_IMG'); if (img) img.src = fp; }
+              if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
+              try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
+              return { ok: true, imageId };
+            } catch (_e) { return { ok: false }; }
+          }, html).catch(() => ({ ok: false }));
+          if (applied && applied.ok && applied.imageId) {
+            detach();
+            return { ok: true, imageId: applied.imageId, via: 'direct_post_fallback' };
+          }
+        }
+      } else {
+        imgregLog.push({ directPostFallback: false, reason: params ? 'no_send_bytes' : 'no_form_params' });
+      }
+    } catch (e) {
+      imgregLog.push({ directPostFallbackError: String(e?.message ?? e).slice(0, 120), tMs: Date.now() - _t0 });
+    }
     await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: true, imgreg: imgregLog } }).catch(() => {});
     detach();
     return { ok: false, reason: 'sb_upload_comm_failed', imgreg: imgregLog };
