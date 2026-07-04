@@ -4607,9 +4607,18 @@ const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
  *   - 各スタイリストは table.table_list_store の連続行。名前/職種は td.td_value_store_c。
  */
 async function scrapeStylists(page, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  // グループ店舗(1ログイン複数サロン)は、サロン未選択のまま /CNB/draft/stylistList/ へ
+  // 直接遷移すると「ユーザエラー」ページに着地する(掲載スタイリスト一覧は跳ね返らず
+  // エラーになるため ensureSalonSelected も選択に入れず0件になる。ADER 郡山で判明)。
+  // salonId があれば先に groupTop でサロンを選んでから一覧へ入る。
+  if (opts.salonId) {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  }
   await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
+  // まだ groupTop に跳ね返された場合はサロンを選び直して入り直す。
   const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
   if (sel.selected) {
     await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
