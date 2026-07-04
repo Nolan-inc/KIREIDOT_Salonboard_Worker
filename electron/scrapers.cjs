@@ -2185,6 +2185,28 @@ function parseJstPartsForPush(iso) {
   };
 }
 
+// 予約系URL(スケジュール/登録/詳細/変更)の genre 別コンテキストルート。
+//   美容室(hair): /CLP/bt 配下。スケジュールが /CLP/bt/schedule/salonSchedule/ で確定しており、
+//                 予約登録/詳細/変更も同一コンテキストルート(/CLP/bt/reserve/...)配下と推定する。
+//   エステ等     : /KLP 配下 (従来の実績経路)。
+// ※ 郡山(ADER=グループhair)の予約登録が /KLP/ 固定のため「SALON BOARD : エラー」着地していた。
+//   Admin から genre(shops.genre) が job に載って worker まで届く(claim route)ので、それで出し分ける。
+function reservePathRoot(genre) {
+  return genre === 'hair' ? '/CLP/bt' : '/KLP';
+}
+
+// グループアカウント(ADER等)は 1 ログインで複数サロンを持つため、予約書き込み前に
+// /CNC/groupTop/ で対象サロンを選び、店舗文脈(hairなら /CLP/bt/)を確立する。
+// 未選択のまま schedule/reserve に入ると「SALON BOARD : エラー」/セッション切れになる。
+// 単一店(salonId 無し)は no-op。best-effort(失敗しても後続の goto を試す)。
+async function ensureReserveSalonContext(page, baseUrl, opts) {
+  if (!opts || !opts.salonId) return;
+  try {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  } catch (_e) { /* best-effort */ }
+}
+
 /**
  * 登録/挿入した予約の SalonBoard 予約ID(reserveId) を予約一覧(reserveList)から特定する。
  * 完了画面から reserveId を拾えなかったときのフォールバック。
@@ -2210,9 +2232,14 @@ async function findReserveIdViaScrape(page, target, opts = {}) {
 }
 async function _findReserveIdViaScrapeImpl(page, target, opts = {}) {
   try {
+    // ★対象日を含む範囲でスクレイプする。既定(3日)だと未来日の予約(例: 2ヶ月先の登録直後)を
+    //   取りこぼし reserveId 回収に失敗する(郡山 8/21 実例)。target.yyyymmdd があればその日1日に絞る。
+    const ymd = target && target.yyyymmdd;
+    const dstr = ymd ? `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}` : null;
     const { rows } = await scrapeBookings(page, {
       baseUrl: opts.baseUrl,
       genre: opts.genre || 'esthetic',
+      ...(dstr ? { range: { fromStr: dstr, toStr: dstr } } : {}),
     });
     if (!Array.isArray(rows) || rows.length === 0) return null;
     // ISO(UTC) → JST の yyyymmdd / HH:MM
@@ -3463,6 +3490,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const menuTarget = p.salonboard_menu_name || p.menu_name || p.coupon_name || null;
   const kireidotRef = p.kireidot_ref || `KIREIDOT予約ID: ${p.booking_id}`;
 
+  // ★genre 別の予約経路。美容室(hair)=/CLP/bt 配下 / エステ等=/KLP 配下。
+  //   従来は /KLP/ 固定で、ヘアのグループ店(郡山)が「SALON BOARD : エラー」に着地していた。
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const ROOT = reservePathRoot(genre);
+  const detailUrlFor = (rid) => `${new URL(baseUrl).origin}${ROOT}/reserve/ext/extReserveDetail/?reserveId=${rid}`;
+
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
 
@@ -3475,7 +3508,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const okExisting = (reserveId) => ({
       status: 'ok',
       externalId: reserveId,
-      detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+      detailUrl: detailUrlFor(reserveId),
       confirmed: {
         confirmed_customer_name: p.customer_name ?? null,
         confirmed_staff_name: p.staff_name ?? null,
@@ -3524,35 +3557,79 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
+  // --- グループ店舗(hair含む)のサロン選択 ---
+  // 郡山(ADER=グループhair)等は先に /CNC/groupTop/ で対象サロンを選び、店舗文脈を
+  // 確立してからスケジュール/登録に入る。未選択のままだと「SALON BOARD : エラー」着地。
+  await ensureReserveSalonContext(page, baseUrl, opts);
+
   // --- 重要 ---
   // 登録フォームは rlastupdate (スケジュール画面に埋め込まれたタイムスタンプ) を
   // 付けないと "情報が一部失われています (KPCL017V01)" エラーになる。
   // よって (1) 対象日のスケジュール画面を開き #rlastupdate を取得 →
   //         (2) それを付けて登録フォームを開く。
+  // ジャンル別: hair=/CLP/bt/schedule/, エステ=/KLP/schedule/。
   let rlastupdate = '';
   try {
-    const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-    schedUrl.searchParams.set('date', when.yyyymmdd);
-    await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    // ★高速化: networkidle(広告ビーコン等でなかなか来ない)を待たず、必要な
-    //   #rlastupdate が出現したら即取得する。
+    if (genre === 'hair') {
+      // ★美容室(グループ)のセッション維持(実機 郡山で確定):
+      //   サロン選択後 /CLP/bt/top/ に居る。日付付き schedule へ直接 goto すると
+      //   「有効期限が切れました」= 無効セッション扱いになる。/CLP/bt/top/ の
+      //   「本日のスケジュール」リンク(<a href="/CLP/bt/schedule/salonSchedule/">)を
+      //   クリックして遷移し(文脈確立)、その画面の #rlastupdate を読む。
+      //   rlastupdate は日付非依存の現在時刻トークンなので、対象予約日(未来日)の
+      //   登録URLにもそのまま載せてよい。
+      const schedLink = page
+        .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
+        .first();
+      await schedLink.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
+      if ((await schedLink.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+          schedLink.click({ timeout: 10_000 }).catch(() => {}),
+        ]);
+      } else {
+        // リンクが無い(単一店 hair 等)ときのみ従来 goto。
+        await page.goto(new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      }
+    } else {
+      // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
+      const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
+      schedUrl.searchParams.set('date', when.yyyymmdd);
+      await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    }
+    // #rlastupdate が出現したら即取得 (networkidle は待たない)。
     await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
     rlastupdate = (await page
       .locator('#rlastupdate')
       .first()
       .textContent()
       .catch(() => ''))?.trim() || '';
+    if (!rlastupdate) {
+      // 取れなかったら診断キャプチャ (セッション/画面確認用)。
+      await captureScrapeDebug(page, 'bookings', 'sched_no_rlastupdate', {
+        diagnostics: { url: page.url(), title: await page.title().catch(() => ''), genre },
+      }).catch(() => null);
+    }
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
 
-  // 登録フォームを URL で開く (rlastupdate を付与)
-  const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
-  u.searchParams.set('staffId', p.salonboard_staff_external_id);
-  u.searchParams.set('date', when.yyyymmdd);
-  u.searchParams.set('rsvHour', startHH);
-  u.searchParams.set('rsvMinute', startMM);
-  if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  // 登録フォームを URL で開く。ジャンル別ルート + ジャンル別パラメータ。
+  //   美容室(hair): /CLP/bt/reserve/ext/extReserveRegist/?date=YYYYMMDD&time=HHMM&stylistId=T...&rlastupdate=...
+  //   エステ等     : /KLP/reserve/ext/extReserveRegist/?staffId=..&date=..&rsvHour=..&rsvMinute=..&rlastupdate=..
+  const u = new URL(`${ROOT}/reserve/ext/extReserveRegist/`, baseUrl);
+  if (genre === 'hair') {
+    u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('time', `${startHH}${startMM}`);
+    u.searchParams.set('stylistId', p.salonboard_staff_external_id);
+    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  } else {
+    u.searchParams.set('staffId', p.salonboard_staff_external_id);
+    u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('rsvHour', startHH);
+    u.searchParams.set('rsvMinute', startMM);
+    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  }
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     // ★高速化(要望対応): networkidle(SalonBoardは常時通信で40秒近く待つことがある)を
@@ -4175,13 +4252,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         staffName: p.staff_name,
         customerName: p.customer_name,
       };
-      let recovered = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
-      if (!recovered) recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
+      // ★美容室(hair)は findReserveIdForBooking(エステ用 /KLP/reserve/reserveList/init)へ遷移すると
+      //   セッションが「有効期限切れ」になり、後続の hair スクレイプも道連れで失敗する。
+      //   hair は最初から genre 対応の scrape で回収する(スケジュール経由・セッション維持)。
+      let recovered = genre === 'hair'
+        ? await findReserveIdViaScrape(page, target, { baseUrl, genre: 'hair' }).catch(() => null)
+        : await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+      if (!recovered && genre !== 'hair') recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
       if (recovered) {
         return {
           status: 'ok',
           externalId: recovered,
-          detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          detailUrl: detailUrlFor(recovered),
           confirmed,
           recovered: true,
         };
@@ -4210,7 +4292,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
-      detailUrl = detailUrl || `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+      detailUrl = detailUrl || detailUrlFor(found);
     }
   }
 
@@ -7572,13 +7654,25 @@ async function uploadHairStyleFrontImage(page, file) {
   //   モーダルが開くため、普通の click だけだとハンドラが走らずモーダルが開かない。
   //   FRONT 画像へ本物の MouseEvent(mousedown/mouseup/click)を dispatch して確実に発火させる。
   await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
+  // ★ERR_ABORTED 根治: モーダルは JS委譲ハンドラ(img_upload_modal_view)が AJAX GET で開く。
+  //   従来は evaluate の MouseEvent dispatch と playwright click を「両方」撃っていたため
+  //   モーダル用 GET が2回走り(token A / token B の2応答を実測)、後着の応答が upload 中に
+  //   モーダルDOMを差し替えて in-flight の doUpload XHR を net::ERR_ABORTED で中断していた。
+  //   → まず dispatch を1回だけ撃ってモーダルが開くのを待つ。開かなければ playwright click を
+  //     フォールバックで1回だけ撃つ(=モーダルGETは常に1回)。
   await page.evaluate(() => {
     const el = document.querySelector('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG');
     if (el) ['mousedown', 'mouseup', 'click'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
   }).catch(() => {});
-  // playwright のクリックも併用 (どちらかが効けばよい)。
-  await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
-  await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
+  const modalOpened = await page.waitForFunction(() => {
+    return !!document.querySelector('#imgUploadForm, #imageUploaderModalBody #imgUploadForm, input.jscImageUploaderModalInput, .jscImageUploaderModalDropArea');
+  }, null, { timeout: 3_500 }).then(() => true).catch(() => false);
+  if (!modalOpened && !chooserDone) {
+    await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
+    await Promise.race([chooserPromise, page.waitForTimeout(2_000)]);
+  } else {
+    await Promise.race([chooserPromise, page.waitForTimeout(400)]);
+  }
 
   // ============================================================
   // 画像アップロードの送信方式:
@@ -7786,12 +7880,28 @@ async function uploadHairStyleFrontImage(page, file) {
       const name = path.basename(file);
       const ext = (name.split('.').pop() || 'jpg').toLowerCase();
       const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-      usedInMemory = await page.evaluate(({ b64, name, mime }) => {
+      usedInMemory = await page.evaluate(async ({ b64, name, mime }) => {
+        const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
         try {
-          const bin = atob(b64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          const f = new File([bytes], name, { type: mime });
+          // ★遅い住宅プロキシでも SB の doUpload(サイト側 jQuery timeout 35s)以内に送り切れるよう、
+          //   最大1440pxへ「縮小のみ」してJPEG再圧縮しアップロードバイトを削減する(数MB→数百KB)。
+          //   拡大はしないので SB の解像度チェックは通る。再圧縮に失敗したら原画像で続行。
+          let outBytes = null, outMime = mime, outName = name;
+          try {
+            const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
+            const url = URL.createObjectURL(srcBlob);
+            const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+            const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+            const scale = Math.min(1, 1440 / Math.max(w || 1, h || 1));
+            const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
+            const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
+            canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+            URL.revokeObjectURL(url);
+            const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', 0.82));
+            if (outBlob && outBlob.size > 0) { outBytes = new Uint8Array(await outBlob.arrayBuffer()); outMime = 'image/jpeg'; outName = name.replace(/\.[^.]+$/, '') + '.jpg'; }
+          } catch (_e) { /* 原画像で続行 */ }
+          if (!outBytes) outBytes = toBytes(atob(b64));
+          const f = new File([outBytes], outName, { type: outMime });
           const dt = new DataTransfer();
           dt.items.add(f);
           const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');

@@ -666,7 +666,16 @@ async function handleJob(job: Job): Promise<void> {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
 
     // 1) ログイン済み判定 → 必要時のみ tryLogin
-    let auth = await isLoggedIn(page, baseUrl);
+    //    ジャンル/グループ(ADER 等の美容室・1ログイン複数サロン)で管理TOPを出し分ける。
+    //    これを渡さないと groupTop(サロン一覧)有効セッションを needs_login と誤判定する。
+    const wAuthGenre =
+      (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+    const wAuthSalonId =
+      (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+    let auth = await isLoggedIn(page, baseUrl, {
+      genre: wAuthGenre,
+      salonId: wAuthSalonId,
+    });
     if (auth === "captcha") {
       await report({
         job_id: job.id,
@@ -1724,18 +1733,29 @@ async function saveStorageState(ctx: BrowserContext, path: string): Promise<void
  */
 async function isLoggedIn(
   page: Page,
-  baseUrl: string
+  baseUrl: string,
+  opts?: { genre?: string; salonId?: string | null }
 ): Promise<"logged_in" | "needs_login" | "captcha" | "unknown"> {
   // 注意: "/KLP/" (末尾スラッシュのみ) は 404「指定されたURLは存在しません」
   // エラー画面を返す。ログインフォームが無く URL も /login を含まないため、旧実装は
   // これを logged_in と誤判定し、無効セッションのまま scrape して常に 0 件になっていた。
-  // → 管理 TOP (/KLP/top/) を開き、グローバルナビ「予約管理」の有無で **肯定的に**
-  //   ログイン判定する。判定できない画面 (404 / セッション切れ / 不明) は安全側に倒して
-  //   再ログインする (誤って scrape に進ませない)。
-  const candidates = [
-    new URL("/KLP/top/", baseUrl).toString(),
-    baseUrl,
-  ];
+  // → 管理 TOP を開き、グローバルナビ「予約管理」等の有無で **肯定的に** 判定する。
+  //
+  // ★重要(2026-07-04 修正): 旧実装は /KLP/top/ (エステTOP) 固定だった。ADER 等の
+  //   「美容室・グループアカウント」はログイン後 /CNC/groupTop/ (サロン一覧) に着地し、
+  //   /KLP/top/ には管理ナビが無いため **有効セッションでも needs_login と誤判定** →
+  //   毎回 doLogin を叩き、失敗を繰り返してセッションを劣化させていた(郡山の予約/fetch
+  //   ログイン失敗の真因)。ジャンル/グループで管理TOPを出し分け、サロン一覧も logged_in
+  //   として認める。
+  const genre = opts?.genre === "hair" ? "hair" : "esthetic";
+  const isGroup = !!(opts?.salonId && String(opts.salonId).trim());
+  const candidates: string[] = [];
+  if (isGroup) candidates.push(new URL("/CNC/groupTop/", baseUrl).toString());
+  candidates.push(
+    new URL(genre === "hair" ? "/CLP/bt/top/" : "/KLP/top/", baseUrl).toString(),
+  );
+  candidates.push(baseUrl);
+
   for (const url of candidates) {
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
@@ -1745,25 +1765,43 @@ async function isLoggedIn(
     if ((await page.locator('iframe[src*="recaptcha"]').count()) > 0) {
       return "captcha";
     }
-    // 肯定的判定: 管理画面のグローバルナビ(予約管理)が見えていれば logged_in。
-    const mgmtNav = await page
-      .locator('text=予約管理')
-      .count()
-      .catch(() => 0);
-    if (mgmtNav > 0) {
-      return "logged_in";
-    }
-    // ログインフォームの input / /login リダイレクト → 未ログイン。
+    const cur = page.url();
+    // ログインフォームの input / /login リダイレクト → 未ログイン (最優先)。
     const loginInputCount = await page
       .locator(
         'input[name="userId"], input[name="loginId"], input[name="password"], input[type="password"]'
       )
-      .count();
-    if (loginInputCount > 0 || /login/i.test(page.url())) {
+      .count()
+      .catch(() => 0);
+    if (loginInputCount > 0 || /\/login\//i.test(cur)) {
       return "needs_login";
     }
-    // それ以外 (エラー画面 / 404 / セッション切れ / 不明) は安全側に倒して再ログイン。
-    return "needs_login";
+    const info = await page
+      .evaluate(() => {
+        const txt =
+          document.body && document.body.innerText ? document.body.innerText : "";
+        return {
+          hasMgmt: /予約管理|掲載管理/.test(txt),
+          // グループのサロン一覧: タイトル「サロン一覧」or サロン選択リンク。
+          hasSalonList:
+            /サロン一覧/.test(document.title || "") ||
+            !!document.querySelector(
+              'a[href*="selectSalon"], a[href*="/CLP/bt/"], form[action*="selectSalon"]'
+            ),
+          expired:
+            /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(
+              txt.replace(/\s+/g, "")
+            ),
+        };
+      })
+      .catch(() => null);
+    if (info?.expired) return "needs_login";
+    if (info?.hasMgmt) return "logged_in";
+    // グループ: /CNC/groupTop/ でサロン一覧が見えれば認証済み (サロン選択は後続フローで)。
+    if (/\/(?:CNC|KLP)\/groupTop/i.test(cur) && info?.hasSalonList) return "logged_in";
+    // 美容室: 店舗文脈 /CLP/bt/ に居れば認証済み。
+    if (/\/CLP\/bt\//i.test(cur)) return "logged_in";
+    // この候補では判定できず → 次の候補を試す(全滅で needs_login)。
   }
   return "needs_login";
 }
