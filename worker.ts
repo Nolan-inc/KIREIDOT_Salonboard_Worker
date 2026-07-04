@@ -3681,21 +3681,37 @@ async function pollOnce(): Promise<number> {
 const JOB_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_JOB_TIMEOUT_MS ?? 8 * 60_000, // 既定 8 分
 );
+// fetch_bookings は美容室(hair)の日次スケジュール巡回で 90日×数秒 ≒ 9分かかるため別枠。
+// 8分だと毎回タイムアウト→レーン解放→次ジョブが生きた Chrome と同一プロファイルで衝突
+// →セッション相互破壊→ログイン連打で IP フラグ、という連鎖の起点になっていた(2026-07-04 郡山)。
+const FETCH_SAFETY_TIMEOUT_MS = Number(
+  process.env.SB_FETCH_TIMEOUT_MS ?? 15 * 60_000, // 既定 15 分
+);
 
 async function handleJobGuarded(job: Job): Promise<void> {
+  const limitMs =
+    job.job_type === "fetch_bookings" ? FETCH_SAFETY_TIMEOUT_MS : JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), JOB_SAFETY_TIMEOUT_MS);
+    timer = setTimeout(() => resolve("timeout"), limitMs);
   });
   try {
     const r = await Promise.race([handleJob(job).then(() => "done" as const), timeout]);
     if (r === "timeout") {
-      const secs = Math.round(JOB_SAFETY_TIMEOUT_MS / 1000);
+      const secs = Math.round(limitMs / 1000);
       console.error(
         `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — running を解除して再キューします`,
       );
-      // handleJob 側がまだ走っていても、ここで running を解除して詰まりを断つ。
-      // (ブラウザ操作は宙に浮くが、次ループで新しいブラウザを起動する)
+      // ★タイムアウトで打ち切っても handleJob のブラウザは生きたまま残り、
+      //   次ジョブが同一プロファイルへ突入して衝突(セッション相互破壊)していた。
+      //   当該店舗プロファイルの Chrome を確実に kill して浮きブラウザを残さない。
+      try {
+        const udd = join(homedir(), ".kireidot", "salonboard-chrome-profile", job.shop_id);
+        execSync(`pkill -f -- "--user-data-dir=${udd}"`, { stdio: "ignore" });
+        console.error(`[job] TIMEOUT ${job.id.slice(0, 8)} → 浮き Chrome を kill (shop=${job.shop_id.slice(0, 8)})`);
+      } catch {
+        /* 生きていなければ no-op */
+      }
       await report({
         job_id: job.id,
         job_type: job.job_type,
