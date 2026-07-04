@@ -1195,6 +1195,13 @@ async function handleJob(job: Job): Promise<void> {
       if (m) {
         const genre =
           (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+        // グループ店舗(1ログイン複数サロン)は、設定系ページを読む前に groupTop で
+        // 対象サロンを選ぶ必要がある。salonId/shopName を渡さないと ensureSalonSelected
+        // が選択できず、空/別サロンの一覧を読んで 0 件になる (ADER 郡山のスタイリスト
+        // 取得が 0 件だった真因)。fetch_bookings と同じ値をここでも渡す。
+        const salonId =
+          (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+        const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
         try {
           const sx = scrapers as unknown as Record<
             string,
@@ -1206,6 +1213,8 @@ async function handleJob(job: Job): Promise<void> {
           const res = await sx[m.fn](page, {
             baseUrl,
             genre,
+            salonId,
+            shopName,
             loginId: job.credentials.login_id,
             password: job.credentials.password,
           });
