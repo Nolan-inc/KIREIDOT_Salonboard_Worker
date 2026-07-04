@@ -4651,8 +4651,10 @@ async function scrapeStylists(page, opts = {}) {
       if (tr) {
         const cells = Array.from(tr.querySelectorAll('td.td_value_store_c'))
           .map((c) => txt(c))
-          .filter((t) => t && t !== '-');
-        // 氏名 → 職種/指名料 → 施術歴 の順で並ぶ。最初の非空を氏名とみなす。
+          // 先頭の td は「順番」列 (No. + input) で、これを氏名と誤取得していた。
+          // No. / No.N / 空/- を除外し、実データ列だけ残す。
+          .filter((t) => t && t !== '-' && !/^No\.?\s*\d*$/.test(t));
+        // 除外後は 氏名 → 職種/ランク/指名料 → 施術歴 → チェック の順。
         if (cells.length) name = cells[0];
         if (cells.length > 1) position = cells[1];
         const img = tr.querySelector('img[name="stylistPhoto"], img');
