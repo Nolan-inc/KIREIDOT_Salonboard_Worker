@@ -3660,81 +3660,99 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
 
-  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} form-ready -> fill staff/time`);
-  // スタッフ指定。フォームには
-  //   - 表示用セレクト select#salonStaffList (value=external_id)
-  //   - 実際に送信される hidden input#staffId (value=external_id)
-  //   - staffIdList (担当割当)
-  // があり、これらを揃えないと「どのスタッフを選んでも URL/既定のスタッフに入る」
-  // という不整合が起きる。external_id で select を選び、change を発火させ、
-  // さらに hidden staffId / staffIdList も明示的に同じ値へ更新する。
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} form-ready -> fill staff/time (genre=${genre})`);
   const staffExt = p.salonboard_staff_external_id;
-  const staffSel = page.locator('select#salonStaffList').first();
-  if ((await staffSel.count().catch(() => 0)) > 0) {
-    await staffSel.selectOption({ value: staffExt }).catch(async () => {
-      if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
-    });
-  }
-  // hidden / 関連 select を JS で強制的に揃える + change を発火 (SB 側ハンドラ対策)。
-  await page.evaluate((ext) => {
-    const setVal = (el, v) => {
-      if (!el) return;
-      el.value = v;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-    // hidden staffId
-    setVal(document.getElementById('staffId'), ext);
-    document.querySelectorAll('input[name="staffId"]').forEach((el) => setVal(el, ext));
-    // salonStaffList / staffIdList セレクトも option が一致すれば選ぶ
-    for (const name of ['salonStaffList', 'staffIdList']) {
-      const sel = document.querySelector(`select[name="${name}"]`);
-      if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
-    }
-  }, staffExt).catch(() => {});
-  // 開始 時/分。change を発火して SalonBoard 側の終了時間再計算ハンドラを起こす。
-  await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
-  await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
-  // 所要 (rsvTermHour の value は分換算: value="60"=1時間, "0"=0時間)。
-  // duration_min を厳密に反映する。null のときだけ 60 にフォールバック。
+  // 所要(分)。null のときだけ 60 にフォールバック。
   const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
     ? Number(p.duration_min)
     : 60;
-  const termHourVal = String(Math.floor(durMin / 60) * 60); // 例: 30→"0", 90→"60"
-  const termMinVal = String(durMin % 60).padStart(2, '0');   // 例: 30→"30", 90→"30"
-  // ★重要: SalonBoard は開始時刻/所要の各 select で終了時間を自動再計算する。
-  //   selectOption だけだと内部状態が更新されず「既定の1時間」のまま登録される
-  //   ことがある(30分→1時間になる症状)。time/term の全 select を JS で直接
-  //   セットし、それぞれ change を発火して widget に確実に反映させる。
-  await page.evaluate(
-    ({ hh, mm, th, tm }) => {
-      const setSel = (id, val) => {
-        const el = document.getElementById(id);
-        if (!el) return false;
-        const has = Array.from(el.options).some((o) => o.value === val);
-        if (!has) return false;
-        el.value = val;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+
+  if (genre === 'hair') {
+    // ★美容室フォーム(実DOM 郡山 BPCL007V01 で確定):
+    //   スタイリスト = select[name="stylistId"] (value=T...)
+    //   開始時間     = select#rsvTime (name="time", value=HHMM 例 "1100")
+    //   施術時間     = select#rsvTermId (name="rsvTerm", value=分 例 "150"→2:30)
+    //   ※設備欄(#equipArea)は無い。URLで stylistId/time は既に選択済みだが、rsvTerm は
+    //     既定30分のままなので必ず設定する(SB上で30分で登録されるバグの原因だった)。
+    const hhmm = `${startHH}${startMM}`;
+    await page.evaluate(({ ext, hhmm, dur }) => {
+      const setSel = (sel, val) => {
+        if (!sel || !Array.from(sel.options).some((o) => o.value === val)) return false;
+        sel.value = val;
+        sel.dispatchEvent(new Event('input', { bubbles: true }));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       };
-      setSel('jsiRsvHour', hh);
-      setSel('jsiRsvMinute', mm);
-      setSel('jsiRsvTermHour', th);
-      setSel('jsiRsvTermMinute', tm);
-    },
-    { hh: String(when.hour), mm: startMM, th: termHourVal, tm: termMinVal },
-  ).catch(() => {});
-  // 反映確認 → ズレていたら Playwright の selectOption でもう一度。
-  await page.waitForTimeout(300);
-  const termOk = await page.evaluate(({ th, tm }) => {
-    const h = document.getElementById('jsiRsvTermHour');
-    const m = document.getElementById('jsiRsvTermMinute');
-    return !!h && !!m && h.value === th && m.value === tm;
-  }, { th: termHourVal, tm: termMinVal }).catch(() => false);
-  if (!termOk) {
-    await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
-    await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+      setSel(document.querySelector('select[name="stylistId"]'), ext);
+      setSel(document.getElementById('rsvTime') || document.querySelector('select[name="time"]'), hhmm);
+      const term = document.getElementById('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+      if (term) {
+        const want = String(dur);
+        if (!setSel(term, want)) {
+          // 完全一致 option が無ければ dur 以上で最小(所要が足りない登録を防ぐ)。
+          const cand = Array.from(term.options).map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n >= dur).sort((a, b) => a - b)[0];
+          if (cand != null) setSel(term, String(cand));
+        }
+      }
+    }, { ext: staffExt, hhmm, dur: durMin }).catch(() => {});
+    await page.waitForTimeout(300);
+  } else {
+    // ===== エステ等(非hair): 従来の salonStaffList/jsiRsvHour/jsiRsvTermHour =====
+    // スタッフ指定 (表示 select#salonStaffList + hidden staffId + staffIdList を揃える)。
+    const staffSel = page.locator('select#salonStaffList').first();
+    if ((await staffSel.count().catch(() => 0)) > 0) {
+      await staffSel.selectOption({ value: staffExt }).catch(async () => {
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+      });
+    }
+    await page.evaluate((ext) => {
+      const setVal = (el, v) => {
+        if (!el) return;
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      setVal(document.getElementById('staffId'), ext);
+      document.querySelectorAll('input[name="staffId"]').forEach((el) => setVal(el, ext));
+      for (const name of ['salonStaffList', 'staffIdList']) {
+        const sel = document.querySelector(`select[name="${name}"]`);
+        if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
+      }
+    }, staffExt).catch(() => {});
+    // 開始 時/分 + 所要 (jsiRsvTermHour/Minute は分換算: "60"=1時間)。
+    await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
+    await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
+    const termHourVal = String(Math.floor(durMin / 60) * 60);
+    const termMinVal = String(durMin % 60).padStart(2, '0');
+    // ★SalonBoard は time/term の change で終了時間を自動再計算する。全 select を JS で直接
+    //   セット+change 発火して確実に反映(30分→1時間になる症状の対策)。
+    await page.evaluate(
+      ({ hh, mm, th, tm }) => {
+        const setSel = (id, val) => {
+          const el = document.getElementById(id);
+          if (!el || !Array.from(el.options).some((o) => o.value === val)) return false;
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+        setSel('jsiRsvHour', hh);
+        setSel('jsiRsvMinute', mm);
+        setSel('jsiRsvTermHour', th);
+        setSel('jsiRsvTermMinute', tm);
+      },
+      { hh: String(when.hour), mm: startMM, th: termHourVal, tm: termMinVal },
+    ).catch(() => {});
+    await page.waitForTimeout(300);
+    const termOk = await page.evaluate(({ th, tm }) => {
+      const h = document.getElementById('jsiRsvTermHour');
+      const m = document.getElementById('jsiRsvTermMinute');
+      return !!h && !!m && h.value === th && m.value === tm;
+    }, { th: termHourVal, tm: termMinVal }).catch(() => false);
+    if (!termOk) {
+      await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
+      await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+    }
   }
 
   // メニュー = ネット予約クーポン (任意)。menuTarget があれば label 完全一致 →
