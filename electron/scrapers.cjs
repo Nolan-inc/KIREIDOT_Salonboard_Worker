@@ -3460,15 +3460,31 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   //   反映予定だった件数を warning に残すだけにする。
   let mismatches = 0;
   let batchChecked = 0;
+  const mismatchSamples = []; // 診断: {key, expected, kind, actual}
+  let afterCellCount = 0;
   try {
     if (await openSetup()) {
       const after = await readCells();
+      afterCellCount = Object.keys(after || {}).length;
       for (const plan of plans) {
         for (const ymdDay of plan.days) {
           batchChecked++;
-          const t = (after[`${plan.staffExt}_${month}${ymdDay}`] || '').trim();
-          const ok = plan.kind === 'off' ? t === '休' : cellMatchesPattern(t, { name: plan.patternName });
-          if (!ok) mismatches++;
+          const key = `${plan.staffExt}_${month}${ymdDay}`;
+          const t = (after[key] || '').trim();
+          // ★SalonBoard のシフト表セルは勤務パターンの「略称」を表示する
+          //   (実測: 平日早→"平早", 平日遅→"平遅", 土日祝早→"休早", 土日祝遅→"休遅")。
+          //   一括入力 select の正式名(平日早/土日祝遅)とは文字列一致しないため、
+          //   正式名で照合すると書込は正しいのに全件不一致になる(2026-07-05 銀座で発覚)。
+          //   略称は SB 側の設定依存で正式名から導出不能(土日祝→休)なので、
+          //   検証は「勤務日=非空かつ全休(=休 単独)でない」「休日=休 単独」で行う。
+          //   これで未反映(空セル)や 勤務⇄休 の取り違えは検出しつつ、略称誤判定を無くす。
+          const ok = plan.kind === 'off' ? (t === '休') : (t !== '' && t !== '休');
+          if (!ok) {
+            mismatches++;
+            if (mismatchSamples.length < 20) {
+              mismatchSamples.push({ key, kind: plan.kind, expected: plan.kind === 'off' ? '休' : (plan.patternName || ''), actual: t, present: Object.prototype.hasOwnProperty.call(after, key) });
+            }
+          }
         }
       }
     }
@@ -3478,7 +3494,21 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   }
   // 一括入力(休/紐付けパターン)で不一致があれば失敗。予定方式の件数は分母に含めない。
   if (mismatches > 0) {
-    return fail(`シフト反映後の検証で ${mismatches}/${batchChecked} 件(一括入力分)が期待値と一致しません。SalonBoardのシフト設定を確認してください。`, 'UNKNOWN_ERROR', true);
+    // ★診断: 期待値 vs 実セル値 + グリッド画面を必ず残す。
+    //   present=false → セル自体が読めていない(readCells/月/スタッフ列ズレ)。
+    //   present=true & actual='' → 書込が乗っていない(Akamai書込ホールド疑い)。
+    //   present=true & actual=別パターン名/休 → ラベル不一致(SB表示変更 or パターン取り違え)。
+    let cap = '?';
+    try {
+      cap = await captureScrapeDebug(page, 'shifts', 'verify_mismatch', {
+        diagnostics: {
+          month, mismatches, batchChecked, afterCellCount,
+          sampleMismatches: mismatchSamples,
+          plansSummary: plans.map((p) => ({ staffExt: p.staffExt, kind: p.kind, patternName: p.patternName, nDays: p.days.length })),
+        },
+      });
+    } catch (_e) { /* capture失敗は無視 */ }
+    return fail(`シフト反映後の検証で ${mismatches}/${batchChecked} 件(一括入力分)が期待値と一致しません。SalonBoardのシフト設定を確認してください。 (cells=${afterCellCount}, sample=${JSON.stringify(mismatchSamples.slice(0, 4))}, capture=${cap})`, 'UNKNOWN_ERROR', true);
   }
 
   // ユーザー要望の報告: ①対象が何日 ②うちパターンに無かった箇所が何個
@@ -3528,6 +3558,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  // ★開始時刻を過ぎた予約は SalonBoard の最終確定(doComplete)が通らない。
+  //   実測(2026-07-05 郡山): 09:00の当日予約を 09:04/09:11 に登録しようとして
+  //   「まだ登録されていません」で失敗。過去時刻は何度再試行しても永遠に成功しないため、
+  //   フォーム操作に入る前にここで明確に弾き、無駄な再試行(と誤解を招く「容量超過/設備不足」)を避ける。
+  //   scheduled_at は JST ISO(+09:00) の絶対時刻なので、Date で now と直接比較できる(TZ非依存)。
+  const startMs = new Date(p.scheduled_at).getTime();
+  if (Number.isFinite(startMs) && startMs < Date.now()) {
+    return fail(
+      `予約の開始時刻(${p.scheduled_at})を過ぎているため SalonBoard に登録できません(過去の時間枠は登録不可)。当日・過去分の予約は SalonBoard へ直接ご登録ください。`,
+      'BOOKING_TIME_PAST',
+      true,
+    );
+  }
   if (!p.salonboard_staff_external_id) {
     return fail('SalonBoard スタッフ external_id が未指定です', 'STAFF_MAPPING_NOT_FOUND', true);
   }
@@ -7576,10 +7619,21 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
       : '(no imgreg log)';
     const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason, imgreg: uploaded.imgreg || [] } });
     if (uploaded.reason === 'sb_upload_comm_failed') {
-      return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
+      // ★doUpload 無応答(サーバがPOSTをホールド)= Akamai の一時的bot対策ホールドの可能性が高い。
+      //   画像・パラメータは正常でも、そのIP/セッションの信頼スコアが低い瞬間だと握られる(間欠的)。
+      //   「恒久的な拒否(manual)」ではなく「一時的失敗(retryable)」として返し、
+      //   Admin の指数バックオフ(2→4→8分…)で調子の良いセッション窓口を引くまで自動再試行させる。
+      return fail(`SalonBoard がスタイル画像のアップロードを保留しました(サーバ無応答=一時的bot対策ホールドの可能性)。バックオフ後に自動再試行します。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'SB_UPLOAD_HELD', false);
     }
     if (uploaded.reason === 'modal_register_not_found') {
       return fail(`画像アップロードモーダルの「登録する」を特定できませんでした (capture=${cap || '?'})。モーダルDOMの共有が必要です。`, 'UNKNOWN_ERROR', true);
+    }
+    // imageId_not_set / direct_post_200_no_imageid = doUpload が 302(セッション失効リダイレクト)や
+    // userError で imageId を返さなかったケース。多くは「直前の長い held POST でセッションが死んだ」
+    // 一時要因(実測: doUpload が 302 を返し imageId 無し)。恒久拒否ではないので retryable にし、
+    // バックオフ後に生きたセッションで引き直させる。
+    if (uploaded.reason === 'imageId_not_set' || uploaded.reason === 'direct_post_200_no_imageid') {
+      return fail(`スタイル画像のアップロードで imageId を取得できませんでした(セッション失効/リダイレクトの可能性)。バックオフ後に自動再試行します。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'SB_UPLOAD_HELD', false);
     }
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}) imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
@@ -7980,11 +8034,17 @@ async function uploadHairStyleFrontImage(page, file) {
         };
         let resp = null;
         let lastErr = '';
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        // ★2026-07-04 fail-fast化: 直接POST(Node request)はブラウザと異なるTLS指紋のため
+        //   Akamai が「一時ホールド(無応答)」しやすい。ホールドされたら長く待つほどセッション/IPの
+        //   フラグを深め、後続のブラウザXHRまで巻き込む。よって「速い1回のプローブ」に留める:
+        //   通れば即完了(良好セッションなら数秒)、ホールドなら20秒で見切ってブラウザXHRへ退避。
+        //   旧: 3回×60s=最大180秒の無駄打ち → 新: 1回×20s。
+        const DIRECT_POST_PROBE_TIMEOUT_MS = 20_000;
+        for (let attempt = 1; attempt <= 1; attempt++) {
           const _ts = Date.now();
           try {
             resp = await page.context().request.post(absUrl, {
-              timeout: 60_000,
+              timeout: DIRECT_POST_PROBE_TIMEOUT_MS,
               headers: reqHeaders,
               multipart: buildMultipart(),
             });
@@ -7993,12 +8053,11 @@ async function uploadHairStyleFrontImage(page, file) {
           } catch (e) {
             lastErr = e?.message?.split('\n')[0] ?? String(e);
             imgregLog.push({ direct_post_retry: attempt, error: lastErr, tookMs: Date.now() - _ts });
-            await page.waitForTimeout(1200).catch(() => {});
           }
         }
         if (!resp) {
-          // 3回ともタイムアウト/中断 → ブラウザXHRへ退避(フォールバック)。
-          imgregLog.push({ direct_post: 'all_retries_failed', lastErr });
+          // 直接POSTがホールド/中断された → 即ブラウザXHRへ退避(粘らない)。
+          imgregLog.push({ direct_post: 'probe_failed_fast', lastErr });
           directPostBlocked = true;
         } else {
         const html = await resp.text().catch(() => '');
@@ -8218,7 +8277,7 @@ async function uploadHairStyleFrontImage(page, file) {
         jq.ajax = function (a, b) {
           try {
             const opts = (typeof a === 'object' && a) ? a : (b || {});
-            if (opts && typeof opts.url === 'string' && /doUpload/.test(opts.url)) opts.timeout = 180000;
+            if (opts && typeof opts.url === 'string' && /doUpload/.test(opts.url)) opts.timeout = 45000;
           } catch (_e) { /* noop */ }
           return orig.apply(this, arguments);
         };
@@ -8290,7 +8349,8 @@ async function uploadHairStyleFrontImage(page, file) {
   }
 
   // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを待つ。
-  // doUpload の timeout を 180 秒へ延長したため、待ち上限も 190 秒 (連打はしない)。
+  // ★fail-fast: doUpload の $.ajax timeout を 45 秒にしたため、待ち上限も 55 秒に短縮。
+  //   45秒以内に応答が無い=Akamai の一時ホールド。長く粘らず切って retryable で再試行に回す。
   await page.waitForFunction((prev) => {
     const h = document.getElementById('FRONT_IMG_ID');
     const hv = h ? (h.value || '') : '';
@@ -8301,7 +8361,7 @@ async function uploadHairStyleFrontImage(page, file) {
     const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
     const err = !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(document.body?.innerText || '');
     return done || err;
-  }, before, { timeout: 190_000 }).catch(() => {});
+  }, before, { timeout: 55_000 }).catch(() => {});
 
   const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); page.off('request', onReq); } catch (_e) {} };
 
@@ -8329,7 +8389,7 @@ async function uploadHairStyleFrontImage(page, file) {
         const absUrl = new URL(params.url, page.url()).toString();
         const pageUrl = page.url();
         const resp = await page.context().request.post(absUrl, {
-          timeout: 60_000,
+          timeout: 20_000,
           headers: {
             referer: pageUrl,
             origin: new URL(pageUrl).origin,

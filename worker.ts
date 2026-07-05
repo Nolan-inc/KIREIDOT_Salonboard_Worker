@@ -200,6 +200,31 @@ const ENABLE_PUSH = parseEnablePush(process.env.SALONBOARD_ENABLE_PUSH);
 /** push_booking の自動リトライ上限 (Admin の MAX_PUSH_ATTEMPTS と揃える)。 */
 const MAX_PUSH_ATTEMPTS = 3;
 
+/**
+ * ★ログインスロットル対策 (2026-07-05 郡山/10002 再発対応):
+ *   「login did not complete」= doLogin まで到達したのに logged_in に遷移しない
+ *   = Akamai が doLogin をホールド/チャレンジしている(そのIP/セッションが一時スロットル)状態。
+ *   ここで短時間に doLogin を叩き直すと throttle を温存し回復を遅らせる(自滅ループ)。
+ *   → shop 単位でログイン試行のクールダウンを持ち、期間中は doLogin を一切叩かず
+ *     retryable で待つ(IP/セッションを静かにして Akamai の throttle を冷ます)。
+ *   プロセス内メモリ保持で十分(restart でリセットされても実害小)。
+ */
+const loginCooldownUntil = new Map<string, number>();
+const LOGIN_COOLDOWN_BASE_MS = 20 * 60_000; // 20分
+const LOGIN_COOLDOWN_MAX_MS = 45 * 60_000; // 45分(連続スロットルでこの上限まで伸ばす)
+function loginCooldownRemainingMs(shopId: string): number {
+  return Math.max(0, (loginCooldownUntil.get(shopId) ?? 0) - Date.now());
+}
+/** スロットル検知時にクールダウンを(伸ばして)セットし、設定後の残り時間(ms)を返す。 */
+function bumpLoginCooldown(shopId: string): number {
+  const next = Math.min(
+    LOGIN_COOLDOWN_MAX_MS,
+    loginCooldownRemainingMs(shopId) + LOGIN_COOLDOWN_BASE_MS,
+  );
+  loginCooldownUntil.set(shopId, Date.now() + next);
+  return next;
+}
+
 // 起動時に push モードを明示ログ (平文の値はそのまま出さない)。
 console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
@@ -703,21 +728,36 @@ async function handleJob(job: Job): Promise<void> {
         console.log(`[job] done  ${tag} (session not ready, auto-login disabled -> retryable)`);
         return;
       }
+      // ★ログインスロットル・クールダウン中は doLogin を一切叩かず retryable で待つ。
+      //   直前のスロットル検知でこの shop に cooldown が設定されている間は、叩き直すと
+      //   Akamai の throttle を温存するだけなので、静かに回復を待つ。
+      const cdRemainMs = loginCooldownRemainingMs(job.shop_id);
+      if (cdRemainMs > 0) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "retryable_failed",
+          error: `ログインスロットル・クールダウン中(残り約${Math.ceil(cdRemainMs / 60_000)}分)。doLoginを叩かず回復待ち。`,
+        });
+        console.log(`[job] done  ${tag} (login cooldown ${Math.ceil(cdRemainMs / 60_000)}m -> retryable)`);
+        return;
+      }
       const loginUrl = new URL("/login/", baseUrl).toString();
       let loginResult = await tryLogin(page, loginUrl, {
         loginId: job.credentials.login_id,
         password: job.credentials.password,
       });
-      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / doLogin 未完了 / submit) は
-      // プロキシの瞬断であることが多い。最大3回までログインをやり直す。認証拒否
-      // (still on login form) や captcha はリトライしない (reason で判定)。
+      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / net:: / navigation) は
+      // プロキシの瞬断であることが多いので最大2回までやり直す。ただし
+      // 「did not complete」(= Akamai の doLogin ホールド=スロットル) は叩き直しが
+      // 逆効果なので **1回だけ** 試し、ダメなら下でクールダウンを張る。認証拒否/captchaは非リトライ。
       for (
         let lt = 1;
         lt < 3 &&
         loginResult.status === "failed" &&
-        /did not complete|chrome-error|ERR_|navigation|submit|net::/i.test(
-          loginResult.reason ?? ""
-        );
+        // did not complete(スロットル)は lt<2 の1回のみ。ネット系は lt<3 の2回まで。
+        (/chrome-error|ERR_|navigation|net::/i.test(loginResult.reason ?? "") ||
+          (/did not complete|submit/i.test(loginResult.reason ?? "") && lt < 2));
         lt++
       ) {
         console.log(
@@ -752,10 +792,20 @@ async function handleJob(job: Job): Promise<void> {
           /still on login|invalid|incorrect|password|userId|loginId|認証/i.test(
             reason
           );
+        // ★スロットル検知: doLogin まで到達したのに完了しない(=Akamai ホールド)。
+        //   認証エラーでもネット瞬断でもないので、この shop のログイン試行を一定時間
+        //   止める(cooldown)。再試行しても throttle を温存するだけで回復しないため。
+        const isThrottle = !isAuthLike && /did not complete/i.test(reason);
+        if (isThrottle) {
+          const cdMs = bumpLoginCooldown(job.shop_id);
+          console.log(`[job] ${tag} login throttled -> cooldown ${Math.ceil(cdMs / 60_000)}m for shop=${job.shop_id.slice(0, 8)}`);
+        }
         await report({
           job_id: job.id,
           status: isAuthLike ? "login_required" : "retryable_failed",
-          error: reason,
+          error: isThrottle
+            ? `${reason} (Akamaiログインスロットルの可能性。約${Math.ceil(loginCooldownRemainingMs(job.shop_id) / 60_000)}分クールダウン)`
+            : reason,
         });
         console.log(
           `[job] done  ${tag} (login failed -> ${
@@ -765,8 +815,9 @@ async function handleJob(job: Job): Promise<void> {
         return;
       }
 
-      // ログイン成功時のみ storageState を保存
+      // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
+      loginCooldownUntil.delete(job.shop_id);
       auth = "logged_in";
     }
 

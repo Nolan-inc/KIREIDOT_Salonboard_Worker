@@ -47,3 +47,4 @@ release/linux-unpacked/
 # build時に copy-playwright-browsers.cjs が作る一時ディレクトリ (202MB+)
 # 配布用 .app の Resources/ に同梱される
 build-resources/playwright-browsers/
+scratch_deploy/
