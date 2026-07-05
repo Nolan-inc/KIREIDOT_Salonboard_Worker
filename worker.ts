@@ -200,6 +200,31 @@ const ENABLE_PUSH = parseEnablePush(process.env.SALONBOARD_ENABLE_PUSH);
 /** push_booking の自動リトライ上限 (Admin の MAX_PUSH_ATTEMPTS と揃える)。 */
 const MAX_PUSH_ATTEMPTS = 3;
 
+/**
+ * ★ログインスロットル対策 (2026-07-05 郡山/10002 再発対応):
+ *   「login did not complete」= doLogin まで到達したのに logged_in に遷移しない
+ *   = Akamai が doLogin をホールド/チャレンジしている(そのIP/セッションが一時スロットル)状態。
+ *   ここで短時間に doLogin を叩き直すと throttle を温存し回復を遅らせる(自滅ループ)。
+ *   → shop 単位でログイン試行のクールダウンを持ち、期間中は doLogin を一切叩かず
+ *     retryable で待つ(IP/セッションを静かにして Akamai の throttle を冷ます)。
+ *   プロセス内メモリ保持で十分(restart でリセットされても実害小)。
+ */
+const loginCooldownUntil = new Map<string, number>();
+const LOGIN_COOLDOWN_BASE_MS = 20 * 60_000; // 20分
+const LOGIN_COOLDOWN_MAX_MS = 45 * 60_000; // 45分(連続スロットルでこの上限まで伸ばす)
+function loginCooldownRemainingMs(shopId: string): number {
+  return Math.max(0, (loginCooldownUntil.get(shopId) ?? 0) - Date.now());
+}
+/** スロットル検知時にクールダウンを(伸ばして)セットし、設定後の残り時間(ms)を返す。 */
+function bumpLoginCooldown(shopId: string): number {
+  const next = Math.min(
+    LOGIN_COOLDOWN_MAX_MS,
+    loginCooldownRemainingMs(shopId) + LOGIN_COOLDOWN_BASE_MS,
+  );
+  loginCooldownUntil.set(shopId, Date.now() + next);
+  return next;
+}
+
 // 起動時に push モードを明示ログ (平文の値はそのまま出さない)。
 console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
@@ -666,7 +691,16 @@ async function handleJob(job: Job): Promise<void> {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
 
     // 1) ログイン済み判定 → 必要時のみ tryLogin
-    let auth = await isLoggedIn(page, baseUrl);
+    //    ジャンル/グループ(ADER 等の美容室・1ログイン複数サロン)で管理TOPを出し分ける。
+    //    これを渡さないと groupTop(サロン一覧)有効セッションを needs_login と誤判定する。
+    const wAuthGenre =
+      (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+    const wAuthSalonId =
+      (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+    let auth = await isLoggedIn(page, baseUrl, {
+      genre: wAuthGenre,
+      salonId: wAuthSalonId,
+    });
     if (auth === "captcha") {
       await report({
         job_id: job.id,
@@ -694,21 +728,36 @@ async function handleJob(job: Job): Promise<void> {
         console.log(`[job] done  ${tag} (session not ready, auto-login disabled -> retryable)`);
         return;
       }
+      // ★ログインスロットル・クールダウン中は doLogin を一切叩かず retryable で待つ。
+      //   直前のスロットル検知でこの shop に cooldown が設定されている間は、叩き直すと
+      //   Akamai の throttle を温存するだけなので、静かに回復を待つ。
+      const cdRemainMs = loginCooldownRemainingMs(job.shop_id);
+      if (cdRemainMs > 0) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "retryable_failed",
+          error: `ログインスロットル・クールダウン中(残り約${Math.ceil(cdRemainMs / 60_000)}分)。doLoginを叩かず回復待ち。`,
+        });
+        console.log(`[job] done  ${tag} (login cooldown ${Math.ceil(cdRemainMs / 60_000)}m -> retryable)`);
+        return;
+      }
       const loginUrl = new URL("/login/", baseUrl).toString();
       let loginResult = await tryLogin(page, loginUrl, {
         loginId: job.credentials.login_id,
         password: job.credentials.password,
       });
-      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / doLogin 未完了 / submit) は
-      // プロキシの瞬断であることが多い。最大3回までログインをやり直す。認証拒否
-      // (still on login form) や captcha はリトライしない (reason で判定)。
+      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / net:: / navigation) は
+      // プロキシの瞬断であることが多いので最大2回までやり直す。ただし
+      // 「did not complete」(= Akamai の doLogin ホールド=スロットル) は叩き直しが
+      // 逆効果なので **1回だけ** 試し、ダメなら下でクールダウンを張る。認証拒否/captchaは非リトライ。
       for (
         let lt = 1;
         lt < 3 &&
         loginResult.status === "failed" &&
-        /did not complete|chrome-error|ERR_|navigation|submit|net::/i.test(
-          loginResult.reason ?? ""
-        );
+        // did not complete(スロットル)は lt<2 の1回のみ。ネット系は lt<3 の2回まで。
+        (/chrome-error|ERR_|navigation|net::/i.test(loginResult.reason ?? "") ||
+          (/did not complete|submit/i.test(loginResult.reason ?? "") && lt < 2));
         lt++
       ) {
         console.log(
@@ -743,10 +792,20 @@ async function handleJob(job: Job): Promise<void> {
           /still on login|invalid|incorrect|password|userId|loginId|認証/i.test(
             reason
           );
+        // ★スロットル検知: doLogin まで到達したのに完了しない(=Akamai ホールド)。
+        //   認証エラーでもネット瞬断でもないので、この shop のログイン試行を一定時間
+        //   止める(cooldown)。再試行しても throttle を温存するだけで回復しないため。
+        const isThrottle = !isAuthLike && /did not complete/i.test(reason);
+        if (isThrottle) {
+          const cdMs = bumpLoginCooldown(job.shop_id);
+          console.log(`[job] ${tag} login throttled -> cooldown ${Math.ceil(cdMs / 60_000)}m for shop=${job.shop_id.slice(0, 8)}`);
+        }
         await report({
           job_id: job.id,
           status: isAuthLike ? "login_required" : "retryable_failed",
-          error: reason,
+          error: isThrottle
+            ? `${reason} (Akamaiログインスロットルの可能性。約${Math.ceil(loginCooldownRemainingMs(job.shop_id) / 60_000)}分クールダウン)`
+            : reason,
         });
         console.log(
           `[job] done  ${tag} (login failed -> ${
@@ -756,8 +815,9 @@ async function handleJob(job: Job): Promise<void> {
         return;
       }
 
-      // ログイン成功時のみ storageState を保存
+      // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
+      loginCooldownUntil.delete(job.shop_id);
       auth = "logged_in";
     }
 
@@ -801,18 +861,39 @@ async function handleJob(job: Job): Promise<void> {
         String(payload.external_booking_id ?? "").trim().length > 0;
       let result: PushBookingResult;
       if (isBookingUpdate) {
+        // ジャンル/グループ対応 (登録と同じ): hair=/CLP/bt 配下 + サロン選択 + 失効時relogin。
+        const chGenre =
+          (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+        const chSalonId =
+          (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+        const chShopName = (job as { shop_name?: string | null }).shop_name ?? null;
         const cr = await (
           scrapers as unknown as {
             changeBookingViaForm: (
               pg: Page,
               pl: PushBookingPayload,
-              opts: { baseUrl: string; enableChange: boolean },
+              opts: {
+                baseUrl: string;
+                enableChange: boolean;
+                genre: string;
+                salonId: string | null;
+                shopName: string | null;
+                relogin?: () => Promise<boolean>;
+              },
             ) => Promise<PushBookingResult>;
           }
-        ).changeBookingViaForm(page, payload, { baseUrl, enableChange: ENABLE_PUSH });
+        ).changeBookingViaForm(page, payload, {
+          baseUrl,
+          enableChange: ENABLE_PUSH,
+          genre: chGenre,
+          salonId: chSalonId,
+          shopName: chShopName,
+          relogin: makeRelogin(page, baseUrl, job.credentials),
+        });
         if (cr.status === "ok") {
           cr.externalId = payload.external_booking_id ?? null;
-          cr.detailUrl = `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
+          const chRoot = chGenre === "hair" ? "/CLP/bt" : "/KLP";
+          cr.detailUrl = `${new URL(baseUrl).origin}${chRoot}/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
           cr.alreadyExists = false;
         }
         result = cr;
@@ -917,6 +998,8 @@ async function handleJob(job: Job): Promise<void> {
               salonId,
               shopName,
               genre,
+              // 失効時の同一ジョブ内自己回復。
+              relogin: makeRelogin(page, baseUrl, job.credentials),
             });
       await reportScraperResult(job, "cancel_booking", result, {
         booking_id: p.booking_id ?? null,
@@ -1096,6 +1179,8 @@ async function handleJob(job: Job): Promise<void> {
         shopName,
         loginId: job.credentials.login_id,
         password: job.credentials.password,
+        // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
+        relogin: makeRelogin(page, baseUrl, job.credentials),
       });
       // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
       // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
@@ -1724,18 +1809,29 @@ async function saveStorageState(ctx: BrowserContext, path: string): Promise<void
  */
 async function isLoggedIn(
   page: Page,
-  baseUrl: string
+  baseUrl: string,
+  opts?: { genre?: string; salonId?: string | null }
 ): Promise<"logged_in" | "needs_login" | "captcha" | "unknown"> {
   // 注意: "/KLP/" (末尾スラッシュのみ) は 404「指定されたURLは存在しません」
   // エラー画面を返す。ログインフォームが無く URL も /login を含まないため、旧実装は
   // これを logged_in と誤判定し、無効セッションのまま scrape して常に 0 件になっていた。
-  // → 管理 TOP (/KLP/top/) を開き、グローバルナビ「予約管理」の有無で **肯定的に**
-  //   ログイン判定する。判定できない画面 (404 / セッション切れ / 不明) は安全側に倒して
-  //   再ログインする (誤って scrape に進ませない)。
-  const candidates = [
-    new URL("/KLP/top/", baseUrl).toString(),
-    baseUrl,
-  ];
+  // → 管理 TOP を開き、グローバルナビ「予約管理」等の有無で **肯定的に** 判定する。
+  //
+  // ★重要(2026-07-04 修正): 旧実装は /KLP/top/ (エステTOP) 固定だった。ADER 等の
+  //   「美容室・グループアカウント」はログイン後 /CNC/groupTop/ (サロン一覧) に着地し、
+  //   /KLP/top/ には管理ナビが無いため **有効セッションでも needs_login と誤判定** →
+  //   毎回 doLogin を叩き、失敗を繰り返してセッションを劣化させていた(郡山の予約/fetch
+  //   ログイン失敗の真因)。ジャンル/グループで管理TOPを出し分け、サロン一覧も logged_in
+  //   として認める。
+  const genre = opts?.genre === "hair" ? "hair" : "esthetic";
+  const isGroup = !!(opts?.salonId && String(opts.salonId).trim());
+  const candidates: string[] = [];
+  if (isGroup) candidates.push(new URL("/CNC/groupTop/", baseUrl).toString());
+  candidates.push(
+    new URL(genre === "hair" ? "/CLP/bt/top/" : "/KLP/top/", baseUrl).toString(),
+  );
+  candidates.push(baseUrl);
+
   for (const url of candidates) {
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
@@ -1745,27 +1841,87 @@ async function isLoggedIn(
     if ((await page.locator('iframe[src*="recaptcha"]').count()) > 0) {
       return "captcha";
     }
-    // 肯定的判定: 管理画面のグローバルナビ(予約管理)が見えていれば logged_in。
-    const mgmtNav = await page
-      .locator('text=予約管理')
-      .count()
-      .catch(() => 0);
-    if (mgmtNav > 0) {
-      return "logged_in";
-    }
-    // ログインフォームの input / /login リダイレクト → 未ログイン。
+    const cur = page.url();
+    // ログインフォームの input / /login リダイレクト → 未ログイン (最優先)。
     const loginInputCount = await page
       .locator(
         'input[name="userId"], input[name="loginId"], input[name="password"], input[type="password"]'
       )
-      .count();
-    if (loginInputCount > 0 || /login/i.test(page.url())) {
+      .count()
+      .catch(() => 0);
+    if (loginInputCount > 0 || /\/login\//i.test(cur)) {
       return "needs_login";
     }
-    // それ以外 (エラー画面 / 404 / セッション切れ / 不明) は安全側に倒して再ログイン。
-    return "needs_login";
+    const info = await page
+      .evaluate(() => {
+        const txt =
+          document.body && document.body.innerText ? document.body.innerText : "";
+        return {
+          hasMgmt: /予約管理|掲載管理/.test(txt),
+          // グループのサロン一覧: タイトル「サロン一覧」or サロン選択リンク。
+          hasSalonList:
+            /サロン一覧/.test(document.title || "") ||
+            !!document.querySelector(
+              'a[href*="selectSalon"], a[href*="/CLP/bt/"], form[action*="selectSalon"]'
+            ),
+          expired:
+            /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(
+              txt.replace(/\s+/g, "")
+            ),
+        };
+      })
+      .catch(() => null);
+    if (info?.expired) return "needs_login";
+    if (info?.hasMgmt) return "logged_in";
+    // グループ: /CNC/groupTop/ でサロン一覧が見えれば認証済み (サロン選択は後続フローで)。
+    if (/\/(?:CNC|KLP)\/groupTop/i.test(cur) && info?.hasSalonList) return "logged_in";
+    // 美容室: 店舗文脈 /CLP/bt/ に居れば認証済み。
+    if (/\/CLP\/bt\//i.test(cur)) return "logged_in";
+    // この候補では判定できず → 次の候補を試す(全滅で needs_login)。
   }
   return "needs_login";
+}
+
+/**
+ * 失効セッションの自己回復用 relogin コールバックを作る (scrapers に opts.relogin で渡す)。
+ * scrapers 側が「有効期限切れ」ページを踏んだときのみ呼ばれ、同一ジョブ内で
+ * logout(/CNC/logout=サーバ側セッション破棄) → fresh login をやり直す。
+ * 失効時限定なので doLogin 乱発にはならない (IPフラグ対策)。
+ * 背景(2026-07-04 郡山): 同一SBアカウントの他セッション操作等で店舗文脈が突然失効し、
+ * ジョブ冒頭の isLoggedIn は通るのに深部で expired を踏んで丸ごと失敗していた。
+ */
+function makeRelogin(
+  page: Page,
+  baseUrl: string,
+  creds: { login_id: string; password: string },
+): () => Promise<boolean> {
+  return async () => {
+    if (autoLoginDisabled()) {
+      console.log("[relogin] auto-login 抑制中のためスキップ");
+      return false;
+    }
+    try {
+      await page
+        .goto(new URL("/CNC/logout", baseUrl).toString(), {
+          waitUntil: "domcontentloaded",
+          timeout: 20_000,
+        })
+        .catch(() => {});
+      const r = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
+        loginId: creds.login_id,
+        password: creds.password,
+      });
+      console.log(
+        `[relogin] status=${r.status}${
+          r.status !== "ok" ? ` (${(r as { reason?: string }).reason ?? ""})` : ""
+        }`,
+      );
+      return r.status === "ok";
+    } catch (e) {
+      console.log(`[relogin] error: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  };
 }
 
 /**
@@ -2525,6 +2681,7 @@ async function pushBookingViaProvenForm(
           salonId: string | null;
           shopName: string | null;
           genre: string;
+          relogin?: () => Promise<boolean>;
         },
       ) => Promise<PushBookingResult>;
     }
@@ -2534,6 +2691,8 @@ async function pushBookingViaProvenForm(
     salonId,
     shopName,
     genre,
+    // 失効時の同一ジョブ内自己回復 (スケジュール到達時に expired を踏んだら1回だけ再ログイン)。
+    relogin: makeRelogin(page, baseUrl, job.credentials),
   });
   return result;
 }
@@ -3573,21 +3732,37 @@ async function pollOnce(): Promise<number> {
 const JOB_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_JOB_TIMEOUT_MS ?? 8 * 60_000, // 既定 8 分
 );
+// fetch_bookings は美容室(hair)の日次スケジュール巡回で 90日×数秒 ≒ 9分かかるため別枠。
+// 8分だと毎回タイムアウト→レーン解放→次ジョブが生きた Chrome と同一プロファイルで衝突
+// →セッション相互破壊→ログイン連打で IP フラグ、という連鎖の起点になっていた(2026-07-04 郡山)。
+const FETCH_SAFETY_TIMEOUT_MS = Number(
+  process.env.SB_FETCH_TIMEOUT_MS ?? 15 * 60_000, // 既定 15 分
+);
 
 async function handleJobGuarded(job: Job): Promise<void> {
+  const limitMs =
+    job.job_type === "fetch_bookings" ? FETCH_SAFETY_TIMEOUT_MS : JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), JOB_SAFETY_TIMEOUT_MS);
+    timer = setTimeout(() => resolve("timeout"), limitMs);
   });
   try {
     const r = await Promise.race([handleJob(job).then(() => "done" as const), timeout]);
     if (r === "timeout") {
-      const secs = Math.round(JOB_SAFETY_TIMEOUT_MS / 1000);
+      const secs = Math.round(limitMs / 1000);
       console.error(
         `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — running を解除して再キューします`,
       );
-      // handleJob 側がまだ走っていても、ここで running を解除して詰まりを断つ。
-      // (ブラウザ操作は宙に浮くが、次ループで新しいブラウザを起動する)
+      // ★タイムアウトで打ち切っても handleJob のブラウザは生きたまま残り、
+      //   次ジョブが同一プロファイルへ突入して衝突(セッション相互破壊)していた。
+      //   当該店舗プロファイルの Chrome を確実に kill して浮きブラウザを残さない。
+      try {
+        const udd = join(homedir(), ".kireidot", "salonboard-chrome-profile", job.shop_id);
+        execSync(`pkill -f -- "--user-data-dir=${udd}"`, { stdio: "ignore" });
+        console.error(`[job] TIMEOUT ${job.id.slice(0, 8)} → 浮き Chrome を kill (shop=${job.shop_id.slice(0, 8)})`);
+      } catch {
+        /* 生きていなければ no-op */
+      }
       await report({
         job_id: job.id,
         job_type: job.job_type,

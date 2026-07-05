@@ -706,25 +706,62 @@ async function scrapeHairBookings(page, opts = {}) {
   // SB が無効セッション扱い(「有効期限切れ/再度ログイン」エラー画面)にするため(実機 2026-06-28)、
   // UI の「本日のスケジュール」リンクをクリックして遷移し、セッション文脈を確立する。
   // 確立後は日付の ?date= goto が通る。単一店(既にスケジュール文脈)では no-op に近い。
-  try {
-    await captureScrapeDebug(page, 'bookings', 'hair_top_before_sched', {
-      diagnostics: { url: page.url() },
-    }).catch(() => null);
-    const schedLink = page
-      .locator('a[href*="/CLP/bt/schedule/salonSchedule"], a:has-text("本日のスケジュール")')
-      .first();
-    if ((await schedLink.count().catch(() => 0)) > 0) {
-      await schedLink.click({ timeout: 10_000 }).catch(() => {});
-      await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
-      await page.waitForTimeout(1500);
-      diag.push(`hair: schedule warmup click -> ${page.url()}`);
-      console.log(`[scrape] hair schedule warmup -> ${page.url()}`);
-    } else {
-      diag.push(`hair: schedule link not found (url=${page.url()})`);
-      console.log(`[scrape] hair schedule link not found (url=${page.url()})`);
+  //
+  // ★失効の自己回復(2026-07-04 郡山): 同一SBアカウントの他セッション操作等で、ジョブ冒頭の
+  //   ログイン確認は通るのにここで「有効期限切れ」を踏むことがある(キャプチャで確定)。
+  //   その場合は opts.relogin (worker 提供: logout→fresh login) → サロン再選択で
+  //   1回だけやり直す(失効時限定なので doLogin 乱発にはならない)。
+  const isExpiredPage = () =>
+    page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+  for (let warmTry = 1; warmTry <= 2; warmTry++) {
+    try {
+      // 失効ページに居るなら warmup(リンク探し)は無駄 → 即 relogin 分岐へ。
+      if (!(await isExpiredPage())) {
+        await captureScrapeDebug(page, 'bookings', 'hair_top_before_sched', {
+          diagnostics: { url: page.url(), warmTry },
+        }).catch(() => null);
+        const schedLink = page
+          .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
+          .first();
+        // ★サロン選択直後は POST リダイレクトの余韻で locator が空振りする(実行コンテキスト
+        //   破棄→catch→0)ことがある(実DOMにはリンクが存在するのに not found と誤判定していた)。
+        //   attached を最大10秒待ってからクリックする。
+        await schedLink.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {});
+        if ((await schedLink.count().catch(() => 0)) > 0) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+            schedLink.click({ timeout: 10_000 }).catch(() => {}),
+          ]);
+          await page.waitForTimeout(1500);
+          diag.push(`hair: schedule warmup click -> ${page.url()}`);
+          console.log(`[scrape] hair schedule warmup -> ${page.url()}`);
+        } else {
+          // リンクが本当に無い場合も、日付付き goto (セッションを壊す) には直行せず、
+          // まず日付なしのスケジュールURLへ遷移して文脈を確立する。
+          diag.push(`hair: schedule link not found (url=${page.url()}) -> bare goto`);
+          console.log(`[scrape] hair schedule link not found (url=${page.url()}) -> bare goto`);
+          await page.goto(new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+          await page.waitForTimeout(1000);
+        }
+      }
+    } catch (_e) {
+      /* best-effort: 下の失効判定/日付ループへ */
     }
-  } catch (_e) {
-    /* best-effort: 失敗しても日付ループの直接 goto を試す */
+    if (!(await isExpiredPage())) break; // 文脈確立できた
+    if (warmTry === 1 && typeof opts.relogin === 'function') {
+      diag.push('hair: session expired at warmup -> relogin');
+      console.log('[scrape] hair warmup expired -> relogin');
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        // ログインし直したのでサロンを選び直してから再 warmup。
+        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+        continue;
+      }
+    }
+    break; // relogin 不可/失敗 → 従来どおり日付ループへ(1日目の失効判定で loggedOut 扱いになる)
   }
 
   for (let i = 0; i < MAX_DAYS; i++) {
@@ -1037,7 +1074,12 @@ async function _scrapeHairBookingsLegacy(page, opts = {}) {
 
 async function scrapeBookings(page, opts = {}) {
   const months = Number.isFinite(opts.months) ? opts.months : 3;
-  const range = defaultBookingDateRange(months);
+  // opts.range ({fromStr,toStr}) 指定時はそれを優先 (reserveId回収の対象日1日スクレイプ等)。
+  // 従来は無視して常に defaultBookingDateRange だったため、未来日(例 8/28)の登録直後の
+  // 回収が「直近3ヶ月」を嘗めて対象日に届かず reserveId を取りこぼしていた。
+  const range = (opts.range && opts.range.fromStr && opts.range.toStr)
+    ? opts.range
+    : defaultBookingDateRange(months);
   const diag = [];
 
   // グループアカウント(1ログイン複数サロン)はログイン直後 /CNC/groupTop/ (サロン一覧)に
@@ -1069,7 +1111,11 @@ async function scrapeBookings(page, opts = {}) {
   // エステ用の予約一覧フロー(reserveList navigation/検索/抽出)は通さない。
   if (opts.genre === 'hair') {
     try {
-      return await scrapeHairBookings(page, { range, diag, baseUrl: opts.baseUrl });
+      return await scrapeHairBookings(page, {
+        range, diag, baseUrl: opts.baseUrl,
+        // 失効時の自己回復(relogin)後にサロンを選び直すため salonId/shopName も渡す。
+        salonId: opts.salonId, shopName: opts.shopName, relogin: opts.relogin,
+      });
     } catch (e) {
       const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
         diagnostics: { url: page.url(), error: e?.message ?? String(e) },
@@ -2185,6 +2231,28 @@ function parseJstPartsForPush(iso) {
   };
 }
 
+// 予約系URL(スケジュール/登録/詳細/変更)の genre 別コンテキストルート。
+//   美容室(hair): /CLP/bt 配下。スケジュールが /CLP/bt/schedule/salonSchedule/ で確定しており、
+//                 予約登録/詳細/変更も同一コンテキストルート(/CLP/bt/reserve/...)配下と推定する。
+//   エステ等     : /KLP 配下 (従来の実績経路)。
+// ※ 郡山(ADER=グループhair)の予約登録が /KLP/ 固定のため「SALON BOARD : エラー」着地していた。
+//   Admin から genre(shops.genre) が job に載って worker まで届く(claim route)ので、それで出し分ける。
+function reservePathRoot(genre) {
+  return genre === 'hair' ? '/CLP/bt' : '/KLP';
+}
+
+// グループアカウント(ADER等)は 1 ログインで複数サロンを持つため、予約書き込み前に
+// /CNC/groupTop/ で対象サロンを選び、店舗文脈(hairなら /CLP/bt/)を確立する。
+// 未選択のまま schedule/reserve に入ると「SALON BOARD : エラー」/セッション切れになる。
+// 単一店(salonId 無し)は no-op。best-effort(失敗しても後続の goto を試す)。
+async function ensureReserveSalonContext(page, baseUrl, opts) {
+  if (!opts || !opts.salonId) return;
+  try {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  } catch (_e) { /* best-effort */ }
+}
+
 /**
  * 登録/挿入した予約の SalonBoard 予約ID(reserveId) を予約一覧(reserveList)から特定する。
  * 完了画面から reserveId を拾えなかったときのフォールバック。
@@ -2210,9 +2278,14 @@ async function findReserveIdViaScrape(page, target, opts = {}) {
 }
 async function _findReserveIdViaScrapeImpl(page, target, opts = {}) {
   try {
+    // ★対象日を含む範囲でスクレイプする。既定(3日)だと未来日の予約(例: 2ヶ月先の登録直後)を
+    //   取りこぼし reserveId 回収に失敗する(郡山 8/21 実例)。target.yyyymmdd があればその日1日に絞る。
+    const ymd = target && target.yyyymmdd;
+    const dstr = ymd ? `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}` : null;
     const { rows } = await scrapeBookings(page, {
       baseUrl: opts.baseUrl,
       genre: opts.genre || 'esthetic',
+      ...(dstr ? { range: { fromStr: dstr, toStr: dstr } } : {}),
     });
     if (!Array.isArray(rows) || rows.length === 0) return null;
     // ISO(UTC) → JST の yyyymmdd / HH:MM
@@ -3387,15 +3460,31 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   //   反映予定だった件数を warning に残すだけにする。
   let mismatches = 0;
   let batchChecked = 0;
+  const mismatchSamples = []; // 診断: {key, expected, kind, actual}
+  let afterCellCount = 0;
   try {
     if (await openSetup()) {
       const after = await readCells();
+      afterCellCount = Object.keys(after || {}).length;
       for (const plan of plans) {
         for (const ymdDay of plan.days) {
           batchChecked++;
-          const t = (after[`${plan.staffExt}_${month}${ymdDay}`] || '').trim();
-          const ok = plan.kind === 'off' ? t === '休' : cellMatchesPattern(t, { name: plan.patternName });
-          if (!ok) mismatches++;
+          const key = `${plan.staffExt}_${month}${ymdDay}`;
+          const t = (after[key] || '').trim();
+          // ★SalonBoard のシフト表セルは勤務パターンの「略称」を表示する
+          //   (実測: 平日早→"平早", 平日遅→"平遅", 土日祝早→"休早", 土日祝遅→"休遅")。
+          //   一括入力 select の正式名(平日早/土日祝遅)とは文字列一致しないため、
+          //   正式名で照合すると書込は正しいのに全件不一致になる(2026-07-05 銀座で発覚)。
+          //   略称は SB 側の設定依存で正式名から導出不能(土日祝→休)なので、
+          //   検証は「勤務日=非空かつ全休(=休 単独)でない」「休日=休 単独」で行う。
+          //   これで未反映(空セル)や 勤務⇄休 の取り違えは検出しつつ、略称誤判定を無くす。
+          const ok = plan.kind === 'off' ? (t === '休') : (t !== '' && t !== '休');
+          if (!ok) {
+            mismatches++;
+            if (mismatchSamples.length < 20) {
+              mismatchSamples.push({ key, kind: plan.kind, expected: plan.kind === 'off' ? '休' : (plan.patternName || ''), actual: t, present: Object.prototype.hasOwnProperty.call(after, key) });
+            }
+          }
         }
       }
     }
@@ -3405,7 +3494,21 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   }
   // 一括入力(休/紐付けパターン)で不一致があれば失敗。予定方式の件数は分母に含めない。
   if (mismatches > 0) {
-    return fail(`シフト反映後の検証で ${mismatches}/${batchChecked} 件(一括入力分)が期待値と一致しません。SalonBoardのシフト設定を確認してください。`, 'UNKNOWN_ERROR', true);
+    // ★診断: 期待値 vs 実セル値 + グリッド画面を必ず残す。
+    //   present=false → セル自体が読めていない(readCells/月/スタッフ列ズレ)。
+    //   present=true & actual='' → 書込が乗っていない(Akamai書込ホールド疑い)。
+    //   present=true & actual=別パターン名/休 → ラベル不一致(SB表示変更 or パターン取り違え)。
+    let cap = '?';
+    try {
+      cap = await captureScrapeDebug(page, 'shifts', 'verify_mismatch', {
+        diagnostics: {
+          month, mismatches, batchChecked, afterCellCount,
+          sampleMismatches: mismatchSamples,
+          plansSummary: plans.map((p) => ({ staffExt: p.staffExt, kind: p.kind, patternName: p.patternName, nDays: p.days.length })),
+        },
+      });
+    } catch (_e) { /* capture失敗は無視 */ }
+    return fail(`シフト反映後の検証で ${mismatches}/${batchChecked} 件(一括入力分)が期待値と一致しません。SalonBoardのシフト設定を確認してください。 (cells=${afterCellCount}, sample=${JSON.stringify(mismatchSamples.slice(0, 4))}, capture=${cap})`, 'UNKNOWN_ERROR', true);
   }
 
   // ユーザー要望の報告: ①対象が何日 ②うちパターンに無かった箇所が何個
@@ -3455,6 +3558,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
+  // ★開始時刻を過ぎた予約は SalonBoard の最終確定(doComplete)が通らない。
+  //   実測(2026-07-05 郡山): 09:00の当日予約を 09:04/09:11 に登録しようとして
+  //   「まだ登録されていません」で失敗。過去時刻は何度再試行しても永遠に成功しないため、
+  //   フォーム操作に入る前にここで明確に弾き、無駄な再試行(と誤解を招く「容量超過/設備不足」)を避ける。
+  //   scheduled_at は JST ISO(+09:00) の絶対時刻なので、Date で now と直接比較できる(TZ非依存)。
+  const startMs = new Date(p.scheduled_at).getTime();
+  if (Number.isFinite(startMs) && startMs < Date.now()) {
+    return fail(
+      `予約の開始時刻(${p.scheduled_at})を過ぎているため SalonBoard に登録できません(過去の時間枠は登録不可)。当日・過去分の予約は SalonBoard へ直接ご登録ください。`,
+      'BOOKING_TIME_PAST',
+      true,
+    );
+  }
   if (!p.salonboard_staff_external_id) {
     return fail('SalonBoard スタッフ external_id が未指定です', 'STAFF_MAPPING_NOT_FOUND', true);
   }
@@ -3462,6 +3578,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 指定があれば選び、無ければスキップする (まずメニュー無しで予約を通す方針)。
   const menuTarget = p.salonboard_menu_name || p.menu_name || p.coupon_name || null;
   const kireidotRef = p.kireidot_ref || `KIREIDOT予約ID: ${p.booking_id}`;
+
+  // ★genre 別の予約経路。美容室(hair)=/CLP/bt 配下 / エステ等=/KLP 配下。
+  //   従来は /KLP/ 固定で、ヘアのグループ店(郡山)が「SALON BOARD : エラー」に着地していた。
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const ROOT = reservePathRoot(genre);
+  const detailUrlFor = (rid) => `${new URL(baseUrl).origin}${ROOT}/reserve/ext/extReserveDetail/?reserveId=${rid}`;
 
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
@@ -3475,7 +3597,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const okExisting = (reserveId) => ({
       status: 'ok',
       externalId: reserveId,
-      detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+      detailUrl: detailUrlFor(reserveId),
       confirmed: {
         confirmed_customer_name: p.customer_name ?? null,
         confirmed_staff_name: p.staff_name ?? null,
@@ -3524,35 +3646,101 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
+  // --- グループ店舗(hair含む)のサロン選択 ---
+  // 郡山(ADER=グループhair)等は先に /CNC/groupTop/ で対象サロンを選び、店舗文脈を
+  // 確立してからスケジュール/登録に入る。未選択のままだと「SALON BOARD : エラー」着地。
+  await ensureReserveSalonContext(page, baseUrl, opts);
+
   // --- 重要 ---
   // 登録フォームは rlastupdate (スケジュール画面に埋め込まれたタイムスタンプ) を
   // 付けないと "情報が一部失われています (KPCL017V01)" エラーになる。
   // よって (1) 対象日のスケジュール画面を開き #rlastupdate を取得 →
   //         (2) それを付けて登録フォームを開く。
+  // ジャンル別: hair=/CLP/bt/schedule/, エステ=/KLP/schedule/。
+  //
+  // ★失効の自己回復(2026-07-04 郡山): ジョブ冒頭のログイン確認は通るのに、ここで
+  //   「有効期限切れ」を踏むことがある(同一アカウントの他セッション操作等)。その場合は
+  //   opts.relogin (worker 提供: logout→fresh login) → サロン再選択で1回だけやり直す。
   let rlastupdate = '';
-  try {
-    const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-    schedUrl.searchParams.set('date', when.yyyymmdd);
-    await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    // ★高速化: networkidle(広告ビーコン等でなかなか来ない)を待たず、必要な
-    //   #rlastupdate が出現したら即取得する。
-    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-    rlastupdate = (await page
-      .locator('#rlastupdate')
-      .first()
-      .textContent()
-      .catch(() => ''))?.trim() || '';
-  } catch (e) {
-    return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  const pageExpired = () =>
+    page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+  for (let schedTry = 1; schedTry <= 2; schedTry++) {
+    try {
+      if (genre === 'hair') {
+        // ★美容室(グループ)のセッション維持(実機 郡山で確定):
+        //   サロン選択後 /CLP/bt/top/ に居る。日付付き schedule へ直接 goto すると
+        //   「有効期限が切れました」= 無効セッション扱いになる。/CLP/bt/top/ の
+        //   「本日のスケジュール」リンク(<a href="/CLP/bt/schedule/salonSchedule/">)を
+        //   クリックして遷移し(文脈確立)、その画面の #rlastupdate を読む。
+        //   rlastupdate は日付非依存の現在時刻トークンなので、対象予約日(未来日)の
+        //   登録URLにもそのまま載せてよい。
+        const schedLink = page
+          .locator('a[href*="/CLP/bt/schedule/salonSchedule"]')
+          .first();
+        await schedLink.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {});
+        if ((await schedLink.count().catch(() => 0)) > 0) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+            schedLink.click({ timeout: 10_000 }).catch(() => {}),
+          ]);
+        } else {
+          // リンクが無い(単一店 hair 等)ときのみ従来 goto。
+          await page.goto(new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        }
+      } else {
+        // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
+        const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
+        schedUrl.searchParams.set('date', when.yyyymmdd);
+        await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      }
+      // #rlastupdate が出現したら即取得 (networkidle は待たない)。
+      await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
+      rlastupdate = (await page
+        .locator('#rlastupdate')
+        .first()
+        .textContent()
+        .catch(() => ''))?.trim() || '';
+    } catch (e) {
+      if (schedTry === 2 || typeof opts.relogin !== 'function') {
+        return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+      }
+    }
+    if (rlastupdate) break; // 取得成功
+    // 取れなかった: 失効なら relogin→サロン再選択で1回だけやり直す。
+    const expired = await pageExpired();
+    console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} sched try${schedTry} rlastupdate=なし expired=${expired}`);
+    if (schedTry === 1 && expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        await ensureReserveSalonContext(page, baseUrl, opts);
+        continue;
+      }
+    }
+    // 診断キャプチャを残してループ終了 (rlastupdate 無しでも下の登録フォーム開きで最終判定)。
+    await captureScrapeDebug(page, 'bookings', 'sched_no_rlastupdate', {
+      diagnostics: { url: page.url(), title: await page.title().catch(() => ''), genre, schedTry },
+    }).catch(() => null);
+    break;
   }
 
-  // 登録フォームを URL で開く (rlastupdate を付与)
-  const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
-  u.searchParams.set('staffId', p.salonboard_staff_external_id);
-  u.searchParams.set('date', when.yyyymmdd);
-  u.searchParams.set('rsvHour', startHH);
-  u.searchParams.set('rsvMinute', startMM);
-  if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  // 登録フォームを URL で開く。ジャンル別ルート + ジャンル別パラメータ。
+  //   美容室(hair): /CLP/bt/reserve/ext/extReserveRegist/?date=YYYYMMDD&time=HHMM&stylistId=T...&rlastupdate=...
+  //   エステ等     : /KLP/reserve/ext/extReserveRegist/?staffId=..&date=..&rsvHour=..&rsvMinute=..&rlastupdate=..
+  const u = new URL(`${ROOT}/reserve/ext/extReserveRegist/`, baseUrl);
+  if (genre === 'hair') {
+    u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('time', `${startHH}${startMM}`);
+    u.searchParams.set('stylistId', p.salonboard_staff_external_id);
+    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  } else {
+    u.searchParams.set('staffId', p.salonboard_staff_external_id);
+    u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('rsvHour', startHH);
+    u.searchParams.set('rsvMinute', startMM);
+    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+  }
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     // ★高速化(要望対応): networkidle(SalonBoardは常時通信で40秒近く待つことがある)を
@@ -3583,81 +3771,99 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
 
-  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} form-ready -> fill staff/time`);
-  // スタッフ指定。フォームには
-  //   - 表示用セレクト select#salonStaffList (value=external_id)
-  //   - 実際に送信される hidden input#staffId (value=external_id)
-  //   - staffIdList (担当割当)
-  // があり、これらを揃えないと「どのスタッフを選んでも URL/既定のスタッフに入る」
-  // という不整合が起きる。external_id で select を選び、change を発火させ、
-  // さらに hidden staffId / staffIdList も明示的に同じ値へ更新する。
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} form-ready -> fill staff/time (genre=${genre})`);
   const staffExt = p.salonboard_staff_external_id;
-  const staffSel = page.locator('select#salonStaffList').first();
-  if ((await staffSel.count().catch(() => 0)) > 0) {
-    await staffSel.selectOption({ value: staffExt }).catch(async () => {
-      if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
-    });
-  }
-  // hidden / 関連 select を JS で強制的に揃える + change を発火 (SB 側ハンドラ対策)。
-  await page.evaluate((ext) => {
-    const setVal = (el, v) => {
-      if (!el) return;
-      el.value = v;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-    // hidden staffId
-    setVal(document.getElementById('staffId'), ext);
-    document.querySelectorAll('input[name="staffId"]').forEach((el) => setVal(el, ext));
-    // salonStaffList / staffIdList セレクトも option が一致すれば選ぶ
-    for (const name of ['salonStaffList', 'staffIdList']) {
-      const sel = document.querySelector(`select[name="${name}"]`);
-      if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
-    }
-  }, staffExt).catch(() => {});
-  // 開始 時/分。change を発火して SalonBoard 側の終了時間再計算ハンドラを起こす。
-  await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
-  await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
-  // 所要 (rsvTermHour の value は分換算: value="60"=1時間, "0"=0時間)。
-  // duration_min を厳密に反映する。null のときだけ 60 にフォールバック。
+  // 所要(分)。null のときだけ 60 にフォールバック。
   const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
     ? Number(p.duration_min)
     : 60;
-  const termHourVal = String(Math.floor(durMin / 60) * 60); // 例: 30→"0", 90→"60"
-  const termMinVal = String(durMin % 60).padStart(2, '0');   // 例: 30→"30", 90→"30"
-  // ★重要: SalonBoard は開始時刻/所要の各 select で終了時間を自動再計算する。
-  //   selectOption だけだと内部状態が更新されず「既定の1時間」のまま登録される
-  //   ことがある(30分→1時間になる症状)。time/term の全 select を JS で直接
-  //   セットし、それぞれ change を発火して widget に確実に反映させる。
-  await page.evaluate(
-    ({ hh, mm, th, tm }) => {
-      const setSel = (id, val) => {
-        const el = document.getElementById(id);
-        if (!el) return false;
-        const has = Array.from(el.options).some((o) => o.value === val);
-        if (!has) return false;
-        el.value = val;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+
+  if (genre === 'hair') {
+    // ★美容室フォーム(実DOM 郡山 BPCL007V01 で確定):
+    //   スタイリスト = select[name="stylistId"] (value=T...)
+    //   開始時間     = select#rsvTime (name="time", value=HHMM 例 "1100")
+    //   施術時間     = select#rsvTermId (name="rsvTerm", value=分 例 "150"→2:30)
+    //   ※設備欄(#equipArea)は無い。URLで stylistId/time は既に選択済みだが、rsvTerm は
+    //     既定30分のままなので必ず設定する(SB上で30分で登録されるバグの原因だった)。
+    const hhmm = `${startHH}${startMM}`;
+    await page.evaluate(({ ext, hhmm, dur }) => {
+      const setSel = (sel, val) => {
+        if (!sel || !Array.from(sel.options).some((o) => o.value === val)) return false;
+        sel.value = val;
+        sel.dispatchEvent(new Event('input', { bubbles: true }));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       };
-      setSel('jsiRsvHour', hh);
-      setSel('jsiRsvMinute', mm);
-      setSel('jsiRsvTermHour', th);
-      setSel('jsiRsvTermMinute', tm);
-    },
-    { hh: String(when.hour), mm: startMM, th: termHourVal, tm: termMinVal },
-  ).catch(() => {});
-  // 反映確認 → ズレていたら Playwright の selectOption でもう一度。
-  await page.waitForTimeout(300);
-  const termOk = await page.evaluate(({ th, tm }) => {
-    const h = document.getElementById('jsiRsvTermHour');
-    const m = document.getElementById('jsiRsvTermMinute');
-    return !!h && !!m && h.value === th && m.value === tm;
-  }, { th: termHourVal, tm: termMinVal }).catch(() => false);
-  if (!termOk) {
-    await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
-    await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+      setSel(document.querySelector('select[name="stylistId"]'), ext);
+      setSel(document.getElementById('rsvTime') || document.querySelector('select[name="time"]'), hhmm);
+      const term = document.getElementById('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+      if (term) {
+        const want = String(dur);
+        if (!setSel(term, want)) {
+          // 完全一致 option が無ければ dur 以上で最小(所要が足りない登録を防ぐ)。
+          const cand = Array.from(term.options).map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n >= dur).sort((a, b) => a - b)[0];
+          if (cand != null) setSel(term, String(cand));
+        }
+      }
+    }, { ext: staffExt, hhmm, dur: durMin }).catch(() => {});
+    await page.waitForTimeout(300);
+  } else {
+    // ===== エステ等(非hair): 従来の salonStaffList/jsiRsvHour/jsiRsvTermHour =====
+    // スタッフ指定 (表示 select#salonStaffList + hidden staffId + staffIdList を揃える)。
+    const staffSel = page.locator('select#salonStaffList').first();
+    if ((await staffSel.count().catch(() => 0)) > 0) {
+      await staffSel.selectOption({ value: staffExt }).catch(async () => {
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+      });
+    }
+    await page.evaluate((ext) => {
+      const setVal = (el, v) => {
+        if (!el) return;
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      setVal(document.getElementById('staffId'), ext);
+      document.querySelectorAll('input[name="staffId"]').forEach((el) => setVal(el, ext));
+      for (const name of ['salonStaffList', 'staffIdList']) {
+        const sel = document.querySelector(`select[name="${name}"]`);
+        if (sel && Array.from(sel.options).some((o) => o.value === ext)) setVal(sel, ext);
+      }
+    }, staffExt).catch(() => {});
+    // 開始 時/分 + 所要 (jsiRsvTermHour/Minute は分換算: "60"=1時間)。
+    await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
+    await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
+    const termHourVal = String(Math.floor(durMin / 60) * 60);
+    const termMinVal = String(durMin % 60).padStart(2, '0');
+    // ★SalonBoard は time/term の change で終了時間を自動再計算する。全 select を JS で直接
+    //   セット+change 発火して確実に反映(30分→1時間になる症状の対策)。
+    await page.evaluate(
+      ({ hh, mm, th, tm }) => {
+        const setSel = (id, val) => {
+          const el = document.getElementById(id);
+          if (!el || !Array.from(el.options).some((o) => o.value === val)) return false;
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+        setSel('jsiRsvHour', hh);
+        setSel('jsiRsvMinute', mm);
+        setSel('jsiRsvTermHour', th);
+        setSel('jsiRsvTermMinute', tm);
+      },
+      { hh: String(when.hour), mm: startMM, th: termHourVal, tm: termMinVal },
+    ).catch(() => {});
+    await page.waitForTimeout(300);
+    const termOk = await page.evaluate(({ th, tm }) => {
+      const h = document.getElementById('jsiRsvTermHour');
+      const m = document.getElementById('jsiRsvTermMinute');
+      return !!h && !!m && h.value === th && m.value === tm;
+    }, { th: termHourVal, tm: termMinVal }).catch(() => false);
+    if (!termOk) {
+      await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
+      await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+    }
   }
 
   // メニュー = ネット予約クーポン (任意)。menuTarget があれば label 完全一致 →
@@ -4175,13 +4381,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         staffName: p.staff_name,
         customerName: p.customer_name,
       };
-      let recovered = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
-      if (!recovered) recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
+      // ★美容室(hair)は findReserveIdForBooking(エステ用 /KLP/reserve/reserveList/init)へ遷移すると
+      //   セッションが「有効期限切れ」になり、後続の hair スクレイプも道連れで失敗する。
+      //   hair は最初から genre 対応の scrape で回収する(スケジュール経由・セッション維持)。
+      let recovered = genre === 'hair'
+        ? await findReserveIdViaScrape(page, target, { baseUrl, genre: 'hair' }).catch(() => null)
+        : await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+      if (!recovered && genre !== 'hair') recovered = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
       if (recovered) {
         return {
           status: 'ok',
           externalId: recovered,
-          detailUrl: `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${recovered}`,
+          detailUrl: detailUrlFor(recovered),
           confirmed,
           recovered: true,
         };
@@ -4205,12 +4416,16 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       staffName: p.staff_name,
       customerName: p.customer_name,
     };
-    // 一覧フィルタ版 → ダメなら全件スクレイプ版 (cancelled 除外で確実)。
-    let found = await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
-    if (!found) found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
+    // ★美容室(hair)はエステ用 reserveList(findReserveIdForBooking=/KLP/...)へ遷移すると
+    //   セッションを壊すため使わない。対象日1日をスケジュールスクレイプで回収する
+    //   (向井優一 実例: エステ一覧に入って cands=0 + セッション破壊 → 回収失敗していた)。
+    let found = genre === 'hair'
+      ? await findReserveIdViaScrape(page, target, { baseUrl, genre: 'hair' }).catch(() => null)
+      : await findReserveIdForBooking(page, target, { baseUrl }).catch(() => null);
+    if (!found && genre !== 'hair') found = await findReserveIdViaScrape(page, target, { baseUrl, genre: opts.genre }).catch(() => null);
     if (found) {
       externalId = found;
-      detailUrl = detailUrl || `${new URL(baseUrl).origin}/KLP/reserve/ext/extReserveDetail/?reserveId=${found}`;
+      detailUrl = detailUrl || detailUrlFor(found);
     }
   }
 
@@ -4300,9 +4515,14 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   //      → ページ内 HTML ダイアログ (confirm() ではない):
   //          「予約をキャンセルにします。よろしいですか？」
   //          <a class="...accept">はい</a> / <a class="...deny">いいえ</a>
+  // ジャンル別ルート (登録/変更と同じ: hair=/CLP/bt 配下、エステ=/KLP 配下)。
+  const cGenre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const cROOT = reservePathRoot(cGenre);
+  // グループ店舗は先にサロン選択で店舗文脈を確立 (未選択だとエラーページ着地)。
+  await ensureReserveSalonContext(page, baseUrl, opts);
   const detailCandidates = [
-    `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
-    `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`,
+    `${cROOT}/reserve/ext/extReserveDetail/?reserveId=${reserveId}`,
+    `${cROOT}/reserve/net/reserveDetail/?reserveId=${reserveId}`,
   ];
   const tryOpenDetail = async () => {
     for (const path of detailCandidates) {
@@ -4321,13 +4541,31 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   };
   let onDetail = await tryOpenDetail();
   if (!onDetail) {
+    // 失効ページなら relogin (worker提供) で同一ジョブ内復旧を1回試す。
+    const expired = await page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+    if (expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) {
+        await ensureReserveSalonContext(page, baseUrl, opts);
+        onDetail = await tryOpenDetail();
+      }
+    }
+  }
+  if (!onDetail) {
     // 2026-07-02 夕方から、SB が ext/extReserveDetail への「素の直リンク」を
     // 汎用エラーページ (KPCL009V01) で弾くようになった (電話予約YGのキャンセル7連敗)。
-    // 予約一覧を一度開いて一覧コンテキスト (トークン/Cookie) を作ってから再試行すると
+    // 一覧/スケジュールを一度開いてコンテキスト (トークン/Cookie) を作ってから再試行すると
     // 通る (一覧検索を経由した 07-03 23:50 のキャンセルは成功している)。
+    // hair はエステ用 reserveList がセッションを壊すため、スケジュール(リンククリック相当の
+    // 日付なしURL) で文脈を作る。
     try {
       await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-      await page.goto(new URL('/KLP/reserve/reserveList/init', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      const ctxUrl = cGenre === 'hair'
+        ? new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString()
+        : new URL('/KLP/reserve/reserveList/init', baseUrl).toString();
+      await page.goto(ctxUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
       await page.waitForTimeout(1_000);
       onDetail = await tryOpenDetail();
     } catch (_e) { /* フォールバック失敗は従来どおり下の判定で fail */ }
@@ -4434,27 +4672,48 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMM = String(when.minute).padStart(2, '0');
 
-  // 1) 変更画面を開く (ext → net)
+  // ジャンル別ルート (登録と同じ: hair=/CLP/bt 配下、エステ=/KLP 配下)。
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const ROOT = reservePathRoot(genre);
+
+  // グループ店舗(郡山等)はサロン選択で店舗文脈を確立してから変更フォームへ。
+  await ensureReserveSalonContext(page, baseUrl, opts);
+
+  // 1) 変更画面を開く (ext → net)。失効ページに着地したら relogin→サロン再選択で1回やり直す。
   const candidates = [
-    `/KLP/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
-    `/KLP/reserve/net/reserveChange/?reserveId=${reserveId}`,
+    `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
+    `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`,
   ];
+  const formSel = 'select#jsiRsvHour, select#rsvTime, select[name="rsvTerm"], #rlastupdate, a#change, a#regist';
   let onForm = false;
-  for (const path of candidates) {
-    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
-    await page.waitForSelector('select#jsiRsvHour, #rlastupdate, a#change, a#regist', { timeout: 12_000 }).catch(() => {});
-    if ((await page.locator('select#jsiRsvHour, #rlastupdate, a#change, a#regist').count().catch(() => 0)) > 0) { onForm = true; break; }
+  for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
+    for (const path of candidates) {
+      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
+      await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
+      if ((await page.locator(formSel).count().catch(() => 0)) > 0) { onForm = true; break; }
+    }
+    if (onForm) break;
+    const expired = await page.evaluate(() =>
+      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
+    ).catch(() => false);
+    if (openTry === 1 && expired && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) { await ensureReserveSalonContext(page, baseUrl, opts); continue; }
+    }
+    break;
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
-  const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, url: page.url() } });
+  const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, genre, url: page.url() } });
   if (!onForm) {
     return fail(`予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
-  // 2) 担当 (指定があれば更新。登録フォームと同じ select#salonStaffList + hidden #staffId)
+  // 2) 担当 (指定があれば更新)。
+  //    エステ: select#salonStaffList + hidden #staffId / 美容室: select[name="stylistId"]。
+  //    要素の存在チェック付きで両方試す (存在しない方は no-op)。
   const staffExt = (p.salonboard_staff_external_id || '').trim();
   if (staffExt) {
     await page.locator('select#salonStaffList').first().selectOption({ value: staffExt }).catch(() => {});
@@ -4462,47 +4721,62 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       const setVal = (el) => { if (el) { el.value = ext; el.dispatchEvent(new Event('change', { bubbles: true })); } };
       setVal(document.getElementById('staffId'));
       document.querySelectorAll('input[name="staffId"]').forEach(setVal);
-      for (const name of ['salonStaffList', 'staffIdList']) {
+      for (const name of ['salonStaffList', 'staffIdList', 'stylistId']) {
         const sel = document.querySelector(`select[name="${name}"]`);
         if (sel && Array.from(sel.options).some((o) => o.value === ext)) { sel.value = ext; sel.dispatchEvent(new Event('change', { bubbles: true })); }
       }
     }, staffExt).catch(() => {});
   }
 
-  // 3) 時間・所要を更新 (登録フォームと同じセレクタ)。所要は新規登録と同じ堅牢化:
-  //    JSで全selectをセット+change発火し、反映を検証してダメなら selectOption で再セット。
+  // 3) 時間・所要を更新。エステ(jsiRsvHour/Minute + jsiRsvTermHour/Minute) と
+  //    美容室(rsvTime=HHMM + rsvTerm=分) の両フィールドを存在チェック付きでセットする。
   {
     const dMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
       ? Number(p.duration_min)
       : 60;
     const thVal = String(Math.floor(dMin / 60) * 60);
     const tmVal = String(dMin % 60).padStart(2, '0');
+    const hhmm = `${String(when.hour).padStart(2, '0')}${startMM}`;
     await page.evaluate(
-      ({ hh, mm, th, tm }) => {
-        const setSel = (id, val) => {
-          const el = document.getElementById(id);
-          if (!el) return;
-          if (!Array.from(el.options).some((o) => o.value === val)) return;
+      ({ hh, mm, th, tm, hhmm, dur }) => {
+        const setSel = (el, val) => {
+          if (!el) return false;
+          if (!Array.from(el.options).some((o) => o.value === val)) return false;
           el.value = val;
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
         };
-        setSel('jsiRsvHour', hh);
-        setSel('jsiRsvMinute', mm);
-        setSel('jsiRsvTermHour', th);
-        setSel('jsiRsvTermMinute', tm);
+        const byId = (id) => document.getElementById(id);
+        // エステ
+        setSel(byId('jsiRsvHour'), hh);
+        setSel(byId('jsiRsvMinute'), mm);
+        setSel(byId('jsiRsvTermHour'), th);
+        setSel(byId('jsiRsvTermMinute'), tm);
+        // 美容室
+        setSel(byId('rsvTime') || document.querySelector('select[name="time"]'), hhmm);
+        const term = byId('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+        if (term && !setSel(term, String(dur))) {
+          const cand = Array.from(term.options).map((o) => Number(o.value)).filter((n) => Number.isFinite(n) && n >= dur).sort((a, b) => a - b)[0];
+          if (cand != null) setSel(term, String(cand));
+        }
       },
-      { hh: String(when.hour), mm: startMM, th: thVal, tm: tmVal },
+      { hh: String(when.hour), mm: startMM, th: thVal, tm: tmVal, hhmm, dur: dMin },
     ).catch(() => {});
     await page.waitForTimeout(300);
-    const ok = await page.evaluate(({ th, tm }) => {
+    const ok = await page.evaluate(({ th, tm, hhmm, dur }) => {
       const h = document.getElementById('jsiRsvTermHour');
       const m = document.getElementById('jsiRsvTermMinute');
-      return !!h && !!m && h.value === th && m.value === tm;
-    }, { th: thVal, tm: tmVal }).catch(() => false);
+      if (h && m) return h.value === th && m.value === tm;
+      const t = document.getElementById('rsvTermId') || document.querySelector('select[name="rsvTerm"]');
+      const rt = document.getElementById('rsvTime') || document.querySelector('select[name="time"]');
+      if (t) return Number(t.value) >= Number(dur) && (!rt || rt.value === hhmm);
+      return false;
+    }, { th: thVal, tm: tmVal, hhmm, dur: dMin }).catch(() => false);
     if (!ok) {
       await page.locator('select#jsiRsvTermHour').first().selectOption({ value: thVal }).catch(() => {});
       await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: tmVal }).catch(() => {});
+      await page.locator('select#rsvTermId, select[name="rsvTerm"]').first().selectOption({ value: String(dMin) }).catch(() => {});
     }
   }
 
@@ -6815,15 +7089,30 @@ const PHOTO_GALLERY_EDIT_URL = 'https://salonboard.com/CNK/draft/photoGalleryEdi
  */
 async function downloadImageToTmp(page, url, tag, opts = {}) {
   try {
-    const resp = await page.context().request.get(url, { timeout: 20_000 });
-    if (!resp.ok()) {
-      await captureScrapeDebug(page, tag, 'image_download_failed', {
-        diagnostics: { url, status: resp.status() },
-      }).catch(() => {});
-      return null;
+    // ★ソース画像は KIREIDOT(Supabase storage)ホスト = SalonBoard ではない。SB用の Decodo
+    //   ISPプロキシを経由すると Supabase 側が 503 で弾く(2026-07-04 郡山 実測)。よって
+    //   まず node の直接 fetch(プロキシ非経由=EC2の素の回線)で取得し、失敗時のみ
+    //   page.context().request(プロキシ経由)へフォールバックする。
+    let buf = null;
+    let ct = '';
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (r.ok) { buf = Buffer.from(await r.arrayBuffer()); ct = (r.headers.get('content-type') || '').toLowerCase(); }
+      else { await captureScrapeDebug(page, tag, 'image_download_failed', { diagnostics: { url, status: r.status, via: 'direct' } }).catch(() => {}); }
+    } catch (e2) {
+      await captureScrapeDebug(page, tag, 'image_download_error', { diagnostics: { url, error: e2?.message ?? String(e2), via: 'direct' } }).catch(() => {});
     }
-    const buf = await resp.body();
-    const ct = (resp.headers()['content-type'] || '').toLowerCase();
+    if (!buf) {
+      const resp = await page.context().request.get(url, { timeout: 20_000 });
+      if (!resp.ok()) {
+        await captureScrapeDebug(page, tag, 'image_download_failed', {
+          diagnostics: { url, status: resp.status(), via: 'proxy' },
+        }).catch(() => {});
+        return null;
+      }
+      buf = await resp.body();
+      ct = (resp.headers()['content-type'] || '').toLowerCase();
+    }
     let ext = 'jpg';
     if (ct.includes('png')) ext = 'png';
     else if (ct.includes('gif')) ext = 'gif';
@@ -7330,10 +7619,21 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
       : '(no imgreg log)';
     const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_image_unconfirmed', { diagnostics: { url: page.url(), reason: uploaded.reason, imgreg: uploaded.imgreg || [] } });
     if (uploaded.reason === 'sb_upload_comm_failed') {
-      return fail(`SalonBoard がスタイル画像のアップロードを拒否しました(通信に失敗しました)。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'IMAGE_REJECTED', true);
+      // ★doUpload 無応答(サーバがPOSTをホールド)= Akamai の一時的bot対策ホールドの可能性が高い。
+      //   画像・パラメータは正常でも、そのIP/セッションの信頼スコアが低い瞬間だと握られる(間欠的)。
+      //   「恒久的な拒否(manual)」ではなく「一時的失敗(retryable)」として返し、
+      //   Admin の指数バックオフ(2→4→8分…)で調子の良いセッション窓口を引くまで自動再試行させる。
+      return fail(`SalonBoard がスタイル画像のアップロードを保留しました(サーバ無応答=一時的bot対策ホールドの可能性)。バックオフ後に自動再試行します。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'SB_UPLOAD_HELD', false);
     }
     if (uploaded.reason === 'modal_register_not_found') {
       return fail(`画像アップロードモーダルの「登録する」を特定できませんでした (capture=${cap || '?'})。モーダルDOMの共有が必要です。`, 'UNKNOWN_ERROR', true);
+    }
+    // imageId_not_set / direct_post_200_no_imageid = doUpload が 302(セッション失効リダイレクト)や
+    // userError で imageId を返さなかったケース。多くは「直前の長い held POST でセッションが死んだ」
+    // 一時要因(実測: doUpload が 302 を返し imageId 無し)。恒久拒否ではないので retryable にし、
+    // バックオフ後に生きたセッションで引き直させる。
+    if (uploaded.reason === 'imageId_not_set' || uploaded.reason === 'direct_post_200_no_imageid') {
+      return fail(`スタイル画像のアップロードで imageId を取得できませんでした(セッション失効/リダイレクトの可能性)。バックオフ後に自動再試行します。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'SB_UPLOAD_HELD', false);
     }
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}) imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
@@ -7529,6 +7829,45 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
 }
 
 /**
+ * 画像を最大1280pxへ「縮小のみ」JPEG再圧縮した Buffer を返す。
+ * ★SBページ内 canvas は CSP(blob:読込)で silent 失敗するため、CSPの無い about:blank の
+ *   一時ページで実行する(2026-07-04 郡山で確定)。失敗時は null(呼び出し側で原画像)。
+ */
+async function downscaleJpegViaBlank(page, file, maxDim = 1280, quality = 0.8) {
+  try {
+    const buf = fs.readFileSync(file);
+    const tmp = await page.context().newPage();
+    try {
+      await tmp.goto('about:blank', { timeout: 10_000 }).catch(() => {});
+      const out = await tmp.evaluate(async ({ b64, mime, maxDim, quality }) => {
+        const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+        try {
+          const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
+          const url = URL.createObjectURL(srcBlob);
+          const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+          const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+          const scale = Math.min(1, maxDim / Math.max(w || 1, h || 1));
+          const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
+          const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
+          canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+          URL.revokeObjectURL(url);
+          const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', quality));
+          if (!outBlob || !outBlob.size) return null;
+          const bytes = new Uint8Array(await outBlob.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          return { b64: btoa(bin), size: bytes.length, w: cw, h: ch };
+        } catch (_e) { return null; }
+      }, { b64: buf.toString('base64'), mime: 'image/jpeg', maxDim, quality });
+      if (out && out.b64) {
+        return { buf: Buffer.from(out.b64, 'base64'), mime: 'image/jpeg', name: path.basename(file).replace(/\.[^.]+$/, '') + '.jpg', w: out.w, h: out.h, srcBytes: buf.length };
+      }
+    } finally { await tmp.close().catch(() => {}); }
+  } catch (_e) { /* fallthrough */ }
+  return null;
+}
+
+/**
  * styleEdit の FRONT 枠に画像を1枚アップロードする。
  * 未設定の FRONT 画像(img#FRONT_IMG_ID_IMG.img_new_no_photo)をクリック→
  * CN_CMN_imageUploaderModal で画像をアップロード。
@@ -7542,20 +7881,34 @@ async function uploadHairStyleFrontImage(page, file) {
   // /imgreg/ (モーダル表示 & doUpload) のリクエスト/レスポンスを記録して、
   // 失敗時に「なぜ通信に失敗したか」を実データで確認できるようにする。
   const imgregLog = [];
+  const _t0 = Date.now();
+  // XHRホールド時の直接POSTフォールバック用に、送信バイト(縮小後)を関数スコープで保持。
+  const _sendMeta = { b64: null, mime: null, name: null };
   const onResp = async (resp) => {
     try {
       const url = resp.url();
       if (!/\/imgreg\//i.test(url)) return;
       let bodyHead = '';
       try { bodyHead = (await resp.text()).slice(0, 600); } catch (_e) { bodyHead = '(body unread)'; }
-      imgregLog.push({ url, status: resp.status(), bodyHead });
+      imgregLog.push({ url, status: resp.status(), bodyHead, tMs: Date.now() - _t0 });
     } catch (_e) { /* noop */ }
   };
   const onReqFail = (req) => {
-    try { if (/\/imgreg\//i.test(req.url())) imgregLog.push({ url: req.url(), failed: req.failure()?.errorText || 'request failed' }); } catch (_e) {}
+    try { if (/\/imgreg\//i.test(req.url())) imgregLog.push({ url: req.url(), failed: req.failure()?.errorText || 'request failed', tMs: Date.now() - _t0 }); } catch (_e) {}
+  };
+  // ★決定打診断: doUpload の POST 開始時に「実際に送られる body のバイト数」を記録する。
+  //   postBytes が multipart 相応(縮小後 ~100KB+境界)なら本当の通信ホールド、
+  //   ~1KB 程度なら formFile=空 (waitImgeFile 未セット) が真因と確定できる。
+  const onReq = (req) => {
+    try {
+      if (!/doUpload/i.test(req.url())) return;
+      const b = req.postDataBuffer && req.postDataBuffer();
+      imgregLog.push({ reqStart: req.url().replace(/^https?:\/\/[^/]+/, ''), postBytes: b ? b.length : null, tMs: Date.now() - _t0 });
+    } catch (_e) { /* noop */ }
   };
   page.on('response', onResp);
   page.on('requestfailed', onReqFail);
+  page.on('request', onReq);
 
   let chooserDone = false;
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 4_000 }).then(async (chooser) => {
@@ -7572,13 +7925,25 @@ async function uploadHairStyleFrontImage(page, file) {
   //   モーダルが開くため、普通の click だけだとハンドラが走らずモーダルが開かない。
   //   FRONT 画像へ本物の MouseEvent(mousedown/mouseup/click)を dispatch して確実に発火させる。
   await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
+  // ★ERR_ABORTED 根治: モーダルは JS委譲ハンドラ(img_upload_modal_view)が AJAX GET で開く。
+  //   従来は evaluate の MouseEvent dispatch と playwright click を「両方」撃っていたため
+  //   モーダル用 GET が2回走り(token A / token B の2応答を実測)、後着の応答が upload 中に
+  //   モーダルDOMを差し替えて in-flight の doUpload XHR を net::ERR_ABORTED で中断していた。
+  //   → まず dispatch を1回だけ撃ってモーダルが開くのを待つ。開かなければ playwright click を
+  //     フォールバックで1回だけ撃つ(=モーダルGETは常に1回)。
   await page.evaluate(() => {
     const el = document.querySelector('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG');
     if (el) ['mousedown', 'mouseup', 'click'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
   }).catch(() => {});
-  // playwright のクリックも併用 (どちらかが効けばよい)。
-  await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
-  await Promise.race([chooserPromise, page.waitForTimeout(2_500)]);
+  const modalOpened = await page.waitForFunction(() => {
+    return !!document.querySelector('#imgUploadForm, #imageUploaderModalBody #imgUploadForm, input.jscImageUploaderModalInput, .jscImageUploaderModalDropArea');
+  }, null, { timeout: 3_500 }).then(() => true).catch(() => false);
+  if (!modalOpened && !chooserDone) {
+    await trigger.click({ timeout: 5_000, force: true }).catch(() => {});
+    await Promise.race([chooserPromise, page.waitForTimeout(2_000)]);
+  } else {
+    await Promise.race([chooserPromise, page.waitForTimeout(400)]);
+  }
 
   // ============================================================
   // 画像アップロードの送信方式:
@@ -7591,8 +7956,14 @@ async function uploadHairStyleFrontImage(page, file) {
   //      Akamai に弾かれて HTTP undefined/タイムアウト(direct_post_blocked)になりやすい。
   //      切り分け用に残すだけ。既定では使わない。
   // ============================================================
-  const PREFER_DIRECT_POST = /^(1|true|yes)$/i.test(process.env.SALONBOARD_DIRECT_POST ?? '');
-  if (!chooserDone && PREFER_DIRECT_POST) {
+  // ★2026-07-04 方針転換: 美容室(CNB)の doUpload は「登録する」クリックのブラウザXHRだと
+  //   window.waitImgeFile が空のまま送られてサーバが終わらない multipart を待ちハングする
+  //   (実測 102KB でも 180s 無応答→abort。銀座=エステCNKはXHRで通る)。StylePost 等の
+  //   外部ツールと同様、**worker から doUpload へ直接POST(multipartを自前で確定構築)**を
+  //   主経路にする。imgUpload GET は 200 で通っている=同一Cookieの直接POSTは通る見込み。
+  //   直接POSTが「ネットワークで撃てない(all_retries_failed)」ときだけブラウザXHRへ退避。
+  let directPostBlocked = false;
+  if (!chooserDone) {
     // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ (AJAXで遅れて入るため十分待つ)。
     await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
@@ -7635,16 +8006,16 @@ async function uploadHairStyleFrontImage(page, file) {
 
     if (params && params.hasForm && params.targetActionId) {
       try {
-        const buf = fs.readFileSync(file);
-        const name = path.basename(file);
-        const ext = (name.split('.').pop() || 'jpg').toLowerCase();
-        const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        // ★縮小(約100KB)して送る。原寸2.2MBだと遅い回線でタイムアウトしやすい。
+        const small = await downscaleJpegViaBlank(page, file).catch(() => null);
+        const buf = small ? small.buf : fs.readFileSync(file);
+        const name = small ? small.name : path.basename(file);
+        const mime = small ? small.mime : ((name.split('.').pop() || 'jpg').toLowerCase() === 'png' ? 'image/png' : 'image/jpeg');
+        imgregLog.push({ direct_post_primary: true, sendBytes: buf.length, downscaled: !!small, w: small && small.w, h: small && small.h, srcBytes: small && small.srcBytes });
         const absUrl = new URL(params.url, page.url()).toString();
         const pageUrl = page.url();
-        // ★Akamai Bot Manager 対策: doUpload は Akamai 配下で、自動化リクエストだと
-        //   ホールドされて 60s タイムアウトすることがある(_abck 等のcookieあり)。
-        //   ブラウザの $.ajax に近いヘッダ(referer/origin/x-requested-with)を付け、
-        //   タイムアウト/中断時は短い間隔で最大3回リトライする(Akamaiは断続的)。
+        // ブラウザの $.ajax に近いヘッダ(referer/origin/x-requested-with)を付け、
+        // タイムアウト/中断時は短い間隔で最大3回リトライする。
         const buildMultipart = () => ({
           formFile: { name, mimeType: mime, buffer: buf },
           setImgId: params.setImgId,
@@ -7663,26 +8034,32 @@ async function uploadHairStyleFrontImage(page, file) {
         };
         let resp = null;
         let lastErr = '';
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        // ★2026-07-04 fail-fast化: 直接POST(Node request)はブラウザと異なるTLS指紋のため
+        //   Akamai が「一時ホールド(無応答)」しやすい。ホールドされたら長く待つほどセッション/IPの
+        //   フラグを深め、後続のブラウザXHRまで巻き込む。よって「速い1回のプローブ」に留める:
+        //   通れば即完了(良好セッションなら数秒)、ホールドなら20秒で見切ってブラウザXHRへ退避。
+        //   旧: 3回×60s=最大180秒の無駄打ち → 新: 1回×20s。
+        const DIRECT_POST_PROBE_TIMEOUT_MS = 20_000;
+        for (let attempt = 1; attempt <= 1; attempt++) {
+          const _ts = Date.now();
           try {
             resp = await page.context().request.post(absUrl, {
-              timeout: 25_000,
+              timeout: DIRECT_POST_PROBE_TIMEOUT_MS,
               headers: reqHeaders,
               multipart: buildMultipart(),
             });
+            imgregLog.push({ direct_post_ok: attempt, status: resp.status(), tookMs: Date.now() - _ts });
             break; // 応答が返れば(2xx/4xx/5xx問わず)ループ終了
           } catch (e) {
             lastErr = e?.message?.split('\n')[0] ?? String(e);
-            imgregLog.push({ direct_post_retry: attempt, error: lastErr });
-            await page.waitForTimeout(1200).catch(() => {});
+            imgregLog.push({ direct_post_retry: attempt, error: lastErr, tookMs: Date.now() - _ts });
           }
         }
         if (!resp) {
-          // 3回ともタイムアウト/中断 → Akamai にブロックされている可能性。
-          page.off('response', onResp); page.off('requestfailed', onReqFail);
-          imgregLog.push({ direct_post: 'all_retries_failed', lastErr });
-          return { ok: false, reason: 'direct_post_blocked', imgreg: imgregLog };
-        }
+          // 直接POSTがホールド/中断された → 即ブラウザXHRへ退避(粘らない)。
+          imgregLog.push({ direct_post: 'probe_failed_fast', lastErr });
+          directPostBlocked = true;
+        } else {
         const html = await resp.text().catch(() => '');
         // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT_IMG_ID)へ反映する。
         const applied = await page.evaluate((resHtml) => {
@@ -7732,19 +8109,28 @@ async function uploadHairStyleFrontImage(page, file) {
           let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
           return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
         }
-        // HTTP 200 だが imageId が取れない → レスポンス構造を診断ログに出す(ブラウザXHRには落とさない)。
+        // HTTP 200 だが imageId が取れない → レスポンス構造を診断ログに出す。
         imgregLog.push({ via: 'direct_post', status: resp.status(), applied: applied?.fields || applied, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 400) });
         if (resp.status() === 200) {
-          // 200 なのに反映できないだけ。ブラウザXHRで二重送信せず、ここで失敗を返す。
+          // 200 なのに反映できない → 二重送信せずここで失敗を返す(userError等)。
           page.off('response', onResp); page.off('requestfailed', onReqFail);
           return { ok: false, reason: 'direct_post_200_no_imageid', imgreg: imgregLog };
         }
+        // 非200(4xx/5xx) → ブラウザXHRへ退避。
+        directPostBlocked = true;
+        } // end else (resp あり)
       } catch (e) {
-        imgregLog.push({ url: params.url, failed: `direct_post_error: ${e?.message ?? e}` });
+        imgregLog.push({ url: params && params.url, failed: `direct_post_error: ${e?.message ?? e}` });
+        directPostBlocked = true;
       }
+    } else {
+      // フォーム params が取れない → ブラウザXHRへ。
+      directPostBlocked = true;
     }
-    // 直接POSTが使えない/失敗 → 下のブラウザXHR方式にフォールバック。
+    // 直接POSTが撃てなかった時のみ、下のブラウザXHR方式にフォールバックする。
+    // (directPostBlocked=false のまま imageId 取得済みは上で return 済み)
   }
+  if (chooserDone) directPostBlocked = false;
 
   // 実DOM (CN_CMN_imageUploaderModal, #imageUploaderModalBody 内):
   //   ドロップ領域: .jscImageUploaderModalDropArea (ここに drop / クリックで file 選択)
@@ -7780,37 +8166,81 @@ async function uploadHairStyleFrontImage(page, file) {
     //     input.files と window.waitImgeFile にセットし、change を発火する。
     //     こうすると multipart 本体がメモリから確実に送られ、アップロードが通る。
     let usedInMemory = false;
+    let sentBytes = null;
     try {
       const buf = fs.readFileSync(file);
-      const b64 = buf.toString('base64');
       const name = path.basename(file);
       const ext = (name.split('.').pop() || 'jpg').toLowerCase();
       const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-      usedInMemory = await page.evaluate(({ b64, name, mime }) => {
+      // (直接POSTフォールバックでも使うため関数スコープへ)
+      _sendMeta.b64 = buf.toString('base64'); _sendMeta.mime = mime; _sendMeta.name = name;
+
+      // ★縮小は SB ページ内ではなく **CSP の無い about:blank 一時ページ** で行う。
+      //   SB ページ内 canvas は CSP(blob:/data: 制限)で Image 読込が silently 失敗し、
+      //   原寸(2.2MB)のまま送って doUpload が時間切れ ERR_ABORTED になっていた
+      //   (2026-07-04 郡山 imgreg 診断 srcBytes=2229884 で確定)。
+      let sendB64 = buf.toString('base64');
+      let sendMime = mime;
+      let sendName = name;
+      try {
+        const tmp = await page.context().newPage();
         try {
-          const bin = atob(b64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          const f = new File([bytes], name, { type: mime });
-          const dt = new DataTransfer();
-          dt.items.add(f);
-          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
-          if (inp) {
-            inp.files = dt.files;
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
+          await tmp.goto('about:blank', { timeout: 10_000 }).catch(() => {});
+          const out = await tmp.evaluate(async ({ b64, mime }) => {
+            const toBytes = (bin) => { const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+            try {
+              const srcBlob = new Blob([toBytes(atob(b64))], { type: mime });
+              const url = URL.createObjectURL(srcBlob);
+              const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+              const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+              const scale = Math.min(1, 1280 / Math.max(w || 1, h || 1));
+              const cw = Math.max(1, Math.round((w || 1) * scale)), ch = Math.max(1, Math.round((h || 1) * scale));
+              const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
+              canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+              URL.revokeObjectURL(url);
+              const outBlob = await new Promise((res) => canvas.toBlob((b) => res(b), 'image/jpeg', 0.8));
+              if (!outBlob || !outBlob.size) return null;
+              const ab = await outBlob.arrayBuffer();
+              const bytes = new Uint8Array(ab);
+              let bin = '';
+              for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+              return { b64: btoa(bin), size: bytes.length, w: cw, h: ch };
+            } catch (_e) { return null; }
+          }, { b64: sendB64, mime });
+          if (out && out.b64) {
+            sendB64 = out.b64;
+            sendMime = 'image/jpeg';
+            sendName = name.replace(/\.[^.]+$/, '') + '.jpg';
+            sentBytes = out.size;
+            imgregLog.push({ downscaled: true, outBytes: out.size, w: out.w, h: out.h, srcBytes: buf.length });
+          } else {
+            imgregLog.push({ downscaled: false, srcBytes: buf.length });
           }
-          // 念のため waitImgeFile も同一の in-memory File に。
-          if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
-          else window.waitImgeFile = f;
-          return true;
-        } catch (_e) { return false; }
-      }, { b64, name, mime }).catch(() => false);
+        } finally {
+          await tmp.close().catch(() => {});
+        }
+      } catch (_e) { imgregLog.push({ downscaled: false, err: String(_e).slice(0, 60), srcBytes: buf.length }); }
+
+      // ★縮小済みJPEGを一時ファイルに書き、Playwright ネイティブの setInputFiles で投入する。
+      //   JS注入(File+DataTransfer+dispatchEvent)は isTrusted=false のため Akamai センサーの
+      //   評価が下がり、doUpload XHR が無期限ホールドされていた疑い(102KBでも180秒無応答)。
+      //   setInputFiles は CDP 経由の trusted な入力で、手動のファイル選択と同条件になる。
+      const smallPath = `${file}.small.jpg`;
+      try {
+        _sendMeta.b64 = sendB64; _sendMeta.mime = sendMime; _sendMeta.name = sendName;
+        fs.writeFileSync(smallPath, Buffer.from(sendB64, 'base64'));
+        await modalInput.setInputFiles(smallPath, { timeout: 8_000 });
+        usedInMemory = true; // (= 縮小ファイル投入成功。変数名は互換のため維持)
+      } catch (_e) { usedInMemory = false; }
+      // 後始末は best-effort (数百KBの tmp。失敗しても害なし)。
+      setTimeout(() => { try { fs.unlinkSync(smallPath); } catch (_e2) { /* noop */ } }, 300_000);
     } catch (_e) { /* fallthrough */ }
 
     if (!usedInMemory) {
-      // in-memory に失敗したら従来の setInputFiles。
+      // 縮小/書出しに失敗したら原画像で従来の setInputFiles。
       await modalInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
     }
+    imgregLog.push({ inMemory: usedInMemory, sentBytes });
   }
 
   const isDone = () => page.evaluate((prev) => {
@@ -7834,6 +8264,79 @@ async function uploadHairStyleFrontImage(page, file) {
     return !!(t && (t.getAttribute('src') || '').trim());
   }, null, { timeout: 12_000 }).catch(() => {});
 
+  // ★ERR_ABORTED の真因(2026-07-04 郡山で imgreg ログにより確定):
+  //   SB の file_upload() は $.ajax(timeout:35000) で doUpload へ POST し、35秒を超えると
+  //   jQuery が XHR を abort する(= ブラウザ側では net::ERR_ABORTED、画面は「通信に失敗しました」)。
+  //   プロキシ(ISP)経由の遅いアップロードや Akamai の一時ホールドで 35 秒を超えるため、
+  //   doUpload の $.ajax だけ timeout を 180 秒へ引き上げるパッチを当ててからクリックする。
+  await page.evaluate(() => {
+    try {
+      const jq = window.jQuery || window.$;
+      if (jq && jq.ajax && !jq.__kdDoUploadPatched) {
+        const orig = jq.ajax;
+        jq.ajax = function (a, b) {
+          try {
+            const opts = (typeof a === 'object' && a) ? a : (b || {});
+            if (opts && typeof opts.url === 'string' && /doUpload/.test(opts.url)) opts.timeout = 45000;
+          } catch (_e) { /* noop */ }
+          return orig.apply(this, arguments);
+        };
+        jq.__kdDoUploadPatched = true;
+      }
+    } catch (_e) { /* noop */ }
+  }).catch(() => {});
+
+  // ★v0.2.116 確実策の復元 + 決定打診断:
+  //   SB の file_upload() は FormData.append('formFile', window.waitImgeFile) で送る。
+  //   waitImgeFile は input の change → prepareFileInfo で入るが、uploadMode フラグ等の
+  //   条件で入らないことがある。**空のまま送ると formFile=空 POST → サーバ無応答 →
+  //   クライアント timeout abort(ERR_ABORTED)** — 今回の症状と同一の既知パターン。
+  //   クリック前に waitImgeFile を検証し、空なら input.files[0] から補償する。
+  {
+    const pre = await page.evaluate(() => {
+      const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
+      const th = document.querySelector('img.jscImageUploaderModalThumbnail');
+      const w = window.waitImgeFile;
+      return {
+        inputFiles: inp && inp.files ? inp.files.length : -1,
+        thumbSet: !!(th && (th.getAttribute('src') || '').trim()),
+        waitType: typeof w,
+        waitSize: (w && typeof w === 'object' && typeof w.size === 'number') ? w.size : null,
+        uploadMode: (typeof window.uploadMode !== 'undefined') ? String(window.uploadMode) : 'undef',
+        hasUploadFn: typeof window.file_upload === 'function',
+      };
+    }).catch(() => null);
+    imgregLog.push({ pre });
+    if (!pre || !pre.waitSize) {
+      const fixed = await page.evaluate(() => {
+        try {
+          const inp = document.querySelector('input.jscImageUploaderModalInput, #imageUploaderModalBody input[type="file"], .jscImageUploaderModalDropArea input[type="file"]');
+          const f = inp && inp.files && inp.files[0];
+          if (!f) return { ok: false, reason: 'no_input_file' };
+          if (typeof window.addWaitImgeFile === 'function') window.addWaitImgeFile(f);
+          window.waitImgeFile = window.waitImgeFile && typeof window.waitImgeFile === 'object' && window.waitImgeFile.size ? window.waitImgeFile : f;
+          const w = window.waitImgeFile;
+          return { ok: true, size: (w && w.size) || null };
+        } catch (e) { return { ok: false, reason: String(e).slice(0, 60) }; }
+      }).catch(() => ({ ok: false, reason: 'eval_failed' }));
+      imgregLog.push({ waitImgeFileCompensated: fixed });
+    }
+  }
+
+  // ★人間化 (Phase3-lite と同等): Akamai は _abck センサーでマウス軌跡等を評価し、
+  //   兆候が無いセッションの XHR POST をホールドする。予約登録では submit 前の人間化で
+  //   書込500が解消済み。画像アップロードの doUpload も同じ対策を適用する。
+  try {
+    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    const jit = (lo, hi) => lo + Math.floor(Math.random() * Math.max(1, hi - lo));
+    await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+    await page.waitForTimeout(jit(300, 800));
+    await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+    await page.waitForTimeout(jit(300, 700));
+    await page.mouse.wheel(0, jit(-80, 80)).catch(() => {});
+    await page.waitForTimeout(jit(400, 900));
+  } catch (_e) { /* 人間化は best-effort */ }
+
   // 「登録する」(jscImageUploaderModalSubmitButton) を **1回だけ** クリック。
   // 手動と同じ操作。直接 file_upload() 呼びや連打はしない(doUpload が ERR_ABORTED に
   // なる原因になりうる)。
@@ -7845,8 +8348,9 @@ async function uploadHairStyleFrontImage(page, file) {
     return { ok: false, reason: 'modal_register_not_found' };
   }
 
-  // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを最大40秒待つ。
-  // 連打せず、状態が確定するまで素直に待つ。
+  // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを待つ。
+  // ★fail-fast: doUpload の $.ajax timeout を 45 秒にしたため、待ち上限も 55 秒に短縮。
+  //   45秒以内に応答が無い=Akamai の一時ホールド。長く粘らず切って retryable で再試行に回す。
   await page.waitForFunction((prev) => {
     const h = document.getElementById('FRONT_IMG_ID');
     const hv = h ? (h.value || '') : '';
@@ -7857,11 +8361,79 @@ async function uploadHairStyleFrontImage(page, file) {
     const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
     const err = !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(document.body?.innerText || '');
     return done || err;
-  }, before, { timeout: 40_000 }).catch(() => {});
+  }, before, { timeout: 55_000 }).catch(() => {});
 
-  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); } catch (_e) {} };
+  const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); page.off('request', onReq); } catch (_e) {} };
 
   if (await hasCommError()) {
+    // ★最終フォールバック(2026-07-04 郡山): ブラウザXHRの doUpload が Akamai に
+    //   無期限ホールドされる(102KB/180秒でも無応答)ケースで、同一Cookie(成熟_abck含む)の
+    //   まま Playwright request.post で直接POSTする。銀座(エステ/CNK)ではブラウザXHRが
+    //   通るため既定経路はそのまま、失敗時のみ発動。
+    try {
+      const params = await page.evaluate(() => {
+        const f = document.querySelector('#imgUploadForm');
+        if (!f) return null;
+        const g = (n) => { const el = f.querySelector(`input[name="${n}"]`); return el ? (el.value || '') : ''; };
+        const ctx = (typeof window !== 'undefined' && window.CONTEXT_URL_STR) || '/CNB';
+        const ustr = (typeof window !== 'undefined' && window.URL_STR) || 'imgUpload/';
+        const wFlg = g('wFlg');
+        return {
+          url: ctx + '/imgreg/' + ustr + 'doUpload' + (wFlg === 'true' ? '?wFlg=true' : ''),
+          setImgId: g('setImgId'), dataKey: g('dataKey'), targetActionId: g('targetActionId'),
+          token: g('org.apache.struts.taglib.html.TOKEN'), storeId: g('STORE_ID'),
+          modified: g('modified'), pubManageId: g('pubManageId'),
+        };
+      }).catch(() => null);
+      if (params && params.targetActionId && _sendMeta.b64) {
+        const absUrl = new URL(params.url, page.url()).toString();
+        const pageUrl = page.url();
+        const resp = await page.context().request.post(absUrl, {
+          timeout: 20_000,
+          headers: {
+            referer: pageUrl,
+            origin: new URL(pageUrl).origin,
+            'x-requested-with': 'XMLHttpRequest',
+            accept: 'text/html, */*; q=0.01',
+          },
+          multipart: {
+            formFile: { name: _sendMeta.name, mimeType: _sendMeta.mime, buffer: Buffer.from(_sendMeta.b64, 'base64') },
+            setImgId: params.setImgId, dataKey: params.dataKey, targetActionId: params.targetActionId,
+            'org.apache.struts.taglib.html.TOKEN': params.token, STORE_ID: params.storeId,
+            modified: params.modified, pubManageId: params.pubManageId,
+          },
+        });
+        const html = await resp.text().catch(() => '');
+        imgregLog.push({ directPostFallback: true, status: resp.status(), tMs: Date.now() - _t0, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 160) });
+        if (resp.status() === 200) {
+          const applied = await page.evaluate((resHtml) => {
+            try {
+              const tmp = document.createElement('div');
+              tmp.innerHTML = resHtml;
+              const get = (id) => { const e = tmp.querySelector('#' + id); return e ? (e.value !== undefined ? e.value : e.textContent) : ''; };
+              if (String(get('userErrorFlg') || '0') !== '0') return { ok: false, userError: true };
+              const imageId = get('imageId');
+              if (!imageId) return { ok: false };
+              // FRONT_IMG_ID hidden / span / プレビュー img を直接反映 (setUploadImage 非依存の保険)。
+              const h = document.getElementById('FRONT_IMG_ID'); if (h) h.value = imageId;
+              const span = document.getElementById('FRONT_IMG_ID_ID'); if (span) span.textContent = imageId;
+              const fp = get('imageFilePath'); if (fp) { const img = document.getElementById('FRONT_IMG_ID_IMG'); if (img) img.src = fp; }
+              if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
+              try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
+              return { ok: true, imageId };
+            } catch (_e) { return { ok: false }; }
+          }, html).catch(() => ({ ok: false }));
+          if (applied && applied.ok && applied.imageId) {
+            detach();
+            return { ok: true, imageId: applied.imageId, via: 'direct_post_fallback' };
+          }
+        }
+      } else {
+        imgregLog.push({ directPostFallback: false, reason: params ? 'no_send_bytes' : 'no_form_params' });
+      }
+    } catch (e) {
+      imgregLog.push({ directPostFallbackError: String(e?.message ?? e).slice(0, 120), tMs: Date.now() - _t0 });
+    }
     await captureScrapeDebug(page, 'photo_gallery', 'hair_image_modal_dom', { diagnostics: { url: page.url(), commError: true, imgreg: imgregLog } }).catch(() => {});
     detach();
     return { ok: false, reason: 'sb_upload_comm_failed', imgreg: imgregLog };
