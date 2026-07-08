@@ -225,6 +225,58 @@ function bumpLoginCooldown(shopId: string): number {
   return next;
 }
 
+/**
+ * ★店舗単位 自動フェイルオーバー (ISP → Residential, 2026-07-09):
+ *   既定は Static Residential (ISP, 定額) 固定IP。ある店舗が login-throttle
+ *   (Akamai の doLogin ホールド)を AUTO_RES_THRESHOLD 回**連続**で起こしたら、
+ *   その店舗**だけ** AUTO_RES_TTL_MS の間 住宅IP(従量課金, jp.decodo.com)へ
+ *   自動退避する。TTL 満了で ISP へ自動復帰し、次ジョブで ISP を再試験→また
+ *   throttle すれば再退避。これで**住宅GBは「今まさに失敗している店」に限定**され、
+ *   回復した店は自動的に定額ISPへ戻る(郡山の手動pinを一般化・GB効率化)。
+ *   手動 override("residential") は常に優先。同時退避数は AUTO_RES_MAX_SHOPS で上限
+ *   (GB暴走防止)。プロセス内メモリ保持(restart で streak はリセットされるが、
+ *   失敗が続けば即再退避するため実害小)。
+ */
+const AUTO_RES_THRESHOLD = 2; // 連続 throttle 2回で退避
+const AUTO_RES_TTL_MS = 6 * 60 * 60_000; // 6時間 住宅に留める(満了で ISP 再試験)
+const AUTO_RES_MAX_SHOPS = 3; // 同時に住宅へ載せる上限(GB暴走防止)
+const shopThrottleStreak = new Map<string, number>();
+const shopAutoResidentialUntil = new Map<string, number>();
+
+/** この店舗が現在 自動フェイルオーバーで住宅退避中か。 */
+function autoResidentialActive(shopId?: string): boolean {
+  if (!shopId) return false;
+  return (shopAutoResidentialUntil.get(shopId) ?? 0) > Date.now();
+}
+/** 手動pin(override="residential") or 自動退避 の合算判定(proxy選択で使用)。 */
+function shopPrefersResidential(shopId?: string): boolean {
+  return shopWantsResidential(shopId) || autoResidentialActive(shopId);
+}
+/** login-throttle 検知時: 連続 streak を増やし、閾値到達で住宅へ自動退避。 */
+function noteLoginThrottle(shopId: string): void {
+  const n = (shopThrottleStreak.get(shopId) ?? 0) + 1;
+  shopThrottleStreak.set(shopId, n);
+  if (n < AUTO_RES_THRESHOLD) return;
+  if (!fallbackConfigured() || autoResidentialActive(shopId)) return;
+  const activeAuto = [...shopAutoResidentialUntil.values()].filter(
+    (t) => t > Date.now(),
+  ).length;
+  if (activeAuto >= AUTO_RES_MAX_SHOPS) {
+    console.log(
+      `[proxy] auto-failover 上限(${AUTO_RES_MAX_SHOPS}店)到達 → shop=${shopId.slice(0, 8)} は退避せず ISP 継続`,
+    );
+    return;
+  }
+  shopAutoResidentialUntil.set(shopId, Date.now() + AUTO_RES_TTL_MS);
+  console.log(
+    `[proxy] auto-failover: shop=${shopId.slice(0, 8)} を住宅IPへ自動退避 (${n}回連続throttle, TTL${Math.round(AUTO_RES_TTL_MS / 3600000)}h)`,
+  );
+}
+/** login 成功時: throttle streak をリセット(住宅退避の TTL は自然満了に任せる)。 */
+function noteLoginSuccess(shopId: string): void {
+  if (shopThrottleStreak.has(shopId)) shopThrottleStreak.delete(shopId);
+}
+
 // 起動時に push モードを明示ログ (平文の値はそのまま出さない)。
 console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
@@ -799,6 +851,8 @@ async function handleJob(job: Job): Promise<void> {
         if (isThrottle) {
           const cdMs = bumpLoginCooldown(job.shop_id);
           console.log(`[job] ${tag} login throttled -> cooldown ${Math.ceil(cdMs / 60_000)}m for shop=${job.shop_id.slice(0, 8)}`);
+          // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
+          noteLoginThrottle(job.shop_id);
         }
         await report({
           job_id: job.id,
@@ -818,6 +872,7 @@ async function handleJob(job: Job): Promise<void> {
       // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
       loginCooldownUntil.delete(job.shop_id);
+      noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
       auth = "logged_in";
     }
 
@@ -1566,11 +1621,15 @@ function pickProxy(forceResidential?: boolean, shopId?: string): { server: strin
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
   // 書込強制 or 「この店舗は住宅IP」指定 → 住宅(sticky)へ。creds はファイル/env(residentialConfig)。
-  if ((forceResidential || shopWantsResidential(shopId)) && fallbackConfigured()) {
+  if ((forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()) {
     const r = residentialProxyFor(shopId);
     if (r) {
       // 認証情報は出さず host:port と理由のみ (どの店舗が住宅IPを使ったか監査可能に)
-      const why = forceResidential ? "書込強制" : "shop指定";
+      const why = forceResidential
+        ? "書込強制"
+        : shopWantsResidential(shopId)
+        ? "手動pin"
+        : "自動FO";
       console.log(
         `[proxy] shop=${shopId ?? "-"} → residential ${r.server} (${why})`
       );
@@ -1638,7 +1697,7 @@ function resolveLaunchOptions(
   // forceResidential(書込ジョブ等) は credProxy/静的IPより residential を最優先。
   // 無ければ「ジョブ固有プロキシ優先、無ければ pickProxy(静的健全IP→Residentialフォールバック)」。
   const picked =
-    (forceResidential || shopWantsResidential(shopId)) && fallbackConfigured()
+    (forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()
       ? pickProxy(forceResidential, shopId)
       : credProxy?.server
       ? {
