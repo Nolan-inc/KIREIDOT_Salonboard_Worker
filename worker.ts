@@ -1469,8 +1469,59 @@ async function refreshHealthyProxies(): Promise<void> {
   );
 }
 
+// ── Residential(住宅)接続情報 ─────────────────────────────────────────────
+// env(SB_PROXY_FALLBACK_*)を既定とし、**コンテナ再作成せず**更新できるよう
+// ファイル /home/pwuser/.kireidot/residential.json を優先で読む(存在時)。
+//   形式: {"host":"jp.decodo.com","port_min":30001,"port_max":30010,"username":"...","password":"..."}
+// sticky エンドポイント(jp.decodo.com:3000X)は port ごとに別のstickyセッション(=別IP)。
+// shop→port を hash で固定し、店舗ごとに安定した住宅stickyセッションを割り当てる。
+type ResidentialCfg = { host: string; portMin: number; portMax: number; username?: string; password?: string } | null;
+let _residentialCfgCache: ResidentialCfg | undefined;
+function residentialConfig(): ResidentialCfg {
+  if (_residentialCfgCache !== undefined) return _residentialCfgCache;
+  try {
+    const raw = readFileSync("/home/pwuser/.kireidot/residential.json", "utf8");
+    const j = JSON.parse(raw) as Record<string, unknown>;
+    if (j && j.host) {
+      const pMin = Number(j.port_min ?? j.port ?? 30001);
+      _residentialCfgCache = {
+        host: String(j.host),
+        portMin: pMin,
+        portMax: Number(j.port_max ?? j.port ?? pMin),
+        username: j.username ? String(j.username) : undefined,
+        password: j.password ? String(j.password) : undefined,
+      };
+      return _residentialCfgCache;
+    }
+  } catch { /* ファイル無し/壊れ → env にフォールバック */ }
+  const srv = (process.env.SB_PROXY_FALLBACK_SERVER || "").trim();
+  if (srv) {
+    const [h, p] = srv.split(":");
+    const port = Number(p || 0) || 30001;
+    _residentialCfgCache = {
+      host: h, portMin: port, portMax: port,
+      username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
+      password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
+    };
+    return _residentialCfgCache;
+  }
+  _residentialCfgCache = null;
+  return null;
+}
+function residentialProxyFor(shopId?: string): { server: string; username?: string; password?: string } | null {
+  const c = residentialConfig();
+  if (!c) return null;
+  const span = Math.max(1, c.portMax - c.portMin + 1);
+  const port = shopId ? c.portMin + (hashShop(shopId) % span) : c.portMin;
+  return { server: `${c.host}:${port}`, username: c.username, password: c.password };
+}
 function fallbackConfigured(): boolean {
-  return !!(process.env.SB_PROXY_FALLBACK_SERVER || "").trim();
+  return !!residentialConfig();
+}
+/** proxy-shop-override.json の値が "residential" の店舗は全処理を住宅IPへ通す。 */
+function shopWantsResidential(shopId?: string): boolean {
+  const v = proxyShopOverride(shopId);
+  return v === "residential" || v === "res";
 }
 
 /**
@@ -1514,15 +1565,21 @@ function proxyShopOverride(shopId?: string): string | null {
 function pickProxy(forceResidential?: boolean, shopId?: string): { server: string; username?: string; password?: string } {
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
-  if (forceResidential && fallbackConfigured()) {
-    return {
-      server: (process.env.SB_PROXY_FALLBACK_SERVER || "").trim(),
-      username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
-      password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
-    };
+  // 書込強制 or 「この店舗は住宅IP」指定 → 住宅(sticky)へ。creds はファイル/env(residentialConfig)。
+  if ((forceResidential || shopWantsResidential(shopId)) && fallbackConfigured()) {
+    const r = residentialProxyFor(shopId);
+    if (r) {
+      // 認証情報は出さず host:port と理由のみ (どの店舗が住宅IPを使ったか監査可能に)
+      const why = forceResidential ? "書込強制" : "shop指定";
+      console.log(
+        `[proxy] shop=${shopId ?? "-"} → residential ${r.server} (${why})`
+      );
+      return r;
+    }
   }
   const shopOverride = proxyShopOverride(shopId);
-  if (shopOverride) {
+  // "residential"/"res" は上で処理済み。それ以外(ISPサーバ文字列)のみ ISP override として使う。
+  if (shopOverride && shopOverride !== "residential" && shopOverride !== "res") {
     return {
       server: shopOverride,
       username: process.env.SB_PROXY_USERNAME || undefined,
@@ -1561,15 +1618,12 @@ function pickProxy(forceResidential?: boolean, shopId?: string): { server: strin
     };
   }
   // 健全な静的IPが無い → Residential フォールバック (設定時)
-  if (fallbackConfigured()) {
+  const rfb = residentialProxyFor(shopId);
+  if (rfb) {
     if (_proxyRrCounter % 20 === 0)
       console.log("[proxy] 全static IPフラグ → Residential フォールバックを使用");
     _proxyRrCounter += 1;
-    return {
-      server: (process.env.SB_PROXY_FALLBACK_SERVER || "").trim(),
-      username: process.env.SB_PROXY_FALLBACK_USERNAME || undefined,
-      password: process.env.SB_PROXY_FALLBACK_PASSWORD || undefined,
-    };
+    return rfb;
   }
   return { server: "" }; // フォールバック無し → 健全IP無し (呼び出し側で待機)
 }
@@ -1584,8 +1638,8 @@ function resolveLaunchOptions(
   // forceResidential(書込ジョブ等) は credProxy/静的IPより residential を最優先。
   // 無ければ「ジョブ固有プロキシ優先、無ければ pickProxy(静的健全IP→Residentialフォールバック)」。
   const picked =
-    forceResidential && fallbackConfigured()
-      ? pickProxy(true, shopId)
+    (forceResidential || shopWantsResidential(shopId)) && fallbackConfigured()
+      ? pickProxy(forceResidential, shopId)
       : credProxy?.server
       ? {
           server: credProxy.server,
