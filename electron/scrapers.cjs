@@ -4214,12 +4214,23 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const jit = (a, b) => a + Math.floor(Math.random() * (b - a));
     try {
       const vp = page.viewportSize() || { width: 1280, height: 800 };
-      await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
-      await page.waitForTimeout(jit(120, 380));
-      await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(6, 14) });
+      // ★Layer2a 人間化強化 (2026-07-08): _abck センサーは移動の軌跡・速度分散・イベント間隔・
+      //   スクロールを総合採点する。単調な即クリックを避け、「フォームを読んで最終確認する人間」の
+      //   挙動(可変速の複数マウス移動 + 上下スクロール + ボタンへの2段接近 + 長めの確認間)を再現し、
+      //   書込POST時のセンサースコアを上げて Akamai の 500/challenge を抑える。
+      const moves = jit(3, 6);
+      for (let i = 0; i < moves; i++) {
+        await page.mouse.move(jit(80, vp.width - 80), jit(120, vp.height - 120), { steps: jit(8, 22) });
+        await page.waitForTimeout(jit(90, 420));
+        if (i === 1) { await page.mouse.wheel(0, jit(120, 360)).catch(() => {}); await page.waitForTimeout(jit(200, 600)); }
+        if (i === 3) { await page.mouse.wheel(0, jit(-260, -80)).catch(() => {}); await page.waitForTimeout(jit(150, 500)); }
+      }
+      // 登録ボタンへ「近づく→乗る」の2段。人間はボタン付近で一度止まる。
       await registerBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(10, 20) });
+      await page.waitForTimeout(jit(200, 600));
       await registerBtn.hover().catch(() => {});
-      await page.waitForTimeout(jit(700, 1700)); // 人間の "内容確認" 時間
+      await page.waitForTimeout(jit(900, 2200)); // 人間の "最終確認" 時間(長め)
     } catch (_e) { /* 人間化は best-effort */ }
   };
   try {
@@ -4358,10 +4369,16 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
   if (stillConfirmPage) {
+    // ★doComplete「まだ登録されていません」= 最終確定が通らなかった。設備満床は送信前ガード
+    //   (EQUIPMENT_FULL)で先に弾いているので、ここに来る大半は Akamai の一時的な書込ブロック
+    //   (500系)や瞬間的なサーバ競合。実測(2026-07 銀座/郡山)で再投入すると通る(65ac3ea8実証)。
+    //   よって恒久拒否(manual)ではなく一過性(retryable)として返し、preflight 付き自動リトライで
+    //   良い窓口を引くまで粘る(既に登録済みなら preflight が検出して二重登録しない)。
+    //   ※ push_booking のリトライは Admin/jobs が preflight_required を維持するので冪等。
     return fail(
-      '登録の最終確認 (doComplete「まだ登録されていません」) を確定できませんでした (容量超過/設備不足の可能性)。',
-      'UNKNOWN_ERROR',
-      true,
+      '登録の最終確認 (doComplete「まだ登録されていません」) を確定できませんでした。SalonBoard の一時的な書込ブロックの可能性のため、preflight 付きで自動再試行します。',
+      'SB_REGISTER_INCOMPLETE',
+      false,
     );
   }
   // 完了サイン: 詳細リンク / 完了文言 / 2段階目を押して確認ページを抜けた / 一覧等へ遷移。
