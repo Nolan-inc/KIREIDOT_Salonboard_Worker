@@ -728,7 +728,7 @@ async function handleJob(job: Job): Promise<void> {
       "push_equipment", "push_staff", "push_menu", "push_coupon",
     ]);
     const forceResidential =
-      process.env.SB_WRITE_VIA_RESIDENTIAL === "1" && WRITE_JOBS.has(job.job_type);
+      writeViaResidentialEnabled() && WRITE_JOBS.has(job.job_type);
     if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
     const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential, job.shop_id);
     if (launch.proxy) {
@@ -741,6 +741,25 @@ async function handleJob(job: Job): Promise<void> {
     ctx = await launchStealthContext({ launch, realChrome, shopId: job.shop_id });
     browser = ctx.browser();
     const page = ctx.pages()[0] ?? (await ctx.newPage());
+
+    // ★従量課金の住宅(residential)IP利用時のみ、画像/動画/フォントの読込を遮断して
+    //   帯域(GB)を節約する。DOM/データ取得には不要な要素で、SBページの転送量の大半を占める。
+    //   ISP(定額)は転送量課金が無いので遮断せず、実証済みフローをそのまま使う。
+    //   ※CSS(stylesheet)は Playwright の :visible 判定に影響するので遮断しない(安全側)。
+    const _resCfg = residentialConfig();
+    const _usingResidential = !!(
+      _resCfg &&
+      launch.proxy?.server &&
+      launch.proxy.server.includes(_resCfg.host)
+    );
+    if (_usingResidential) {
+      await ctx.route("**/*", (route) => {
+        const t = route.request().resourceType();
+        if (t === "image" || t === "media" || t === "font") return route.abort();
+        return route.continue();
+      });
+      console.log(`[proxy] ${tag} residential: 画像/動画/フォント遮断(GB節約)`);
+    }
 
     // 1) ログイン済み判定 → 必要時のみ tryLogin
     //    ジャンル/グループ(ADER 等の美容室・1ログイン複数サロン)で管理TOPを出し分ける。
@@ -1577,6 +1596,23 @@ function fallbackConfigured(): boolean {
 function shopWantsResidential(shopId?: string): boolean {
   const v = proxyShopOverride(shopId);
   return v === "residential" || v === "res";
+}
+
+/**
+ * 書込ジョブ(push/cancel/delete 系)だけを住宅(residential)IPへ通すか。
+ *   env `SB_WRITE_VIA_RESIDENTIAL=1`、または コンテナ再作成せず切替えられるよう
+ *   ファイル /home/pwuser/.kireidot/write_via_residential の存在で ON。
+ *   狙い: 読み(15分毎・大量)は定額ISPのまま、**低頻度の書込だけ評判の高い住宅IP**へ
+ *   通して doComplete 500 を減らす。書込は件数が少ないので従量GBは僅少。毎回チェック
+ *   (キャッシュせず)なのでファイル作成/削除で即時トグル。
+ */
+function writeViaResidentialEnabled(): boolean {
+  if (process.env.SB_WRITE_VIA_RESIDENTIAL === "1") return true;
+  try {
+    return existsSync("/home/pwuser/.kireidot/write_via_residential");
+  } catch {
+    return false;
+  }
 }
 
 /**
