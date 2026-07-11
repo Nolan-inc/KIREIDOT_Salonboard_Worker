@@ -1709,6 +1709,11 @@ async function handleJob(job: Job): Promise<void> {
     // 各ハンドラ内の report(..., page) で per-page 添付済み。ここは最終防衛のグローバル。
     await report({ job_id: job.id, status: "retryable_failed", error: msg });
   } finally {
+    // 録画動画のパスは close 後に確定する。close 前に Video 参照を掴んでおく。
+    const vid =
+      videoDir && videoPage
+        ? (videoPage as { video?: () => { path: () => Promise<string> } | null }).video?.()
+        : null;
     // ctx.close() で録画 webm が確定する。close 後に読み出す。
     await ctx?.close().catch(() => {});
     await browser?.close().catch(() => {});
@@ -1717,10 +1722,17 @@ async function handleJob(job: Job): Promise<void> {
         const failed = videoPage
           ? _pageWriteFailed.get(videoPage as object) === true
           : false;
-        if (failed) {
+        // path() を優先 (Playwright 公式)。取れなければ dir 走査でフォールバック。
+        let vpath: string | null = null;
+        try { vpath = vid ? await vid.path() : null; } catch { vpath = null; }
+        if (!vpath && existsSync(videoDir)) {
           const webm = readdirSync(videoDir).find((f) => f.endsWith(".webm"));
-          if (webm) await uploadJobVideo(job.id, join(videoDir, webm));
+          vpath = webm ? join(videoDir, webm) : null;
         }
+        console.log(
+          `[video] ${job.id.slice(0, 8)} failed=${failed} webm=${vpath ? "yes" : "no"}`
+        );
+        if (failed && vpath) await uploadJobVideo(job.id, vpath);
       } catch (e) {
         console.warn(`[video] finally 失敗: ${(e as Error)?.message ?? e}`);
       }
