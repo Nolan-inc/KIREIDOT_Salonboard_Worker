@@ -5506,6 +5506,48 @@ async function scrapeSalonInfo(page, opts = {}) {
   if (!data || !data.storeId) {
     return { rows: [], debug: { storeId: data && data.storeId, reason: 'no_store_id' } };
   }
+
+  // ★掲載プロフィール (2026-07-11): 掲載管理→サロン(/CNK/draft/salonEdit)から
+  //   キャッチ/PR文(コピー)/道案内アクセス/サロンからの一言 を追加取得する。
+  //   基本設定(salonSetup)には無い「掲載情報」で、HPB サロンページの主要テキスト。
+  //   実DOM(discover_listing 実機確認): salonEditForm の frmCnkSalonEditTopDto.salonTopCatch /
+  //   .salonTopCopy、frmCnkSalonEditSalonCommentDto.messageStylistName / .messagePost。
+  let profile = null;
+  try {
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await page
+      .goto(new URL('/CNK/draft/salonEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      .catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+    profile = await page
+      .evaluate(() => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const v = (n) => {
+          const e = document.querySelector(`[name="${n}"]`);
+          return e ? norm(e.value) : null;
+        };
+        // 道案内・アクセス: name に access/direction/root/guide を含む textarea/input(best-effort)。
+        let access = null;
+        for (const el of Array.from(document.querySelectorAll('textarea, input[type="text"]'))) {
+          const key = el.name || el.id || '';
+          if (/access|direction|root|guide|douan/i.test(key) && norm(el.value)) {
+            access = norm(el.value).slice(0, 600);
+            break;
+          }
+        }
+        return {
+          catch_copy: v('frmCnkSalonEditTopDto.salonTopCatch') || v('salonTopCatch'),
+          pr_copy: v('frmCnkSalonEditTopDto.salonTopCopy') || v('salonTopCopy'),
+          message_name: v('frmCnkSalonEditSalonCommentDto.messageStylistName'),
+          message_body: v('frmCnkSalonEditSalonCommentDto.messagePost'),
+          access,
+        };
+      })
+      .catch(() => null);
+  } catch (_e) {
+    /* 掲載プロフィールは best-effort。基本設定だけでも返す。 */
+  }
+
   const rows = [
     {
       external_id: String(data.storeId),
@@ -5513,10 +5555,16 @@ async function scrapeSalonInfo(page, opts = {}) {
       holidays: data.holidayText || null,
       cancel_policy: data.cancel || null,
       flags: data.flags || null,
-      raw: { title: data.title },
+      // 掲載プロフィール(salonEdit 由来)。
+      catch_copy: profile?.catch_copy || null,
+      pr_copy: profile?.pr_copy || null,
+      access: profile?.access || null,
+      owner_message: profile?.message_body || null,
+      owner_name: profile?.message_name || null,
+      raw: { title: data.title, profile },
     },
   ];
-  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText } };
+  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText, hasProfile: !!(profile && (profile.catch_copy || profile.pr_copy)) } };
 }
 
 // =====================================================================
@@ -6422,16 +6470,56 @@ async function postBlogViaForm(page, payload, opts = {}) {
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   let confirmed = false;
+  let clickedConfirm = false; // 最初の「確認する」を(フォールバック含め)クリック済みか
   try {
-    const confirmBtn = page.locator('a#confirm, a.mod_btn_confirm_03, a:has-text("確認する")').first();
+    // 「確認する」ボタンは <a> とは限らない。SalonBoard は input[type=submit]/button の
+    //   ことがある(2026-07-11 銀座ブログ: <a>セレクタで no_confirm 誤発報。画面には確認するボタン有り)。
+    //   a / input / button を横断で拾い、それでも0件なら「確認する」テキストを持つ最寄りの
+    //   クリック可能要素へフォールバックする。
+    let confirmBtn = page
+      .locator(
+        'a#confirm, a.mod_btn_confirm_03, a:has-text("確認する"), ' +
+          'input[type="submit"][value*="確認する"], input[type="button"][value*="確認する"], ' +
+          'input[value="確認する"], button:has-text("確認する")'
+      )
+      .first();
     if ((await confirmBtn.count().catch(() => 0)) === 0) {
+      // フォールバック: value/テキストに「確認する」を含む送信系要素を総当たり。
+      confirmBtn = page
+        .locator('input[type="submit"], input[type="button"], button, a')
+        .filter({ hasText: /確認する/ })
+        .first();
+      // input は hasText でヒットしないので value でも探す。
+      if ((await confirmBtn.count().catch(() => 0)) === 0) {
+        const byVal = await page
+          .evaluateHandle(() => {
+            const els = Array.from(
+              document.querySelectorAll('input[type="submit"],input[type="button"],button,a')
+            );
+            return els.find((e) => /確認する/.test(e.value || e.textContent || '')) || null;
+          })
+          .catch(() => null);
+        const el = byVal && byVal.asElement ? byVal.asElement() : null;
+        if (el) {
+          try {
+            await el.click({ timeout: 12_000 });
+            await page.waitForTimeout(1500);
+            clickedConfirm = true; // 下の確認画面フローへ進む
+          } catch (_e) { /* fallthrough */ }
+        }
+      }
+    }
+    if (!clickedConfirm && (await confirmBtn.count().catch(() => 0)) === 0) {
       const cap = await captureScrapeDebug(page, 'blog', `no_confirm`, { diagnostics: { url: page.url() } });
       return fail(`ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-      confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
-    ]);
+    // フォールバックで既にクリック済みなら再クリックしない。
+    if (!clickedConfirm) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
+      ]);
+    }
     await page.waitForTimeout(1500);
     // 確認画面の最終確定ボタン。
     // SalonBoard ブログ確認画面 (/KLP/blog/blog/confirm) の確定ボタンは
@@ -6561,7 +6649,14 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
   page.on('dialog', onDialog);
   let confirmed = false;
   try {
-    const confirmBtn = page.locator('a#replyConfirm, a.mod_btn_confirm_04, a:has-text("確認する")').first();
+    // 「確認する」は <a> とは限らない(input[type=submit]/button のことがある)。横断で拾う。
+    const confirmBtn = page
+      .locator(
+        'a#replyConfirm, a.mod_btn_confirm_04, a:has-text("確認する"), ' +
+          'input[type="submit"][value*="確認する"], input[type="button"][value*="確認する"], ' +
+          'input[value="確認する"], button:has-text("確認する")'
+      )
+      .first();
     if ((await confirmBtn.count().catch(() => 0)) === 0) {
       const cap = await captureScrapeDebug(page, 'review', 'no_confirm', { diagnostics: { url: page.url() } });
       return fail(`口コミ返信の「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
@@ -7301,16 +7396,35 @@ async function ensureSalonSelected(page, opts = {}) {
     return { ok: true, selected: false };
   }
 
-  const stores = await page.evaluate(() => {
-    const norm = (s) => (s || '').replace(/\s+/g, '').trim();
-    const out = [];
-    for (const a of Array.from(document.querySelectorAll('a[id^="H"]'))) {
-      const id = (a.getAttribute('id') || '').trim();
-      if (!/^H\d{6,}$/i.test(id)) continue;
-      out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
-    }
-    return out;
-  });
+  // ★店舗リンク(a[id^="H"])は groupTop で AJAX 遅延ロードされることがある。出現を待たずに
+  //   読むと空判定になり group_top_no_stores を誤発報する(郡山ADERの0件の主因: 実機で
+  //   同一店が数回0件→1回成功と intermittent だった)。出現待ち→空なら1回だけ読み直す。
+  const readStores = () =>
+    page.evaluate(() => {
+      const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+      const out = [];
+      for (const a of Array.from(document.querySelectorAll('a[id^="H"]'))) {
+        const id = (a.getAttribute('id') || '').trim();
+        if (!/^H\d{6,}$/i.test(id)) continue;
+        out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
+      }
+      return out;
+    });
+  await page
+    .waitForSelector('a[id^="H"]', { timeout: 8_000 })
+    .catch(() => {});
+  let stores = await readStores();
+  if (!stores.length) {
+    // groupTop を読み直して再取得(AJAX遅延/瞬断/セッション温め直し)。
+    await page
+      .goto(page.url(), { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      .catch(() => {});
+    await page
+      .waitForSelector('a[id^="H"]', { timeout: 8_000 })
+      .catch(() => {});
+    await page.waitForTimeout(800);
+    stores = await readStores();
+  }
   if (!stores.length) return { ok: false, selected: false, reason: 'group_top_no_stores' };
 
   // 特定失敗時にエラーへ含める候補一覧 (H-code=サロン名)。これを見て
