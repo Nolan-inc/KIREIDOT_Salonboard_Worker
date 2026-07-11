@@ -6470,16 +6470,56 @@ async function postBlogViaForm(page, payload, opts = {}) {
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   let confirmed = false;
+  let clickedConfirm = false; // 最初の「確認する」を(フォールバック含め)クリック済みか
   try {
-    const confirmBtn = page.locator('a#confirm, a.mod_btn_confirm_03, a:has-text("確認する")').first();
+    // 「確認する」ボタンは <a> とは限らない。SalonBoard は input[type=submit]/button の
+    //   ことがある(2026-07-11 銀座ブログ: <a>セレクタで no_confirm 誤発報。画面には確認するボタン有り)。
+    //   a / input / button を横断で拾い、それでも0件なら「確認する」テキストを持つ最寄りの
+    //   クリック可能要素へフォールバックする。
+    let confirmBtn = page
+      .locator(
+        'a#confirm, a.mod_btn_confirm_03, a:has-text("確認する"), ' +
+          'input[type="submit"][value*="確認する"], input[type="button"][value*="確認する"], ' +
+          'input[value="確認する"], button:has-text("確認する")'
+      )
+      .first();
     if ((await confirmBtn.count().catch(() => 0)) === 0) {
+      // フォールバック: value/テキストに「確認する」を含む送信系要素を総当たり。
+      confirmBtn = page
+        .locator('input[type="submit"], input[type="button"], button, a')
+        .filter({ hasText: /確認する/ })
+        .first();
+      // input は hasText でヒットしないので value でも探す。
+      if ((await confirmBtn.count().catch(() => 0)) === 0) {
+        const byVal = await page
+          .evaluateHandle(() => {
+            const els = Array.from(
+              document.querySelectorAll('input[type="submit"],input[type="button"],button,a')
+            );
+            return els.find((e) => /確認する/.test(e.value || e.textContent || '')) || null;
+          })
+          .catch(() => null);
+        const el = byVal && byVal.asElement ? byVal.asElement() : null;
+        if (el) {
+          try {
+            await el.click({ timeout: 12_000 });
+            await page.waitForTimeout(1500);
+            clickedConfirm = true; // 下の確認画面フローへ進む
+          } catch (_e) { /* fallthrough */ }
+        }
+      }
+    }
+    if (!clickedConfirm && (await confirmBtn.count().catch(() => 0)) === 0) {
       const cap = await captureScrapeDebug(page, 'blog', `no_confirm`, { diagnostics: { url: page.url() } });
       return fail(`ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-      confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
-    ]);
+    // フォールバックで既にクリック済みなら再クリックしない。
+    if (!clickedConfirm) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        confirmBtn.click({ timeout: 12_000 }).catch(() => {}),
+      ]);
+    }
     await page.waitForTimeout(1500);
     // 確認画面の最終確定ボタン。
     // SalonBoard ブログ確認画面 (/KLP/blog/blog/confirm) の確定ボタンは
@@ -6609,7 +6649,14 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
   page.on('dialog', onDialog);
   let confirmed = false;
   try {
-    const confirmBtn = page.locator('a#replyConfirm, a.mod_btn_confirm_04, a:has-text("確認する")').first();
+    // 「確認する」は <a> とは限らない(input[type=submit]/button のことがある)。横断で拾う。
+    const confirmBtn = page
+      .locator(
+        'a#replyConfirm, a.mod_btn_confirm_04, a:has-text("確認する"), ' +
+          'input[type="submit"][value*="確認する"], input[type="button"][value*="確認する"], ' +
+          'input[value="確認する"], button:has-text("確認する")'
+      )
+      .first();
     if ((await confirmBtn.count().catch(() => 0)) === 0) {
       const cap = await captureScrapeDebug(page, 'review', 'no_confirm', { diagnostics: { url: page.url() } });
       return fail(`口コミ返信の「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
