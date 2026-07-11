@@ -21,7 +21,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from "playwright";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync, readdirSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -585,12 +585,45 @@ async function fetchJobs(limit = 1): Promise<Job[]> {
   return json.jobs ?? [];
 }
 
+// 反映(書込)フローの失敗を page 単位で記録する。finally で「この page(=このジョブ)が
+// 失敗したか」を判定し、失敗時のみ録画動画を Admin へ上げるために使う。
+const _pageWriteFailed = new WeakMap<object, boolean>();
+
+// 失敗時に反映フローの録画(webm)を Admin 経由で Storage に上げる。worker は Supabase 直アクセスを
+// 持たないため、既存の callback と同じ認証で /api/salonboard/job-video に base64 送信する。
+// 動画が大きすぎる(>3.5MB)場合はスキップ(本体 body 制限回避)。
+async function uploadJobVideo(jobId: string, videoPath: string): Promise<void> {
+  try {
+    const buf = readFileSync(videoPath);
+    if (buf.length > 3_500_000) {
+      console.warn(`[video] ${jobId.slice(0, 8)} 動画が大きすぎ(${Math.round(buf.length / 1024)}KB)スキップ`);
+      return;
+    }
+    const res = await fetch(`${API}/api/salonboard/job-video`, {
+      method: "POST",
+      headers: { ...buildAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, video_b64: buf.toString("base64") }),
+    });
+    if (!res.ok) {
+      console.warn(`[video] ${jobId.slice(0, 8)} upload non-2xx: ${res.status}`);
+    } else {
+      console.log(`[video] ${jobId.slice(0, 8)} 反映動画をアップロード(${Math.round(buf.length / 1024)}KB)`);
+    }
+  } catch (e) {
+    console.warn(`[video] ${jobId.slice(0, 8)} upload失敗: ${(e as Error)?.message ?? e}`);
+  }
+}
+
 async function report(body: CallbackBody, capturePage?: unknown): Promise<void> {
   // 失敗系コールバックには失敗地点のスクショ(メモリbuffer)を base64 で同梱する。
   // Admin が Storage に保存し、Slack 通知に画像として添付できるようにする(best-effort)。
   try {
     const st = String((body as { status?: string }).status ?? "");
     const isFail = st !== "" && !["succeeded", "ok", "confirm_only"].includes(st);
+    // 反映動画の要否判定用: この page(=このジョブ)が失敗したことを記録。
+    if (isFail && capturePage) {
+      try { _pageWriteFailed.set(capturePage as object, true); } catch { /* noop */ }
+    }
     if (isFail && !(body as { error_capture_b64?: string }).error_capture_b64) {
       // ★並行安全 (2026-07-11): まず「このジョブの page」で撮ったショットを優先。
       //   店舗レーン並行(max2)で共有グローバル(getLastErrorShot)を使うと、別ジョブの
@@ -769,6 +802,9 @@ async function handleJob(job: Job): Promise<void> {
 
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
+  // 反映(書込)フローの録画。write ジョブのみ有効化し、失敗時だけ Admin へ上げる(下 finally)。
+  let videoDir: string | null = null;
+  let videoPage: unknown = null;
   try {
     // 書込ジョブのプロキシ方針 (2026-06-29 インシデント修正):
     // 旧: residential gateway(gate.decodo.com, rotating)を既定ON。しかし IP ローテで
@@ -796,11 +832,27 @@ async function handleJob(job: Job): Promise<void> {
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
       );
     }
+    // ★反映動画 (2026-07-11): write ジョブは画面遷移を録画する(失敗時のみ後で Storage へ)。
+    //   env SB_RECORD_WRITE_VIDEO=0 で無効化可。ディスクは finally で必ず掃除する。
+    if (isWriteJob && process.env.SB_RECORD_WRITE_VIDEO !== "0") {
+      try {
+        videoDir = join(homedir(), ".kireidot", "sbvideo", `${job.id}`);
+        mkdirSync(videoDir, { recursive: true, mode: 0o700 });
+      } catch {
+        videoDir = null;
+      }
+    }
     // 自動化指紋を隠した永続コンテキストで起動 (PC と同じステルス)。session は
     // userDataDir に永続するため storageState は使わない (蓄積で Akamai 信頼を育てる)。
-    ctx = await launchStealthContext({ launch, realChrome, shopId: job.shop_id });
+    ctx = await launchStealthContext({
+      launch,
+      realChrome,
+      shopId: job.shop_id,
+      recordVideoDir: videoDir ?? undefined,
+    });
     browser = ctx.browser();
     const page = ctx.pages()[0] ?? (await ctx.newPage());
+    videoPage = page;
 
     // ★従量課金の住宅(residential)IP利用時のみ、画像/動画/フォントの読込を遮断して
     //   帯域(GB)を節約する。DOM/データ取得には不要な要素で、SBページの転送量の大半を占める。
@@ -1657,8 +1709,36 @@ async function handleJob(job: Job): Promise<void> {
     // 各ハンドラ内の report(..., page) で per-page 添付済み。ここは最終防衛のグローバル。
     await report({ job_id: job.id, status: "retryable_failed", error: msg });
   } finally {
+    // 録画動画のパスは close 後に確定する。close 前に Video 参照を掴んでおく。
+    const vid =
+      videoDir && videoPage
+        ? (videoPage as { video?: () => { path: () => Promise<string> } | null }).video?.()
+        : null;
+    // ctx.close() で録画 webm が確定する。close 後に読み出す。
     await ctx?.close().catch(() => {});
     await browser?.close().catch(() => {});
+    if (videoDir) {
+      try {
+        const failed = videoPage
+          ? _pageWriteFailed.get(videoPage as object) === true
+          : false;
+        // path() を優先 (Playwright 公式)。取れなければ dir 走査でフォールバック。
+        let vpath: string | null = null;
+        try { vpath = vid ? await vid.path() : null; } catch { vpath = null; }
+        if (!vpath && existsSync(videoDir)) {
+          const webm = readdirSync(videoDir).find((f) => f.endsWith(".webm"));
+          vpath = webm ? join(videoDir, webm) : null;
+        }
+        console.log(
+          `[video] ${job.id.slice(0, 8)} failed=${failed} webm=${vpath ? "yes" : "no"}`
+        );
+        if (failed && vpath) await uploadJobVideo(job.id, vpath);
+      } catch (e) {
+        console.warn(`[video] finally 失敗: ${(e as Error)?.message ?? e}`);
+      }
+      // 成功/失敗いずれもローカルは掃除 (ディスク肥大防止)。
+      try { rmSync(videoDir, { recursive: true, force: true }); } catch { /* noop */ }
+    }
   }
 }
 
@@ -2085,6 +2165,9 @@ async function launchStealthContext(opts: {
   launch: ResolvedLaunch["launch"];
   realChrome: boolean;
   shopId: string;
+  // 反映(書込)フローの画面遷移を動画記録する dir。失敗診断用 (500/Akamai混雑は
+  // 前後の遷移が無いと原因が分からないため)。指定時のみ recordVideo を有効化。
+  recordVideoDir?: string;
 }): Promise<BrowserContext> {
   const userDataDir = join(
     homedir(),
@@ -2114,6 +2197,11 @@ async function launchStealthContext(opts: {
     ],
     args: ["--disable-features=IsolateOrigins,site-per-process"],
     viewport: { width: 1366, height: 900 },
+    // ★反映フロー動画 (2026-07-11): 書込ジョブのみ有効。小さめ解像度で webm を記録し、
+    //   失敗時だけ Admin 経由で Storage に上げる (成功時は破棄)。ファイル肥大を避けるため縮小。
+    ...(opts.recordVideoDir
+      ? { recordVideo: { dir: opts.recordVideoDir, size: { width: 900, height: 600 } } }
+      : {}),
     locale: "ja-JP",
     timezoneId: "Asia/Tokyo",
     // 実 Chrome は本物 UA を使う。bundled chromium のみ従来の Mac UA 偽装。
