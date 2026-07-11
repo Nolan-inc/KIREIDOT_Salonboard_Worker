@@ -277,6 +277,44 @@ function noteLoginSuccess(shopId: string): void {
   if (shopThrottleStreak.has(shopId)) shopThrottleStreak.delete(shopId);
 }
 
+/**
+ * ★ログイン後に SB が出す HTML モーダル(HOT PEPPER 満足度アンケート/お知らせ/キャンペーン等)を
+ *   閉じる (2026-07-11 ユーザー指摘)。モーダルがページを覆うと、裏のボタン(#batchSet 等)や
+ *   フォームへの遷移がブロックされ書込が失敗する。これは DOM オーバーレイなので
+ *   page.on('dialog')(=ネイティブ alert/confirm)では閉じられない。
+ *   Escape + 「×/閉じる/close」系の可視ボタン + 背景暗幕クリックで最大3回試行。
+ *   例外は投げない(防御的・存在しなければ即 return)。
+ */
+async function dismissBlockingModals(page: Page): Promise<void> {
+  try {
+    // モーダル/オーバーレイが実在する時だけ動く(通常ページで × を誤クリックしないよう)。
+    const modal = page
+      .locator('[class*="odal"], [id*="odal"], [role="dialog"], .mod_popup, [class*="verlay"]')
+      .filter({ visible: true })
+      .first();
+    if ((await modal.count().catch(() => 0)) === 0) return;
+    for (let i = 0; i < 2; i++) {
+      // 閉じるボタンは「モーダル内」に限定して探す(スコープ限定=誤クリック防止)。
+      const closeBtn = modal
+        .locator(
+          '[class*="lose"], [aria-label="閉じる"], [aria-label="close" i], a:has-text("×"), button:has-text("×"), :text("✕")',
+        )
+        .filter({ visible: true })
+        .first();
+      if ((await closeBtn.count().catch(() => 0)) > 0) {
+        await closeBtn.click({ timeout: 1500 }).catch(() => {});
+        console.log("[modal] ログイン後モーダルを閉じました");
+      } else {
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+      await page.waitForTimeout(400);
+      if ((await modal.count().catch(() => 0)) === 0) break; // 閉じたら完了
+    }
+  } catch {
+    /* 防御的: モーダル処理で throw しない */
+  }
+}
+
 // 起動時に push モードを明示ログ (平文の値はそのまま出さない)。
 console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
@@ -727,10 +765,15 @@ async function handleJob(job: Job): Promise<void> {
       "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
     ]);
-    const forceResidential =
-      writeViaResidentialEnabled() && WRITE_JOBS.has(job.job_type);
+    const isWriteJob = WRITE_JOBS.has(job.job_type);
+    const forceResidential = writeViaResidentialEnabled() && isWriteJob;
     if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
-    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential, job.shop_id);
+    // ★書込は住宅IP(cold session + 遅延 + 画像遮断)で複雑フォーム(ギャラリー/シフト等)が
+    //   壊れる(2026-07-11 実証: 郡山 gallery=フォーム到達不可 / 銀座 shift=#batchSet timeout。
+    //   ISP に戻すと成功)。write-via-residential を明示 ON にした場合を除き、auto-FO 中でも
+    //   住宅を使わず ISP(定額・warm session)に固定する。住宅はあくまで読み(fetch)専用。
+    const avoidResidential = isWriteJob && !forceResidential;
+    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential, job.shop_id, avoidResidential);
     if (launch.proxy) {
       console.log(
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
@@ -894,6 +937,10 @@ async function handleJob(job: Job): Promise<void> {
       noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
       auth = "logged_in";
     }
+
+    // ★実行前に、ログイン後に被さる SB モーダル(HOT PEPPER 満足度アンケート/お知らせ等)を閉じる。
+    //   裏のボタン/フォームをブロックして書込が失敗するのを防ぐ (2026-07-11 ユーザー指摘)。
+    await dismissBlockingModals(page).catch(() => {});
 
     // 2) ジョブ実行
     if (job.job_type === "push_blog") {
@@ -1653,11 +1700,12 @@ function proxyShopOverride(shopId?: string): string | null {
   }
 }
 
-function pickProxy(forceResidential?: boolean, shopId?: string): { server: string; username?: string; password?: string } {
+function pickProxy(forceResidential?: boolean, shopId?: string, avoidResidential?: boolean): { server: string; username?: string; password?: string } {
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
   // 書込強制 or 「この店舗は住宅IP」指定 → 住宅(sticky)へ。creds はファイル/env(residentialConfig)。
-  if ((forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()) {
+  // avoidResidential(書込・既定) のときは住宅を一切使わず ISP に固定する。
+  if (!avoidResidential && (forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()) {
     const r = residentialProxyFor(shopId);
     if (r) {
       // 認証情報は出さず host:port と理由のみ (どの店舗が住宅IPを使ったか監査可能に)
@@ -1712,8 +1760,9 @@ function pickProxy(forceResidential?: boolean, shopId?: string): { server: strin
       password: process.env.SB_PROXY_PASSWORD || undefined,
     };
   }
-  // 健全な静的IPが無い → Residential フォールバック (設定時)
-  const rfb = residentialProxyFor(shopId);
+  // 健全な静的IPが無い → Residential フォールバック (設定時)。
+  // ただし書込(avoidResidential)は住宅で壊れるのでフォールバックせず ISP 待機に倒す。
+  const rfb = avoidResidential ? null : residentialProxyFor(shopId);
   if (rfb) {
     if (_proxyRrCounter % 20 === 0)
       console.log("[proxy] 全static IPフラグ → Residential フォールバックを使用");
@@ -1726,22 +1775,27 @@ function pickProxy(forceResidential?: boolean, shopId?: string): { server: strin
 function resolveLaunchOptions(
   credProxy?: { server: string; username?: string | null; password?: string | null } | null,
   forceResidential?: boolean,
-  shopId?: string
+  shopId?: string,
+  avoidResidential?: boolean
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
-  // forceResidential(書込ジョブ等) は credProxy/静的IPより residential を最優先。
-  // 無ければ「ジョブ固有プロキシ優先、無ければ pickProxy(静的健全IP→Residentialフォールバック)」。
-  const picked =
-    (forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()
-      ? pickProxy(forceResidential, shopId)
-      : credProxy?.server
-      ? {
-          server: credProxy.server,
-          username: credProxy.username ?? undefined,
-          password: credProxy.password ?? undefined,
-        }
-      : pickProxy(undefined, shopId);
+  // forceResidential(書込 via residential 明示ON時) は credProxy/静的IPより residential を最優先。
+  // avoidResidential(書込・既定) は auto-FO 中でも住宅を使わず ISP 固定。
+  // それ以外(読み)は「auto-FO/pin なら住宅、無ければ credProxy → pickProxy(静的→住宅fallback)」。
+  const useResidential =
+    !avoidResidential &&
+    (forceResidential || shopPrefersResidential(shopId)) &&
+    fallbackConfigured();
+  const picked = useResidential
+    ? pickProxy(forceResidential, shopId)
+    : credProxy?.server
+    ? {
+        server: credProxy.server,
+        username: credProxy.username ?? undefined,
+        password: credProxy.password ?? undefined,
+      }
+    : pickProxy(undefined, shopId, avoidResidential);
   const proxy = picked.server
     ? {
         // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
