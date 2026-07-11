@@ -1105,6 +1105,40 @@ async function handleJob(job: Job): Promise<void> {
                     .filter(Boolean),
                 }))
                 .slice(0, 12);
+              // 編集/掲載トグルの機構解析用: onclick を持つ要素の生ハンドラ文字列と、
+              // pageId/specialId 等の hidden/text input の name+value を捕捉する。
+              const clickables = Array.from(
+                document.querySelectorAll(
+                  "a[onclick],button[onclick],input[onclick],[onclick]",
+                ),
+              )
+                .map((el) => {
+                  const e = el as HTMLElement;
+                  const oc = e.getAttribute("onclick") || "";
+                  return {
+                    tag: e.tagName,
+                    t: clip(e.textContent || (e as HTMLInputElement).value || "", 20),
+                    onclick: clip(oc, 120),
+                  };
+                })
+                .filter(
+                  (x) =>
+                    /kodawari|special|tokushu|present|edit|regist|sort|pageId|delete|掲載|編集|登録/i.test(
+                      x.onclick,
+                    ),
+                )
+                .slice(0, 60);
+              const idInputs = Array.from(
+                document.querySelectorAll("input,select"),
+              )
+                .map((el) => {
+                  const e = el as HTMLInputElement;
+                  return { name: e.name || e.id || "", value: clip(e.value || "", 40) };
+                })
+                .filter((x) =>
+                  /pageId|specialId|kodawari|special|Present|Flg|Id$/i.test(x.name),
+                )
+                .slice(0, 60);
               return {
                 title: document.title,
                 url: location.href,
@@ -1112,6 +1146,8 @@ async function handleJob(job: Job): Promise<void> {
                 headings,
                 forms,
                 tables,
+                clickables,
+                idInputs,
               };
             })
             .catch((e) => ({ error: String(e) }));

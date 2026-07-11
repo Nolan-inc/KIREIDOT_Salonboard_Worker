@@ -5720,24 +5720,42 @@ async function pushKodawariViaForm(page, payload, opts = {}) {
     captureErrorShot(page, `kodawari_fail_${errorCode || 'err'}`);
     return { status: 'failed', reason, errorCode, manualRequired };
   };
+  // 実DOM(2026-07-12): pageId は 'KP00000000355195' 形式(英字接頭+数字)。数字のみではない。
   const pageId = String(p.external_id || '').replace(/^KDW/i, '').trim();
-  if (!/^\d{3,}$/.test(pageId)) {
+  if (!/^[A-Za-z]{0,4}\d{6,}$/.test(pageId)) {
     return fail(`こだわりの pageId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
   }
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
   await page.goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
-  // 一覧の編集フォームに pageId を入れて submit(該当ページの編集画面へ)。
-  const opened = await page.evaluate((pid) => {
-    const f = document.querySelector('form#kodawariPageEditForm, form[action*="kodawariEdit"]');
-    if (!f) return false;
-    const inp = f.querySelector('[name="kodawariPageId"], [name*="kodawariPageId"]');
-    if (inp) inp.value = pid;
-    f.submit();
-    return true;
-  }, pageId).catch(() => false);
+  // 編集ページを開く: 行の編集リンク onclick=kodawariListEdit(event,'<pageId>') を実クリックし、
+  //   SB側のネイティブハンドラに委ねる。フォーム手動 submit は onsubmit ハンドラ(modified 等の
+  //   セットアップ)を飛ばすため編集画面が開かないことがある(実機 2026-07-12)。
+  let opened = false;
+  const editLink = page.locator(`a[onclick*="kodawariListEdit"][onclick*="${pageId}"]`).first();
+  if ((await editLink.count().catch(() => 0)) > 0) {
+    await editLink.click({ timeout: 10_000 }).catch(() => {});
+    opened = true;
+  }
+  if (!opened) {
+    // fallback: サイトのJS関数を直接呼ぶ → それも無ければフォーム submit。
+    opened = await page.evaluate((pid) => {
+      try {
+        if (typeof window.kodawariListEdit === 'function') {
+          window.kodawariListEdit({ preventDefault() {}, stopPropagation() {} }, pid);
+          return true;
+        }
+      } catch (_e) { /* fallthrough */ }
+      const f = document.querySelector('form#kodawariPageEditForm, form[action*="kodawariEdit"]');
+      if (!f) return false;
+      const inp = f.querySelector('[name="kodawariPageId"], [name*="kodawariPageId"]');
+      if (inp) inp.value = pid;
+      f.submit();
+      return true;
+    }, pageId).catch(() => false);
+  }
   if (opened) await page.waitForLoadState('domcontentloaded', { timeout: 20_000 }).catch(() => {});
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1200);
   if ((await page.locator('[name="frmKodawariEditBaseInfoDto.kodawariTitle"], form#kodawariEditForm').count().catch(() => 0)) === 0) {
     const cap = await captureScrapeDebug(page, 'kodawari', 'no_edit_form', { diagnostics: { pageId, url: page.url() } });
     return fail(`こだわり編集フォームを開けませんでした (pageId=${pageId}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
@@ -5810,8 +5828,9 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
     captureErrorShot(page, `feature_fail_${errorCode || 'err'}`);
     return { status: 'failed', reason, errorCode, manualRequired };
   };
+  // 実DOM(2026-07-12): specialId は 'SL00000000137710' 形式(英字接頭+数字)。
   const specialId = String(p.external_id || '').replace(/^SPC/i, '').trim();
-  if (!/^\d{2,}$/.test(specialId)) {
+  if (!/^[A-Za-z]{0,4}\d{6,}$/.test(specialId)) {
     return fail(`特集の specialId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
   }
   const wantPublished = p.is_published !== false;
@@ -5822,22 +5841,49 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
     const cap = await captureScrapeDebug(page, 'feature', 'no_form', { diagnostics: { url: page.url() } });
     return fail(`特集一覧(specialList)を開けませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
-  await captureScrapeDebug(page, 'feature', 'before_submit', { diagnostics: { specialId, wantPublished, enablePush, url: page.url() } });
-  if (!enablePush) return { status: 'confirm_only', confirmed: { specialId, wantPublished } };
-  // 掲載トグル: specialListPresentForm に specialId を入れて submit(doPresent)。
+  // 対象特集の現在の掲載状態(presentFlg)と lastUpDate/specialSortDate を sort フォームから読む。
+  //   doPresent はトグルなので、状態を変える時だけ submit する(冪等・安全)。
+  const cur = await page.evaluate((sid) => {
+    let idx = -1;
+    for (const el of Array.from(document.querySelectorAll('input[name*="frmSpDtlDtoList"]'))) {
+      const m = (el.name || '').match(/frmSpDtlDtoList\[(\d+)\]\.specialId$/);
+      if (m && el.value === sid) { idx = Number(m[1]); break; }
+    }
+    if (idx < 0) return { found: false };
+    const get = (suffix) => {
+      const e = document.querySelector(`[name="frmSpDtlDtoList[${idx}].${suffix}"]`);
+      return e ? e.value : '';
+    };
+    const sd = document.querySelector('form#specialListPresentForm [name="specialSortDate"], [name="specialSortDate"]');
+    return { found: true, idx, presentFlg: get('presentFlg'), lastUpDate: get('lastUpDate'), specialSortDate: sd ? sd.value : '' };
+  }, specialId).catch(() => ({ found: false }));
+  if (!cur.found) {
+    const cap = await captureScrapeDebug(page, 'feature', 'not_in_list', { diagnostics: { specialId, url: page.url() } });
+    return fail(`特集 ${specialId} が一覧に見つかりません(参加中の特集ではない可能性)`, 'BAD_PAYLOAD', true);
+  }
+  const currentlyPublished = String(cur.presentFlg) === '1';
+  await captureScrapeDebug(page, 'feature', 'before_submit', { diagnostics: { specialId, wantPublished, currentlyPublished, enablePush, url: page.url() } });
+  // 既に目的の状態 → 何もしない(現在の掲載を壊さない)。
+  if (currentlyPublished === wantPublished) {
+    return { status: 'ok', externalId: `SPC${specialId}`, summary: `特集は既に掲載${wantPublished ? 'ON' : 'OFF'}(変更なし)` };
+  }
+  if (!enablePush) return { status: 'confirm_only', confirmed: { specialId, wantPublished, currentlyPublished } };
+  // 掲載トグル: specialListPresentForm に specialId + lastUpDate + specialSortDate を入れて submit(doPresent)。
   let nativeDialogAccepted = false;
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   let submitted = false;
   try {
-    submitted = await page.evaluate((sid) => {
+    submitted = await page.evaluate((v) => {
       const f = document.querySelector('form#specialListPresentForm, form[action*="specialList/doPresent"]');
       if (!f) return false;
-      const inp = f.querySelector('[name="specialId"]');
-      if (inp) inp.value = sid;
+      const set = (n, val) => { const e = f.querySelector(`[name="${n}"]`); if (e && val != null && val !== '') e.value = val; };
+      set('specialId', v.sid);
+      set('lastUpDate', v.lastUpDate);
+      set('specialSortDate', v.specialSortDate);
       f.submit();
       return true;
-    }, specialId).catch(() => false);
+    }, { sid: specialId, lastUpDate: cur.lastUpDate, specialSortDate: cur.specialSortDate }).catch(() => false);
     if (submitted) await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
     await page.waitForTimeout(1000);
   } finally {
@@ -5852,7 +5898,7 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
   if (/エラー|失敗/.test(bodyText) && !/しました|完了/.test(bodyText)) {
     return fail(`特集掲載切替でエラー (capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
   }
-  return { status: 'ok', externalId: `SPC${specialId}`, summary: `特集掲載切替 (present=${wantPublished})` };
+  return { status: 'ok', externalId: `SPC${specialId}`, summary: `特集掲載切替 (${currentlyPublished ? 'ON' : 'OFF'}→${wantPublished ? 'ON' : 'OFF'})` };
 }
 
 // =====================================================================
@@ -5882,8 +5928,16 @@ async function scrapeKodawari(page, opts = {}) {
   const list = await page
     .evaluate(() => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      // ★実DOM(2026-07-12): pageId は隠し sort フォーム frmKodawariListDtoList[i].kodawariPageId
+      //   に順番に入る('KP00000000355195' 形式=英字接頭+数字。数字のみではない)。
+      const pageIds = [];
+      for (const el of Array.from(document.querySelectorAll('input[name*="frmKodawariListDtoList"]'))) {
+        const m = (el.name || '').match(/frmKodawariListDtoList\[(\d+)\]\.kodawariPageId$/);
+        if (m && el.value) pageIds[Number(m[1])] = el.value;
+      }
       const out = [];
       const trs = Array.from(document.querySelectorAll('tr'));
+      let n = 0;
       let sort = 0;
       for (const tr of trs) {
         const cells = Array.from(tr.querySelectorAll('td,th')).map((c) => norm(c.textContent));
@@ -5898,25 +5952,11 @@ async function scrapeKodawari(page, opts = {}) {
         }
         if (!title) continue;
         const rowText = norm(tr.textContent);
-        let pageId = null;
-        const hid = tr.querySelector('input[name*="kodawariPageId"]');
-        if (hid && hid.value) pageId = hid.value;
-        // 行内の onclick / href / data-* / value に埋まった pageId も拾う(詳細リンク等)。
+        // pageId: sort フォーム由来(行順 index 対応) を第一候補、行内 onclick
+        //   kodawariListEdit(event, 'KP...') を fallback にする。
+        let pageId = pageIds[n] || null;
         if (!pageId) {
-          for (const el of Array.from(tr.querySelectorAll('a,button,input,[onclick],[data-id],[data-page-id]'))) {
-            const hay = [
-              el.getAttribute && el.getAttribute('onclick'),
-              el.getAttribute && el.getAttribute('href'),
-              el.getAttribute && el.getAttribute('data-id'),
-              el.getAttribute && el.getAttribute('data-page-id'),
-              el.value,
-            ].filter(Boolean).join(' ');
-            const mm = hay.match(/kodawariPageId["'\s:=(]+["']?(\d{3,})/i) || hay.match(/\bkodawariPageEdit\(['"]?(\d{3,})/i);
-            if (mm) { pageId = mm[1]; break; }
-          }
-        }
-        if (!pageId) {
-          const mm = (tr.innerHTML || '').match(/kodawariPageId["'\s:=]+["']?(\d{3,})/i);
+          const mm = (tr.innerHTML || '').match(/kodawari(?:List)?(?:Page)?Edit\(\s*event\s*,\s*['"]([A-Za-z0-9]+)['"]/);
           if (mm) pageId = mm[1];
         }
         out.push({
@@ -5925,6 +5965,7 @@ async function scrapeKodawari(page, opts = {}) {
           sortNo: sort,
           isPublished: /OK|掲載中/.test(rowText) || !/非掲載にする|掲載する/.test(rowText),
         });
+        n++;
       }
       return out;
     })
@@ -5936,12 +5977,37 @@ async function scrapeKodawari(page, opts = {}) {
     let detail = { title: item.title, explanation: '', catch: '', copy: '', pageType: '' };
     if (item.pageId) {
       try {
-        const editUrl = new URL('/CNK/draft/kodawariEdit', baseUrl).toString();
-        // kodawariEdit は POST 遷移だが、GET でも pageId クエリで開けることが多い。まず GET を試す。
-        await page.goto(`${editUrl}?kodawariPageId=${encodeURIComponent(item.pageId)}`, {
+        // kodawariEdit は POST 遷移(kodawariPageEditForm に pageId を入れて submit)。
+        //   一覧に戻り該当フォームを submit して編集ページを開く(GET は空になりがち)。
+        await page.goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), {
           waitUntil: 'domcontentloaded', timeout: 20_000,
         }).catch(() => {});
-        await page.waitForTimeout(600);
+        await page.waitForTimeout(300);
+        // 編集リンクを実クリックしてネイティブハンドラで編集画面を開く(手動 submit は onsubmit を飛ばす)。
+        let opened = false;
+        const el = page.locator(`a[onclick*="kodawariListEdit"][onclick*="${item.pageId}"]`).first();
+        if ((await el.count().catch(() => 0)) > 0) {
+          await el.click({ timeout: 8_000 }).catch(() => {});
+          opened = true;
+        }
+        if (!opened) {
+          opened = await page.evaluate((pid) => {
+            try {
+              if (typeof window.kodawariListEdit === 'function') {
+                window.kodawariListEdit({ preventDefault() {}, stopPropagation() {} }, pid);
+                return true;
+              }
+            } catch (_e) { /* fallthrough */ }
+            const f = document.querySelector('form#kodawariPageEditForm, form[action*="kodawariEdit"]');
+            if (!f) return false;
+            const inp = f.querySelector('[name="kodawariPageId"], [name*="kodawariPageId"]');
+            if (inp) inp.value = pid;
+            f.submit();
+            return true;
+          }, item.pageId).catch(() => false);
+        }
+        if (opened) await page.waitForLoadState('domcontentloaded', { timeout: 20_000 }).catch(() => {});
+        await page.waitForTimeout(700);
         detail = await page.evaluate(() => {
           const v = (n) => { const e = document.querySelector(`[name="${n}"]`); return e ? (e.value || '') : ''; };
           const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
@@ -5992,11 +6058,14 @@ async function scrapeFeature(page, opts = {}) {
   const rows = await page
     .evaluate(() => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-      // specialId は隠し sort フォーム frmSpDtlDtoList[i].specialId から順に拾う。
+      // specialId / presentFlg は隠し sort フォーム frmSpDtlDtoList[i] から順に拾う。
       const specialIds = [];
+      const presentFlgs = [];
       for (const el of Array.from(document.querySelectorAll('input[name*="frmSpDtlDtoList"]'))) {
-        const m = (el.name || '').match(/frmSpDtlDtoList\[(\d+)\]\.specialId$/);
-        if (m && el.value) specialIds[Number(m[1])] = el.value;
+        const mi = (el.name || '').match(/frmSpDtlDtoList\[(\d+)\]\.specialId$/);
+        if (mi && el.value) specialIds[Number(mi[1])] = el.value;
+        const mp = (el.name || '').match(/frmSpDtlDtoList\[(\d+)\]\.presentFlg$/);
+        if (mp) presentFlgs[Number(mp[1])] = el.value;
       }
       // ★実DOM(2026-07-11): データ行は th 無しの table に
       //   「上へ N 下へ | <特集名> | <クーポン> | … | (登録日) | OK」形式。
@@ -6017,10 +6086,13 @@ async function scrapeFeature(page, opts = {}) {
         if (!title) continue;
         const rowText = norm(tr.textContent);
         const sid = specialIds[n];
+        // 掲載状態は presentFlg('1'=掲載中) を第一候補、無ければ行テキストで判定。
+        const flg = presentFlgs[n];
+        const is_published = flg != null && flg !== '' ? String(flg) === '1' : /OK|掲載中/.test(rowText);
         out.push({
           external_id: sid ? `SPC${sid}` : `SPC_${sort}`,
           title: title.slice(0, 200),
-          is_published: /OK|掲載中/.test(rowText),
+          is_published,
           sort_no: sort,
         });
         n++;
