@@ -7349,16 +7349,35 @@ async function ensureSalonSelected(page, opts = {}) {
     return { ok: true, selected: false };
   }
 
-  const stores = await page.evaluate(() => {
-    const norm = (s) => (s || '').replace(/\s+/g, '').trim();
-    const out = [];
-    for (const a of Array.from(document.querySelectorAll('a[id^="H"]'))) {
-      const id = (a.getAttribute('id') || '').trim();
-      if (!/^H\d{6,}$/i.test(id)) continue;
-      out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
-    }
-    return out;
-  });
+  // ★店舗リンク(a[id^="H"])は groupTop で AJAX 遅延ロードされることがある。出現を待たずに
+  //   読むと空判定になり group_top_no_stores を誤発報する(郡山ADERの0件の主因: 実機で
+  //   同一店が数回0件→1回成功と intermittent だった)。出現待ち→空なら1回だけ読み直す。
+  const readStores = () =>
+    page.evaluate(() => {
+      const norm = (s) => (s || '').replace(/\s+/g, '').trim();
+      const out = [];
+      for (const a of Array.from(document.querySelectorAll('a[id^="H"]'))) {
+        const id = (a.getAttribute('id') || '').trim();
+        if (!/^H\d{6,}$/i.test(id)) continue;
+        out.push({ id: id.toUpperCase(), name: norm(a.textContent) });
+      }
+      return out;
+    });
+  await page
+    .waitForSelector('a[id^="H"]', { timeout: 8_000 })
+    .catch(() => {});
+  let stores = await readStores();
+  if (!stores.length) {
+    // groupTop を読み直して再取得(AJAX遅延/瞬断/セッション温め直し)。
+    await page
+      .goto(page.url(), { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      .catch(() => {});
+    await page
+      .waitForSelector('a[id^="H"]', { timeout: 8_000 })
+      .catch(() => {});
+    await page.waitForTimeout(800);
+    stores = await readStores();
+  }
   if (!stores.length) return { ok: false, selected: false, reason: 'group_top_no_stores' };
 
   // 特定失敗時にエラーへ含める候補一覧 (H-code=サロン名)。これを見て
