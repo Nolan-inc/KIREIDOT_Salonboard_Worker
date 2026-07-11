@@ -1035,8 +1035,19 @@ async function handleJob(job: Job): Promise<void> {
                     .map((th) => clip(th.textContent || "", 18))
                     .slice(0, 14),
                   rowCount: t.querySelectorAll("tr").length,
+                  // 各行の td/th テキストを少量サンプリング (scraper 調整用)。
+                  rows: Array.from(t.querySelectorAll("tr"))
+                    .slice(0, 6)
+                    .map((tr) =>
+                      Array.from(tr.querySelectorAll("td,th"))
+                        .map((c) => clip((c as HTMLElement).textContent || "", 30))
+                        .filter(Boolean)
+                        .join(" | ")
+                        .slice(0, 200),
+                    )
+                    .filter(Boolean),
                 }))
-                .slice(0, 10);
+                .slice(0, 12);
               return {
                 title: document.title,
                 url: location.href,
