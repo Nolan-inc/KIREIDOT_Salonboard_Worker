@@ -400,7 +400,12 @@ type JobType =
   | "fetch_reviews"
   | "fetch_blog"
   | "fetch_photo_gallery"
-  | "fetch_salon";
+  | "fetch_salon"
+  // 追加 (2026-07-11): 残エンティティ (こだわり/特集/スタイル) + DOM調査
+  | "fetch_kodawari"
+  | "fetch_feature"
+  | "fetch_style"
+  | "discover_listing";
 
 type Job = {
   id: string;
@@ -970,6 +975,96 @@ async function handleJob(job: Job): Promise<void> {
     await dismissBlockingModals(page).catch(() => {});
 
     // 2) ジョブ実行
+
+    // ★DOM調査用の一時ジョブ (2026-07-11): こだわり/特集/掲載プロフィールの scraper を
+    //   書くために、掲載管理各ページの実DOM構造(nav/見出し/フォーム/テーブル)をダンプする。
+    //   既存ログイン済みセッションを再利用し GET のみ (再ログインしない=スロットル無し)。
+    //   payload.urls に調べる相対/絶対URLを渡す。結果は console("[discover] RESULT_JSON ...") に出す。
+    if (job.job_type === "discover_listing") {
+      const dp = job.payload as { urls?: string[] };
+      const urls = Array.isArray(dp.urls) ? dp.urls : [];
+      const dump: unknown[] = [];
+      for (const u of urls) {
+        try {
+          const full = /^https?:\/\//.test(u) ? u : new URL(u, baseUrl).toString();
+          await page
+            .goto(full, { waitUntil: "domcontentloaded", timeout: 30_000 })
+            .catch(() => {});
+          await page.waitForTimeout(1500);
+          const info = await page
+            .evaluate(() => {
+              const clip = (s: string, n: number) =>
+                (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+              const navLinks = Array.from(document.querySelectorAll("a[href]"))
+                .map((a) => ({
+                  t: clip((a as HTMLElement).textContent || "", 24),
+                  href: (a as HTMLAnchorElement).getAttribute("href") || "",
+                }))
+                .filter(
+                  (x) =>
+                    x.href &&
+                    /(draft|set|KLP|CLP|CNK|CNB|kodawari|feature|tokushu|salon)/i.test(
+                      x.href,
+                    ) &&
+                    x.t.length <= 20,
+                )
+                .slice(0, 60);
+              const headings = Array.from(
+                document.querySelectorAll("h1,h2,h3,th,legend,label,dt"),
+              )
+                .map((e) => clip(e.textContent || "", 36))
+                .filter(Boolean)
+                .slice(0, 80);
+              const forms = Array.from(document.querySelectorAll("form"))
+                .map((f) => ({
+                  action: f.getAttribute("action") || "",
+                  id: f.getAttribute("id") || "",
+                  fields: Array.from(
+                    f.querySelectorAll("input,select,textarea"),
+                  )
+                    .map((el) => {
+                      const e = el as HTMLInputElement;
+                      return `${e.tagName}:${e.name || e.id || ""}:${e.type || ""}`;
+                    })
+                    .slice(0, 50),
+                }))
+                .slice(0, 10);
+              const tables = Array.from(document.querySelectorAll("table"))
+                .map((t) => ({
+                  head: Array.from(t.querySelectorAll("th"))
+                    .map((th) => clip(th.textContent || "", 18))
+                    .slice(0, 14),
+                  rowCount: t.querySelectorAll("tr").length,
+                }))
+                .slice(0, 10);
+              return {
+                title: document.title,
+                url: location.href,
+                navLinks,
+                headings,
+                forms,
+                tables,
+              };
+            })
+            .catch((e) => ({ error: String(e) }));
+          dump.push({ requested: full, ...info });
+        } catch (e) {
+          dump.push({ requested: u, error: String(e) });
+        }
+      }
+      console.log("[discover] RESULT_JSON " + JSON.stringify(dump));
+      await report(
+        {
+          job_id: job.id,
+          job_type: "discover_listing",
+          status: "succeeded",
+          summary: `discover: ${urls.length} pages dumped`,
+        } as unknown as CallbackBody,
+        page,
+      );
+      return;
+    }
+
     if (job.job_type === "push_blog") {
       // worker.ts 独自 pushBlog は誤った blog index URL(/KLP/blog/, /CNF/blog/, /blog/)を叩き
       // 'blog index not reachable' で失敗していた(実機 2026-06-28)。正しい URL(/KLP/blog/blog/)を
@@ -1465,6 +1560,8 @@ async function handleJob(job: Job): Promise<void> {
           key: "photo_galleries",
         },
         fetch_salon: { fn: "scrapeSalonInfo", key: "salon" },
+        fetch_kodawari: { fn: "scrapeKodawari", key: "kodawari" },
+        fetch_feature: { fn: "scrapeFeature", key: "feature" },
       };
       const m = FETCH_MAP[job.job_type];
       if (m) {
