@@ -5506,6 +5506,48 @@ async function scrapeSalonInfo(page, opts = {}) {
   if (!data || !data.storeId) {
     return { rows: [], debug: { storeId: data && data.storeId, reason: 'no_store_id' } };
   }
+
+  // ★掲載プロフィール (2026-07-11): 掲載管理→サロン(/CNK/draft/salonEdit)から
+  //   キャッチ/PR文(コピー)/道案内アクセス/サロンからの一言 を追加取得する。
+  //   基本設定(salonSetup)には無い「掲載情報」で、HPB サロンページの主要テキスト。
+  //   実DOM(discover_listing 実機確認): salonEditForm の frmCnkSalonEditTopDto.salonTopCatch /
+  //   .salonTopCopy、frmCnkSalonEditSalonCommentDto.messageStylistName / .messagePost。
+  let profile = null;
+  try {
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await page
+      .goto(new URL('/CNK/draft/salonEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      .catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+    profile = await page
+      .evaluate(() => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const v = (n) => {
+          const e = document.querySelector(`[name="${n}"]`);
+          return e ? norm(e.value) : null;
+        };
+        // 道案内・アクセス: name に access/direction/root/guide を含む textarea/input(best-effort)。
+        let access = null;
+        for (const el of Array.from(document.querySelectorAll('textarea, input[type="text"]'))) {
+          const key = el.name || el.id || '';
+          if (/access|direction|root|guide|douan/i.test(key) && norm(el.value)) {
+            access = norm(el.value).slice(0, 600);
+            break;
+          }
+        }
+        return {
+          catch_copy: v('frmCnkSalonEditTopDto.salonTopCatch') || v('salonTopCatch'),
+          pr_copy: v('frmCnkSalonEditTopDto.salonTopCopy') || v('salonTopCopy'),
+          message_name: v('frmCnkSalonEditSalonCommentDto.messageStylistName'),
+          message_body: v('frmCnkSalonEditSalonCommentDto.messagePost'),
+          access,
+        };
+      })
+      .catch(() => null);
+  } catch (_e) {
+    /* 掲載プロフィールは best-effort。基本設定だけでも返す。 */
+  }
+
   const rows = [
     {
       external_id: String(data.storeId),
@@ -5513,10 +5555,16 @@ async function scrapeSalonInfo(page, opts = {}) {
       holidays: data.holidayText || null,
       cancel_policy: data.cancel || null,
       flags: data.flags || null,
-      raw: { title: data.title },
+      // 掲載プロフィール(salonEdit 由来)。
+      catch_copy: profile?.catch_copy || null,
+      pr_copy: profile?.pr_copy || null,
+      access: profile?.access || null,
+      owner_message: profile?.message_body || null,
+      owner_name: profile?.message_name || null,
+      raw: { title: data.title, profile },
     },
   ];
-  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText } };
+  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText, hasProfile: !!(profile && (profile.catch_copy || profile.pr_copy)) } };
 }
 
 // =====================================================================
