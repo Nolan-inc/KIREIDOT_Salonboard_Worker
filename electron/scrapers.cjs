@@ -5527,30 +5527,35 @@ async function scrapeSalonInfo(page, opts = {}) {
           return e ? norm(e.value) : null;
         };
         // 道案内・アクセス: ① name ヒント ② ラベル「道案内/アクセス」を持つ行の隣接値、で拾う。
+        //   ※ salonEdit には "9.5/40" 等の掲載枠スコア表示があり誤検出しやすい。
+        //     住所/道案内らしい「日本語を含む・スコア形式でない・十分長い」値のみ採用する。
+        const looksLikeAccess = (s) =>
+          !!s &&
+          s.length >= 8 &&
+          /[぀-ヿ一-鿿ぁ-ん]/.test(s) && // かな/漢字を含む
+          !/^[\d.\/\s]+$/.test(s) && // "9.5/40" 等の数値スコアを除外
+          !/^\d+(\.\d+)?\s*\/\s*\d+$/.test(s);
         let access = null;
         for (const el of Array.from(document.querySelectorAll('textarea, input[type="text"]'))) {
           const key = el.name || el.id || '';
-          if (/access|direction|root|guide|douan/i.test(key) && norm(el.value)) {
-            access = norm(el.value).slice(0, 600);
+          const val = norm(el.value);
+          if (/access|direction|root|guide|douan/i.test(key) && looksLikeAccess(val)) {
+            access = val.slice(0, 600);
             break;
           }
         }
         if (!access) {
-          // ラベルセル(th/td/dt/label)に「道案内」「アクセス」を含む行の、隣接する
-          //   textarea/input の値、無ければ隣接セルのテキストを採用する。
           const labels = Array.from(document.querySelectorAll('th, td, dt, label, p'));
           for (const lb of labels) {
             const t = norm(lb.textContent);
-            if (!/道案内|アクセス/.test(t) || t.length > 20) continue; // ラベルらしい短いもの
+            if (!/道案内|アクセス/.test(t) || t.length > 20) continue;
             const row = lb.closest('tr, dl, .mod_form, .formArea') || lb.parentElement;
             if (!row) continue;
             const field = row.querySelector('textarea, input[type="text"]');
-            if (field && norm(field.value)) { access = norm(field.value).slice(0, 600); break; }
-            // 隣接セル(次のtd/dd)のテキスト
-            const cells = Array.from(row.querySelectorAll('td, dd'));
-            for (const c of cells) {
+            if (field && looksLikeAccess(norm(field.value))) { access = norm(field.value).slice(0, 600); break; }
+            for (const c of Array.from(row.querySelectorAll('td, dd'))) {
               const cv = norm(c.textContent);
-              if (cv && cv !== t && cv.length > 4 && !/道案内|アクセス/.test(cv)) { access = cv.slice(0, 600); break; }
+              if (cv !== t && looksLikeAccess(cv) && !/道案内|アクセス/.test(cv)) { access = cv.slice(0, 600); break; }
             }
             if (access) break;
           }
