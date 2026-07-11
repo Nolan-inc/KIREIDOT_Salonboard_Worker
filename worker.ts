@@ -277,6 +277,44 @@ function noteLoginSuccess(shopId: string): void {
   if (shopThrottleStreak.has(shopId)) shopThrottleStreak.delete(shopId);
 }
 
+/**
+ * ★ログイン後に SB が出す HTML モーダル(HOT PEPPER 満足度アンケート/お知らせ/キャンペーン等)を
+ *   閉じる (2026-07-11 ユーザー指摘)。モーダルがページを覆うと、裏のボタン(#batchSet 等)や
+ *   フォームへの遷移がブロックされ書込が失敗する。これは DOM オーバーレイなので
+ *   page.on('dialog')(=ネイティブ alert/confirm)では閉じられない。
+ *   Escape + 「×/閉じる/close」系の可視ボタン + 背景暗幕クリックで最大3回試行。
+ *   例外は投げない(防御的・存在しなければ即 return)。
+ */
+async function dismissBlockingModals(page: Page): Promise<void> {
+  try {
+    // モーダル/オーバーレイが実在する時だけ動く(通常ページで × を誤クリックしないよう)。
+    const modal = page
+      .locator('[class*="odal"], [id*="odal"], [role="dialog"], .mod_popup, [class*="verlay"]')
+      .filter({ visible: true })
+      .first();
+    if ((await modal.count().catch(() => 0)) === 0) return;
+    for (let i = 0; i < 2; i++) {
+      // 閉じるボタンは「モーダル内」に限定して探す(スコープ限定=誤クリック防止)。
+      const closeBtn = modal
+        .locator(
+          '[class*="lose"], [aria-label="閉じる"], [aria-label="close" i], a:has-text("×"), button:has-text("×"), :text("✕")',
+        )
+        .filter({ visible: true })
+        .first();
+      if ((await closeBtn.count().catch(() => 0)) > 0) {
+        await closeBtn.click({ timeout: 1500 }).catch(() => {});
+        console.log("[modal] ログイン後モーダルを閉じました");
+      } else {
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+      await page.waitForTimeout(400);
+      if ((await modal.count().catch(() => 0)) === 0) break; // 閉じたら完了
+    }
+  } catch {
+    /* 防御的: モーダル処理で throw しない */
+  }
+}
+
 // 起動時に push モードを明示ログ (平文の値はそのまま出さない)。
 console.log(
   `[cfg] SALONBOARD_ENABLE_PUSH=${ENABLE_PUSH ? "ON (登録ボタンを押します)" : "OFF (確認画面まで / 登録しません)"}`,
@@ -899,6 +937,10 @@ async function handleJob(job: Job): Promise<void> {
       noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
       auth = "logged_in";
     }
+
+    // ★実行前に、ログイン後に被さる SB モーダル(HOT PEPPER 満足度アンケート/お知らせ等)を閉じる。
+    //   裏のボタン/フォームをブロックして書込が失敗するのを防ぐ (2026-07-11 ユーザー指摘)。
+    await dismissBlockingModals(page).catch(() => {});
 
     // 2) ジョブ実行
     if (job.job_type === "push_blog") {
