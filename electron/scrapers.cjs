@@ -5519,6 +5519,168 @@ async function scrapeSalonInfo(page, opts = {}) {
   return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText } };
 }
 
+// =====================================================================
+// こだわり掲載情報 (掲載管理→こだわり) の取得。
+//   一覧 /CNK/draft/kodawariList のテーブル(順番/PickUp/タイトル・ページタイプ/掲載)を読み、
+//   各ページの詳細(タイトル/説明/キャッチ/コピー)は編集 /CNK/draft/kodawariEdit で補完する。
+//   HPB サロンページの「こだわり」タブに流し込む READ 専用。
+//   (DOM は 2026-07-11 discover_listing で実機確認: kodawariEditForm /
+//    frmKodawariEditBaseInfoDto.kodawariTitle / .kodawariExplanation /
+//    frmKodawariEditDetailInfoDtoList[i].kodawariDetailCatch / .kodawariDetailCopy)
+// =====================================================================
+async function scrapeKodawari(page, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  // グループ店舗(1ログイン複数サロン)は先にサロンを選ぶ。
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await page
+    .goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    })
+    .catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  // 一覧から各こだわりページの pageId / タイトル / 掲載状態 / 並び順を拾う。
+  // ★実DOM(2026-07-11): データ行は th 無しの table に「上へ N 下へ | <タイトル>」形式で並ぶ。
+  //   タイトルは並び替えコントロールの次セル。掲載状態は行内 "OK"(=掲載中) で判定。
+  const list = await page
+    .evaluate(() => {
+      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      const out = [];
+      const trs = Array.from(document.querySelectorAll('tr'));
+      let sort = 0;
+      for (const tr of trs) {
+        const cells = Array.from(tr.querySelectorAll('td,th')).map((c) => norm(c.textContent));
+        const sortIdx = cells.findIndex((c) => /上へ[\s\S]*下へ/.test(c));
+        if (sortIdx < 0) continue; // 並び替えコントロールを持つ行 = データ行のみ対象
+        const m = cells[sortIdx].match(/(\d+)/);
+        sort = m ? Number(m[1]) : sort + 1;
+        // タイトル: 並び替えセルの直後の非空セル。
+        let title = '';
+        for (let i = sortIdx + 1; i < cells.length; i++) {
+          if (cells[i] && !/^(OK|掲載|非掲載|削除|詳細)$/.test(cells[i])) { title = cells[i]; break; }
+        }
+        if (!title) continue;
+        const rowText = norm(tr.textContent);
+        let pageId = null;
+        const hid = tr.querySelector('input[name*="kodawariPageId"]');
+        if (hid && hid.value) pageId = hid.value;
+        if (!pageId) {
+          const mm = (tr.innerHTML || '').match(/kodawariPageId["'\s:=]+["']?(\d{3,})/i);
+          if (mm) pageId = mm[1];
+        }
+        out.push({
+          pageId,
+          title: title.slice(0, 200),
+          sortNo: sort,
+          isPublished: /OK|掲載中/.test(rowText) || !/非掲載にする|掲載する/.test(rowText),
+        });
+      }
+      return out;
+    })
+    .catch(() => []);
+
+  const rows = [];
+  // 各ページの詳細(説明/キャッチ/コピー)を編集ページから補完 (最大10ページ)。
+  for (const item of list.slice(0, 10)) {
+    let detail = { title: item.title, explanation: '', catch: '', copy: '', pageType: '' };
+    if (item.pageId) {
+      try {
+        const editUrl = new URL('/CNK/draft/kodawariEdit', baseUrl).toString();
+        // kodawariEdit は POST 遷移だが、GET でも pageId クエリで開けることが多い。まず GET を試す。
+        await page.goto(`${editUrl}?kodawariPageId=${encodeURIComponent(item.pageId)}`, {
+          waitUntil: 'domcontentloaded', timeout: 20_000,
+        }).catch(() => {});
+        await page.waitForTimeout(600);
+        detail = await page.evaluate(() => {
+          const v = (n) => { const e = document.querySelector(`[name="${n}"]`); return e ? (e.value || '') : ''; };
+          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+          const catches = Array.from(document.querySelectorAll('[name*="kodawariDetailCatch"]')).map((e) => norm(e.value)).filter(Boolean);
+          const copies = Array.from(document.querySelectorAll('[name*="kodawariDetailCopy"]')).map((e) => norm(e.value)).filter(Boolean);
+          return {
+            title: norm(v('frmKodawariEditBaseInfoDto.kodawariTitle')),
+            explanation: norm(v('frmKodawariEditBaseInfoDto.kodawariExplanation')),
+            catch: catches.join(' / ').slice(0, 500),
+            copy: copies.join(' / ').slice(0, 1000),
+            pageType: '',
+          };
+        }).catch(() => detail);
+      } catch (_e) { /* 詳細取得は best-effort */ }
+    }
+    rows.push({
+      external_id: item.pageId ? `KDW${item.pageId}` : `KDW_${rows.length + 1}`,
+      title: (detail.title || item.title || '').slice(0, 200),
+      page_type: detail.pageType || null,
+      explanation: detail.explanation || null,
+      catch_copy: detail.catch || null,
+      body_copy: detail.copy || null,
+      is_published: item.isPublished !== false,
+      sort_no: item.sortNo,
+    });
+  }
+  return { rows, debug: { found: list.length, source: 'kodawariList' } };
+}
+
+// =====================================================================
+// 特集掲載情報 (掲載管理→特集) の取得。
+//   一覧 /CNK/draft/specialList のテーブル(順番/特集/クーポン/掲載チェック)を読む。
+//   隠し sort フォーム frmSpDtlDtoList[i] から specialId/sortNo/presentFlg も併用する。
+//   HPB サロンページの「特集」表示用 READ 専用。
+//   (DOM は 2026-07-11 discover_listing で実機確認)
+// =====================================================================
+async function scrapeFeature(page, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await page
+    .goto(new URL('/CNK/draft/specialList', baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    })
+    .catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  const rows = await page
+    .evaluate(() => {
+      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      // specialId は隠し sort フォーム frmSpDtlDtoList[i].specialId から順に拾う。
+      const specialIds = [];
+      for (const el of Array.from(document.querySelectorAll('input[name*="frmSpDtlDtoList"]'))) {
+        const m = (el.name || '').match(/frmSpDtlDtoList\[(\d+)\]\.specialId$/);
+        if (m && el.value) specialIds[Number(m[1])] = el.value;
+      }
+      // ★実DOM(2026-07-11): データ行は th 無しの table に
+      //   「上へ N 下へ | <特集名> | <クーポン> | … | (登録日) | OK」形式。
+      const out = [];
+      const trs = Array.from(document.querySelectorAll('tr'));
+      let n = 0;
+      for (const tr of trs) {
+        const cells = Array.from(tr.querySelectorAll('td,th')).map((c) => norm(c.textContent));
+        const sortIdx = cells.findIndex((c) => /上へ[\s\S]*下へ/.test(c));
+        if (sortIdx < 0) continue;
+        const m = cells[sortIdx].match(/(\d+)/);
+        const sort = m ? Number(m[1]) : n + 1;
+        // 特集名: 並び替えセルの直後の非空セル。
+        let title = '';
+        for (let i = sortIdx + 1; i < cells.length; i++) {
+          if (cells[i] && !/^(OK|掲載|非掲載|削除|詳細)$/.test(cells[i])) { title = cells[i]; break; }
+        }
+        if (!title) continue;
+        const rowText = norm(tr.textContent);
+        const sid = specialIds[n];
+        out.push({
+          external_id: sid ? `SPC${sid}` : `SPC_${sort}`,
+          title: title.slice(0, 200),
+          is_published: /OK|掲載中/.test(rowText),
+          sort_no: sort,
+        });
+        n++;
+      }
+      return out;
+    })
+    .catch(() => []);
+  return { rows, debug: { found: rows.length, source: 'specialList' } };
+}
+
 async function scrapeStaff(page, opts = {}) {
   // ジャンル別分岐: 美容室(hair)はスタッフではなく「スタイリスト一覧」を取得する。
   // 他ジャンル(esthetic/nail/eyelash/other)は従来のスタッフ一覧 (/CNK/draft/staffList)。
@@ -9599,6 +9761,8 @@ module.exports = {
   pushCouponViaForm,
   scrapePhotoGallery,
   // エラー画面スクショ (失敗地点のバッファ) を worker-process が Slack 送信に使う
+  scrapeKodawari,
+  scrapeFeature,
   getLastErrorShot,
   getLastErrorShotForPage,
   resetLastErrorShot,
