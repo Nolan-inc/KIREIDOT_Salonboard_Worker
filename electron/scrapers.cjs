@@ -5593,6 +5593,269 @@ async function scrapeSalonInfo(page, opts = {}) {
 }
 
 // =====================================================================
+// サロン掲載プロフィール反映 (push_salon): KireidotAdmin で編集した
+//   キャッチ / PR文(コピー) / サロンからの一言(氏名・メッセージ) を
+//   /CNK/draft/salonEdit に書き込み、登録(doRegister)する。
+//   実DOM(discover_listing 確認): salonEditForm(action /CNK/draft/salonEdit/doRegister)/
+//   frmCnkSalonEditTopDto.salonTopCatch / .salonTopCopy /
+//   frmCnkSalonEditSalonCommentDto.messageStylistName / .messagePost。
+//   opts: { baseUrl, enablePush, salonId, shopName }
+//   payload: { catch_copy?, pr_copy?, owner_name?, owner_message? }
+//   戻り値: {status:'ok'} | {status:'confirm_only'} | {status:'failed', reason, errorCode, manualRequired}
+// =====================================================================
+async function pushSalonProfileViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => {
+    captureErrorShot(page, `salon_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
+
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await page
+    .goto(new URL('/CNK/draft/salonEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    .catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  // フォーム到達確認。
+  if ((await page.locator('form#salonEditForm, [name="frmCnkSalonEditTopDto.salonTopCatch"]').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'salon', 'no_form', { diagnostics: { url: page.url() } });
+    return fail(`サロン掲載情報編集フォームを開けませんでした (最終URL=${page.url()}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 既存値を保ちつつ、payload に値がある項目だけ上書きする(空で他項目を消さない)。
+  const filled = await page.evaluate((vals) => {
+    const setVal = (name, v) => {
+      if (v == null || v === '') return false;
+      const el = document.querySelector(`[name="${name}"]`);
+      if (!el) return false;
+      el.value = String(v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    const done = [];
+    if (setVal('frmCnkSalonEditTopDto.salonTopCatch', vals.catch_copy) || setVal('salonTopCatch', vals.catch_copy)) done.push('catch');
+    if (setVal('frmCnkSalonEditTopDto.salonTopCopy', vals.pr_copy) || setVal('salonTopCopy', vals.pr_copy)) done.push('copy');
+    if (setVal('frmCnkSalonEditSalonCommentDto.messageStylistName', vals.owner_name)) done.push('name');
+    if (setVal('frmCnkSalonEditSalonCommentDto.messagePost', vals.owner_message)) done.push('message');
+    return done;
+  }, {
+    catch_copy: p.catch_copy ?? null,
+    pr_copy: p.pr_copy ?? null,
+    owner_name: p.owner_name ?? null,
+    owner_message: p.owner_message ?? null,
+  }).catch(() => []);
+
+  if (!filled.length) {
+    return fail('反映対象の項目(キャッチ/PR/一言)が payload にありません', 'NO_FIELDS', true);
+  }
+
+  await captureScrapeDebug(page, 'salon', 'before_submit', { diagnostics: { filled, enablePush, url: page.url() } });
+
+  if (!enablePush) {
+    return { status: 'confirm_only', confirmed: { filled } };
+  }
+
+  // 登録: salonEdit は doRegister へ submit。登録ボタン(a[onclick*=doRegister] / img.jscButtonRegister /
+  //   「登録」テキスト / input submit)を横断で押し、確認パネル/ダイアログにも対応。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let clickedRegister = false;
+  try {
+    const regBtn = page.locator(
+      'a[onclick*="doRegister"], img.jscButtonRegister, a#regist, ' +
+      'input[type="submit"][value*="登録"], a:has-text("登録する"), a:has-text("登録")'
+    ).first();
+    if ((await regBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'salon', 'no_register', { diagnostics: { url: page.url() } });
+      return fail(`サロン掲載情報の「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await regBtn.click({ timeout: 10_000 }).catch(() => {});
+    clickedRegister = true;
+    await page.waitForTimeout(1200);
+    // 確認画面/パネルの最終確定。
+    const finalBtn = page.locator(
+      '#termsPanel a:visible:has-text("登録"), a[onclick*="doRegister"]:visible, a:visible:has-text("登録する"), input[type="submit"][value*="登録"]:visible'
+    ).first();
+    if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1200);
+    } else {
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'salon', 'after', { diagnostics: { clickedRegister, nativeDialogAccepted, filled, url: page.url() } });
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /登録しました|保存しました|完了|反映しました|受け付け|更新しました/.test(bodyText);
+  const looksError = /エラー|失敗|入力してください|必須|文字以下|選択してください/.test(bodyText) && !looksDone;
+  if (looksError) {
+    return fail(`サロン掲載情報の登録でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須|文字以下|選択してください).{0,30}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  }
+  if (!looksDone && !clickedRegister && !nativeDialogAccepted) {
+    return fail(`サロン掲載情報の登録完了を確認できませんでした (capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  }
+  return { status: 'ok', summary: `サロン掲載プロフィール反映 (${filled.join('/')})` };
+}
+
+// =====================================================================
+// こだわり掲載情報 反映 (push_kodawari): 既存のこだわりページ(external_id=KDW<pageId>)の
+//   タイトル/説明/キャッチ/コピーを kodawariEdit に書き込み登録する。
+//   一覧の kodawariPageEditForm に pageId を入れて submit → 編集画面 → 入力 → doRegister。
+//   payload: { external_id:'KDW<pageId>', title?, explanation?, catch_copy?, body_copy? }
+// =====================================================================
+async function pushKodawariViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => {
+    captureErrorShot(page, `kodawari_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
+  const pageId = String(p.external_id || '').replace(/^KDW/i, '').trim();
+  if (!/^\d{3,}$/.test(pageId)) {
+    return fail(`こだわりの pageId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
+  }
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await page.goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+  // 一覧の編集フォームに pageId を入れて submit(該当ページの編集画面へ)。
+  const opened = await page.evaluate((pid) => {
+    const f = document.querySelector('form#kodawariPageEditForm, form[action*="kodawariEdit"]');
+    if (!f) return false;
+    const inp = f.querySelector('[name="kodawariPageId"], [name*="kodawariPageId"]');
+    if (inp) inp.value = pid;
+    f.submit();
+    return true;
+  }, pageId).catch(() => false);
+  if (opened) await page.waitForLoadState('domcontentloaded', { timeout: 20_000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+  if ((await page.locator('[name="frmKodawariEditBaseInfoDto.kodawariTitle"], form#kodawariEditForm').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'kodawari', 'no_edit_form', { diagnostics: { pageId, url: page.url() } });
+    return fail(`こだわり編集フォームを開けませんでした (pageId=${pageId}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  const filled = await page.evaluate((vals) => {
+    const setVal = (name, v) => {
+      if (v == null || v === '') return false;
+      const el = document.querySelector(`[name="${name}"]`);
+      if (!el) return false;
+      el.value = String(v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    const done = [];
+    if (setVal('frmKodawariEditBaseInfoDto.kodawariTitle', vals.title)) done.push('title');
+    if (setVal('frmKodawariEditBaseInfoDto.kodawariExplanation', vals.explanation)) done.push('explanation');
+    // 詳細1件目のキャッチ/コピー。
+    const c0 = document.querySelector('[name*="kodawariDetailCatch"]');
+    if (c0 && vals.catch_copy) { c0.value = String(vals.catch_copy); c0.dispatchEvent(new Event('input', { bubbles: true })); done.push('catch'); }
+    const p0 = document.querySelector('[name*="kodawariDetailCopy"]');
+    if (p0 && vals.body_copy) { p0.value = String(vals.body_copy); p0.dispatchEvent(new Event('input', { bubbles: true })); done.push('copy'); }
+    return done;
+  }, { title: p.title ?? null, explanation: p.explanation ?? null, catch_copy: p.catch_copy ?? null, body_copy: p.body_copy ?? null }).catch(() => []);
+  if (!filled.length) return fail('反映対象(タイトル/説明/キャッチ/コピー)が payload にありません', 'NO_FIELDS', true);
+  await captureScrapeDebug(page, 'kodawari', 'before_submit', { diagnostics: { pageId, filled, enablePush, url: page.url() } });
+  if (!enablePush) return { status: 'confirm_only', confirmed: { filled } };
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let clicked = false;
+  try {
+    const regBtn = page.locator('a[onclick*="doRegister"], img.jscButtonRegister, input[type="submit"][value*="登録"], a:has-text("登録する"), a:has-text("登録")').first();
+    if ((await regBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'kodawari', 'no_register', { diagnostics: { url: page.url() } });
+      return fail(`こだわりの「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await regBtn.click({ timeout: 10_000 }).catch(() => {});
+    clicked = true;
+    await page.waitForTimeout(1200);
+    const finalBtn = page.locator('#termsPanel a:visible:has-text("登録"), a[onclick*="doRegister"]:visible, a:visible:has-text("登録する")').first();
+    if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
+      await Promise.all([page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}), finalBtn.click({ timeout: 10_000 }).catch(() => {})]);
+      await page.waitForTimeout(1200);
+    } else {
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  const cap2 = await captureScrapeDebug(page, 'kodawari', 'after', { diagnostics: { clicked, nativeDialogAccepted, url: page.url() } });
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  const looksDone = /登録しました|保存しました|完了|反映しました|更新しました|kodawariList/.test(bodyText) || /kodawariList/.test(page.url());
+  const looksError = /エラー|失敗|入力してください|必須|文字以下/.test(bodyText) && !looksDone;
+  if (looksError) return fail(`こだわり登録でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須|文字以下).{0,20}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+  if (!looksDone && !clicked && !nativeDialogAccepted) return fail(`こだわり登録の完了を確認できませんでした (capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
+  return { status: 'ok', externalId: `KDW${pageId}`, summary: `こだわり反映 (${filled.join('/')})` };
+}
+
+// =====================================================================
+// 特集掲載情報 反映 (push_feature): 特集(external_id=SPC<specialId>)の掲載ON/OFF を
+//   specialList の掲載チェック(doPresent)で切り替える。特集は HPB キュレーションのため
+//   新規作成はできず、参加中特集の掲載状態トグルのみ。payload: { external_id, is_published? }
+// =====================================================================
+async function pushFeatureViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => {
+    captureErrorShot(page, `feature_fail_${errorCode || 'err'}`);
+    return { status: 'failed', reason, errorCode, manualRequired };
+  };
+  const specialId = String(p.external_id || '').replace(/^SPC/i, '').trim();
+  if (!/^\d{2,}$/.test(specialId)) {
+    return fail(`特集の specialId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
+  }
+  const wantPublished = p.is_published !== false;
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await page.goto(new URL('/CNK/draft/specialList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+  if ((await page.locator('form#specialListPresentForm, [name="specialId"]').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'feature', 'no_form', { diagnostics: { url: page.url() } });
+    return fail(`特集一覧(specialList)を開けませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  await captureScrapeDebug(page, 'feature', 'before_submit', { diagnostics: { specialId, wantPublished, enablePush, url: page.url() } });
+  if (!enablePush) return { status: 'confirm_only', confirmed: { specialId, wantPublished } };
+  // 掲載トグル: specialListPresentForm に specialId を入れて submit(doPresent)。
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let submitted = false;
+  try {
+    submitted = await page.evaluate((sid) => {
+      const f = document.querySelector('form#specialListPresentForm, form[action*="specialList/doPresent"]');
+      if (!f) return false;
+      const inp = f.querySelector('[name="specialId"]');
+      if (inp) inp.value = sid;
+      f.submit();
+      return true;
+    }, specialId).catch(() => false);
+    if (submitted) await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+  } finally {
+    page.off('dialog', onDialog);
+  }
+  if (!submitted) {
+    const cap = await captureScrapeDebug(page, 'feature', 'no_present_form', { diagnostics: { url: page.url() } });
+    return fail(`特集の掲載切替フォームが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  const cap2 = await captureScrapeDebug(page, 'feature', 'after', { diagnostics: { specialId, url: page.url() } });
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  if (/エラー|失敗/.test(bodyText) && !/しました|完了/.test(bodyText)) {
+    return fail(`特集掲載切替でエラー (capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  return { status: 'ok', externalId: `SPC${specialId}`, summary: `特集掲載切替 (present=${wantPublished})` };
+}
+
+// =====================================================================
 // こだわり掲載情報 (掲載管理→こだわり) の取得。
 //   一覧 /CNK/draft/kodawariList のテーブル(順番/PickUp/タイトル・ページタイプ/掲載)を読み、
 //   各ページの詳細(タイトル/説明/キャッチ/コピー)は編集 /CNK/draft/kodawariEdit で補完する。
@@ -9916,6 +10179,9 @@ module.exports = {
   // エラー画面スクショ (失敗地点のバッファ) を worker-process が Slack 送信に使う
   scrapeKodawari,
   scrapeFeature,
+  pushSalonProfileViaForm,
+  pushKodawariViaForm,
+  pushFeatureViaForm,
   getLastErrorShot,
   getLastErrorShotForPage,
   resetLastErrorShot,

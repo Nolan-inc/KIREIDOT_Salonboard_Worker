@@ -405,7 +405,11 @@ type JobType =
   | "fetch_kodawari"
   | "fetch_feature"
   | "fetch_style"
-  | "discover_listing";
+  | "discover_listing"
+  // 掲載系 write (KIREIDOT→SB)
+  | "push_salon"
+  | "push_kodawari"
+  | "push_feature";
 
 type Job = {
   id: string;
@@ -817,6 +821,7 @@ async function handleJob(job: Job): Promise<void> {
       "push_booking", "cancel_booking", "push_shifts", "push_shift_patterns",
       "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
+      "push_salon", "push_kodawari", "push_feature",
     ]);
     const isWriteJob = WRITE_JOBS.has(job.job_type);
     const forceResidential = writeViaResidentialEnabled() && isWriteJob;
@@ -1401,11 +1406,18 @@ async function handleJob(job: Job): Promise<void> {
       job.job_type === "push_staff" ||
       job.job_type === "push_menu" ||
       job.job_type === "push_coupon" ||
-      job.job_type === "push_shift_patterns"
+      job.job_type === "push_shift_patterns" ||
+      job.job_type === "push_salon" ||
+      job.job_type === "push_kodawari" ||
+      job.job_type === "push_feature"
     ) {
       const p = job.payload as Record<string, unknown>;
       const wGenre =
         (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      // 掲載系(サロン/こだわり/特集)はグループ店でサロン選択が要るため salonId/shopName を渡す。
+      const wSalonId =
+        (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+      const wShopName = (job as { shop_name?: string | null }).shop_name ?? null;
       // push_staff: プロフィール欄(名前/フリガナ/キャッチ/自己紹介/職種/性別/指名)を含むなら
       // staffEdit(全プロフィール)へ、そうでなければ staffList(並び順/掲載) へルーティング。
       const hasStaffProfile =
@@ -1420,6 +1432,9 @@ async function handleJob(job: Job): Promise<void> {
         push_menu: scrapers.pushMenuViaForm,
         push_coupon: scrapers.pushCouponViaForm,
         push_shift_patterns: scrapers.pushWorkPatternViaForm,
+        push_salon: (scrapers as unknown as Record<string, ScraperFn>).pushSalonProfileViaForm,
+        push_kodawari: (scrapers as unknown as Record<string, ScraperFn>).pushKodawariViaForm,
+        push_feature: (scrapers as unknown as Record<string, ScraperFn>).pushFeatureViaForm,
       } as const;
       let result: any;
       try {
@@ -1427,6 +1442,8 @@ async function handleJob(job: Job): Promise<void> {
           baseUrl,
           enablePush: ENABLE_PUSH,
           genre: wGenre,
+          salonId: wSalonId,
+          shopName: wShopName,
         });
       } catch (e) {
         // OpenClaw 自己修復フォールバック: 固定セレクタがHTML変化で壊れた時、Claudeに
