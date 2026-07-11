@@ -2351,6 +2351,9 @@ async function _findReserveIdForBookingImpl(page, target, opts = {}) {
     for (const it of items) {
       const reserveId = extractIdFromUrl(it.link_href, 'reservationId', 'reserveId', 'rsvId');
       if (!reserveId) continue;
+      // ★キャンセル/取消済みの行は候補にしない (2026-07-11 銀座 五十嵐様の偽already_exists:
+      //   同時刻・同スタッフのキャンセル済み予約(YG81411574)に誤マッチして登録がスキップされ続けた)。
+      if (/キャンセル|取消/.test(it.status_raw || '')) continue;
       // 開始時刻 (datetime_raw に HH:MM が含まれる)
       const tm = (it.datetime_raw || '').match(/(\d{1,2}):(\d{2})/);
       const hhmm = tm ? `${tm[1].padStart(2, '0')}:${tm[2]}` : null;
@@ -2360,7 +2363,16 @@ async function _findReserveIdForBookingImpl(page, target, opts = {}) {
       cands.push({ reserveId, customer: (it.customer_raw || '').replace(/\s*様$/, '').trim() });
     }
     console.log(`[recover] cands=${cands.length} target=${target.hhmm} cust=${(target.customerName||'').slice(0,8)}`);
-    if (cands.length === 1) return cands[0].reserveId;
+    // ★単独候補でも、双方の顧客名が分かる場合は名前照合する (同時刻・同スタッフの
+    //   別客予約への誤マッチ防止)。行側の顧客名が空のときのみ従来どおり時刻+スタッフで採用。
+    if (cands.length === 1) {
+      const c = cands[0];
+      if (wantCust && c.customer && !(c.customer.includes(wantCust) || wantCust.includes(c.customer))) {
+        console.log(`[recover] 単独候補が顧客名不一致のため不採用 (row=${c.customer.slice(0, 8)})`);
+        return null;
+      }
+      return c.reserveId;
+    }
     // 複数候補なら顧客名で一意化
     if (cands.length > 1 && wantCust) {
       const byCust = cands.filter((c) => c.customer && (c.customer.includes(wantCust) || wantCust.includes(c.customer)));
@@ -3641,7 +3653,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         customerName: p.customer_name,
       }, { baseUrl }).catch(() => null);
       if (existing) {
-        return okExisting(existing);
+        // ★一覧マッチだけで already_exists と断定しない (2026-07-11): 一覧はキャンセル行や
+        //   同時刻別客と紛れやすい。詳細ページで「現在も有効な予約か」を最終確認し、
+        //   active のときだけ既登録として成功を返す。cancelled/not_found は新規登録へ進む。
+        const st = await checkReserveStatusById(page, existing, { baseUrl }).catch(() => 'unknown');
+        console.log(`[preflight] 一覧マッチ ${existing} の状態=${st}`);
+        if (st === 'active') {
+          return okExisting(existing);
+        }
+        if (st === 'unknown') {
+          return fail(
+            `既存候補 (reserveId=${existing}) の存在確認ができませんでした。二重登録防止のため自動登録を見送りました。SalonBoard をご確認ください。`,
+            'UNKNOWN_ERROR',
+            true,
+          );
+        }
+        // cancelled / not_found → 有効な既存予約は無い → 下の新規登録フローへ。
       }
     }
   }
