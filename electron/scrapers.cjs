@@ -65,11 +65,26 @@ let _lastErrorShot = null; // { buffer, url, label, channel, at }
 // 失敗地点で撮影中のスクショ Promise。postCallback 側が await して
 // 「撮り終わってから」Slack に送れるようにする (撮影完了前に browser.close される競合回避)。
 let _lastErrorShotPromise = null;
+// ★per-page ショット (2026-07-11 並行レース根治): 店舗レーン並行(max2)で _lastErrorShot が
+//   別ジョブに上書きされ、キャンセル通知に別予約のスクショが載る事故があった。page 単位で
+//   保持し、getLastErrorShotForPage(page) で「そのジョブ自身の page で撮ったショット」だけ返す。
+const _pageShots = new WeakMap(); // page -> { buffer, promise, at }
 
 /** 失敗地点で撮った最新スクショを返す (無ければ null)。撮影中なら待つ。 */
 async function getLastErrorShot() {
   try { if (_lastErrorShotPromise) await _lastErrorShotPromise; } catch (_e) { /* noop */ }
   return _lastErrorShot;
+}
+/** ★per-page: 指定 page で撮った失敗ショットのみ返す (並行安全)。撮影中なら待つ。 */
+async function getLastErrorShotForPage(page) {
+  if (!page) return null;
+  const ent = _pageShots.get(page);
+  if (!ent) return null;
+  // 撮影が in-flight なら完了を待つ。ent は captureErrorShot で先に登録した「同じ
+  // オブジェクト」で、_captureErrorShotToMemory が buffer をこの場で埋める(差し替えない)
+  // ため、await 後に ent.buffer を読めば撮り終わった画像が取れる。
+  try { if (ent.promise) await ent.promise; } catch (_e) { /* noop */ }
+  return ent.buffer ? { buffer: ent.buffer, at: ent.at } : null;
 }
 /** ジョブ開始時に呼んで古いスクショを捨てる (前ジョブの画面を誤送信しない)。 */
 function resetLastErrorShot() {
@@ -84,6 +99,16 @@ function resetLastErrorShot() {
 function captureErrorShot(page, label) {
   const pr = _captureErrorShotToMemory(page, 'push', label || 'fail');
   _lastErrorShotPromise = pr;
+  // ★per-page: 撮影完了前に report() が来ても待てるよう、この page の entry を promise 付きで
+  //   即登録する。buffer は _captureErrorShotToMemory が撮り終えたら「この同じ entry」に埋める
+  //   (差し替えない)ので、getLastErrorShotForPage が await 後に buffer を読める。
+  try {
+    if (page) {
+      const ent = _pageShots.get(page);
+      if (ent) { ent.promise = pr; ent.at = Date.now(); }
+      else _pageShots.set(page, { buffer: null, promise: pr, at: Date.now() });
+    }
+  } catch (_e) { /* noop */ }
   return pr;
 }
 
@@ -100,6 +125,14 @@ async function _captureErrorShotToMemory(page, channel, label) {
       let url = '';
       try { url = page.url(); } catch (_e) { /* noop */ }
       _lastErrorShot = { buffer: shot, url, label, channel, at: Date.now() };
+      // ★per-page にも保持 (並行安全)。captureErrorShot が先に登録した entry があれば
+      //   「その同じオブジェクト」に buffer を埋める(getLastErrorShotForPage が await 中の
+      //   参照と一致させるため差し替えない)。無ければ新規登録。
+      try {
+        const ent = _pageShots.get(page);
+        if (ent) { ent.buffer = shot; ent.at = Date.now(); }
+        else _pageShots.set(page, { buffer: shot, promise: null, at: Date.now() });
+      } catch (_e) { /* noop */ }
     }
   } catch (_e) { /* スクショ失敗は致命ではない */ }
 }
@@ -9567,6 +9600,7 @@ module.exports = {
   scrapePhotoGallery,
   // エラー画面スクショ (失敗地点のバッファ) を worker-process が Slack 送信に使う
   getLastErrorShot,
+  getLastErrorShotForPage,
   resetLastErrorShot,
   captureScrapeDebug,
   findReserveIdForBooking,
