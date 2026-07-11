@@ -5526,13 +5526,33 @@ async function scrapeSalonInfo(page, opts = {}) {
           const e = document.querySelector(`[name="${n}"]`);
           return e ? norm(e.value) : null;
         };
-        // 道案内・アクセス: name に access/direction/root/guide を含む textarea/input(best-effort)。
+        // 道案内・アクセス: ① name ヒント ② ラベル「道案内/アクセス」を持つ行の隣接値、で拾う。
         let access = null;
         for (const el of Array.from(document.querySelectorAll('textarea, input[type="text"]'))) {
           const key = el.name || el.id || '';
           if (/access|direction|root|guide|douan/i.test(key) && norm(el.value)) {
             access = norm(el.value).slice(0, 600);
             break;
+          }
+        }
+        if (!access) {
+          // ラベルセル(th/td/dt/label)に「道案内」「アクセス」を含む行の、隣接する
+          //   textarea/input の値、無ければ隣接セルのテキストを採用する。
+          const labels = Array.from(document.querySelectorAll('th, td, dt, label, p'));
+          for (const lb of labels) {
+            const t = norm(lb.textContent);
+            if (!/道案内|アクセス/.test(t) || t.length > 20) continue; // ラベルらしい短いもの
+            const row = lb.closest('tr, dl, .mod_form, .formArea') || lb.parentElement;
+            if (!row) continue;
+            const field = row.querySelector('textarea, input[type="text"]');
+            if (field && norm(field.value)) { access = norm(field.value).slice(0, 600); break; }
+            // 隣接セル(次のtd/dd)のテキスト
+            const cells = Array.from(row.querySelectorAll('td, dd'));
+            for (const c of cells) {
+              const cv = norm(c.textContent);
+              if (cv && cv !== t && cv.length > 4 && !/道案内|アクセス/.test(cv)) { access = cv.slice(0, 600); break; }
+            }
+            if (access) break;
           }
         }
         return {
@@ -5613,6 +5633,20 @@ async function scrapeKodawari(page, opts = {}) {
         let pageId = null;
         const hid = tr.querySelector('input[name*="kodawariPageId"]');
         if (hid && hid.value) pageId = hid.value;
+        // 行内の onclick / href / data-* / value に埋まった pageId も拾う(詳細リンク等)。
+        if (!pageId) {
+          for (const el of Array.from(tr.querySelectorAll('a,button,input,[onclick],[data-id],[data-page-id]'))) {
+            const hay = [
+              el.getAttribute && el.getAttribute('onclick'),
+              el.getAttribute && el.getAttribute('href'),
+              el.getAttribute && el.getAttribute('data-id'),
+              el.getAttribute && el.getAttribute('data-page-id'),
+              el.value,
+            ].filter(Boolean).join(' ');
+            const mm = hay.match(/kodawariPageId["'\s:=(]+["']?(\d{3,})/i) || hay.match(/\bkodawariPageEdit\(['"]?(\d{3,})/i);
+            if (mm) { pageId = mm[1]; break; }
+          }
+        }
         if (!pageId) {
           const mm = (tr.innerHTML || '').match(/kodawariPageId["'\s:=]+["']?(\d{3,})/i);
           if (mm) pageId = mm[1];
