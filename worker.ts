@@ -1540,7 +1540,27 @@ function autoLoginDisabled(): boolean {
 const PROXY_CHECK_INTERVAL_MS =
   Number(process.env.PROXY_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
 
+// ISP 静的プール。env(SB_PROXY_POOL)は **コンテナ再作成しないと変えられない**(全店セッション
+// 消失リスク)ため、ファイル /home/pwuser/.kireidot/proxy_pool でも上書き可能にする
+// (max_concurrency / proxy-shop-override と同じホット設定パターン)。Decodo で IP を増やしたら
+// (10→20 等)このファイルに列挙するだけで、再起動なしの次サイクルから健全チェック対象に入る。
+// 形式: カンマ区切り or 改行区切りの "host:port" (# 始まりの行はコメント)。
 function proxyPoolList(): string[] {
+  try {
+    const raw = readFileSync(
+      "/home/pwuser/.kireidot/proxy_pool",
+      "utf8"
+    ).trim();
+    if (raw) {
+      const list = raw
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter((s) => s && !s.startsWith("#"));
+      if (list.length > 0) return list;
+    }
+  } catch {
+    /* ファイル無し → env にフォールバック */
+  }
   return (process.env.SB_PROXY_POOL || "")
     .split(",")
     .map((s) => s.trim())
