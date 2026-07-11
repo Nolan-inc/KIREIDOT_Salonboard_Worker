@@ -7930,6 +7930,14 @@ async function humanizeMouseWander(page) {
 async function uploadHairStyleFrontImage(page, file) {
   const idHidden = page.locator('input#FRONT_IMG_ID, input[name="FRONT_IMG_ID"]').first();
   const before = await idHidden.inputValue().catch(() => '');
+  // ★(A) 2026-07-11: 直接POST(Playwright request=ブラウザTLS指紋/Akamaiセンサーを持たない)を
+  //   先に撃つと ERR_ABORTED され、同一セッションが challenge 状態に落ちて、後続の「信頼された
+  //   ブラウザXHR」まで「通信に失敗しました」で中断される疑いが濃厚(郡山 実測: 直接POST abort →
+  //   ブラウザXHRも comm error)。→ 既定では直接POSTを主経路にせず、**ブラウザXHRを主経路**にする
+  //   (waitImgeFile補償 + trusted setInputFiles + doUpload timeoutパッチ + 人間化 は実装済)。
+  //   直接POSTは comm error 時の最終フォールバックとしてのみ残す(下方 hasCommError ブロック)。
+  //   env SALONBOARD_DIRECT_POST=1 で従来どおり直接POSTを主経路に戻せる(切り分け用)。
+  const PREFER_DIRECT_POST_PRIMARY = /^(1|true|yes)$/i.test(process.env.SALONBOARD_DIRECT_POST ?? '');
 
   // /imgreg/ (モーダル表示 & doUpload) のリクエスト/レスポンスを記録して、
   // 失敗時に「なぜ通信に失敗したか」を実データで確認できるようにする。
@@ -8018,7 +8026,7 @@ async function uploadHairStyleFrontImage(page, file) {
   //   主経路にする。imgUpload GET は 200 で通っている=同一Cookieの直接POSTは通る見込み。
   //   直接POSTが「ネットワークで撃てない(all_retries_failed)」ときだけブラウザXHRへ退避。
   let directPostBlocked = false;
-  if (!chooserDone) {
+  if (!chooserDone && PREFER_DIRECT_POST_PRIMARY) {
     // モーダルHTML(#imgUploadForm)が読み込まれるのを待つ (AJAXで遅れて入るため十分待つ)。
     await page.waitForFunction(() => {
       const f = document.querySelector('#imgUploadForm');
