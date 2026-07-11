@@ -580,18 +580,24 @@ async function fetchJobs(limit = 1): Promise<Job[]> {
   return json.jobs ?? [];
 }
 
-async function report(body: CallbackBody): Promise<void> {
+async function report(body: CallbackBody, capturePage?: unknown): Promise<void> {
   // 失敗系コールバックには失敗地点のスクショ(メモリbuffer)を base64 で同梱する。
   // Admin が Storage に保存し、Slack 通知に画像として添付できるようにする(best-effort)。
   try {
     const st = String((body as { status?: string }).status ?? "");
     const isFail = st !== "" && !["succeeded", "ok", "confirm_only"].includes(st);
     if (isFail && !(body as { error_capture_b64?: string }).error_capture_b64) {
-      const shot = await (
-        scrapers as {
-          getLastErrorShot?: () => Promise<{ buffer?: Buffer; at?: number } | null>;
-        }
-      ).getLastErrorShot?.();
+      // ★並行安全 (2026-07-11): まず「このジョブの page」で撮ったショットを優先。
+      //   店舗レーン並行(max2)で共有グローバル(getLastErrorShot)を使うと、別ジョブの
+      //   スクショを誤添付する(向井キャンセルに尾崎予約の画像が載った事故)。page を
+      //   渡せた場合は per-page ショットのみ採用し、グローバルは page 無しの旧経路のみ。
+      const s = scrapers as {
+        getLastErrorShotForPage?: (p: unknown) => Promise<{ buffer?: Buffer; at?: number } | null>;
+        getLastErrorShot?: () => Promise<{ buffer?: Buffer; at?: number } | null>;
+      };
+      const shot = capturePage
+        ? await s.getLastErrorShotForPage?.(capturePage)
+        : await s.getLastErrorShot?.();
       // 直近(<20s)の失敗ショットのみ採用 (古い別ジョブのショット誤添付を防ぐ)。
       if (
         shot &&
@@ -641,6 +647,7 @@ async function reportScraperResult(
   jobType: string,
   result: ScraperResult,
   extra: Record<string, unknown> = {},
+  capturePage?: unknown,
 ): Promise<void> {
   const tag = `${jobType} ${job.id.slice(0, 8)}`;
   if (result.status === "ok") {
@@ -676,27 +683,32 @@ async function reportScraperResult(
   const exhausted = job.attempts >= cap;
   const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
   const toManual = !!result.manualRequired || exhausted;
-  await report({
-    job_id: job.id,
-    job_type: jobType,
-    status: isCaptcha
-      ? "captcha_detected"
-      : toManual
-        ? "manual_required"
-        : "retryable_failed",
-    error_code: result.errorCode,
-    error: result.reason,
-    manual_required: toManual,
-    ...(isCaptcha
-      ? {
-          block: {
-            until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
-            reason: `reCAPTCHA during ${jobType}`,
-          },
-        }
-      : {}),
-    ...extra,
-  } as unknown as CallbackBody);
+  await report(
+    {
+      job_id: job.id,
+      job_type: jobType,
+      status: isCaptcha
+        ? "captcha_detected"
+        : toManual
+          ? "manual_required"
+          : "retryable_failed",
+      error_code: result.errorCode,
+      error: result.reason,
+      manual_required: toManual,
+      ...(isCaptcha
+        ? {
+            block: {
+              until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+              reason: `reCAPTCHA during ${jobType}`,
+            },
+          }
+        : {}),
+      ...extra,
+    } as unknown as CallbackBody,
+    // ★このジョブの page で撮った失敗ショットのみ添付 (並行レーンで別ジョブの
+    //   スクショを掴む誤添付を防ぐ)。errorCaptureB64 を extra に持つ経路はそちら優先。
+    capturePage,
+  );
   console.log(`[job] done  ${tag} (${result.errorCode}: ${result.reason})`);
 }
 
@@ -816,15 +828,18 @@ async function handleJob(job: Job): Promise<void> {
       salonId: wAuthSalonId,
     });
     if (auth === "captcha") {
-      await report({
-        job_id: job.id,
-        status: "captcha_detected",
-        error: "captcha at landing",
-        block: {
-          until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
-          reason: "reCAPTCHA encountered before login",
+      await report(
+        {
+          job_id: job.id,
+          status: "captcha_detected",
+          error: "captcha at landing",
+          block: {
+            until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+            reason: "reCAPTCHA encountered before login",
+          },
         },
-      });
+        page,
+      );
       console.log(`[job] done  ${tag} (captcha at landing)`);
       return;
     }
@@ -833,12 +848,15 @@ async function handleJob(job: Job): Promise<void> {
       // 自動ログイン抑制時: doLogin を叩かず retryable で待つ。Akamai は cloud の自動
       // ログインを弾き、doLogin 試行が劣化セッションを再フラグして回復を遅らせるため。
       if (autoLoginDisabled()) {
-        await report({
-          job_id: job.id,
-          job_type: job.job_type,
-          status: "retryable_failed",
-          error: `セッション未確立(auth=${auth})。自動ログイン抑制中のため再試行待ち(永続セッションの回復/再シードを待つ)。`,
-        });
+        await report(
+          {
+            job_id: job.id,
+            job_type: job.job_type,
+            status: "retryable_failed",
+            error: `セッション未確立(auth=${auth})。自動ログイン抑制中のため再試行待ち(永続セッションの回復/再シードを待つ)。`,
+          },
+          page,
+        );
         console.log(`[job] done  ${tag} (session not ready, auto-login disabled -> retryable)`);
         return;
       }
@@ -847,12 +865,15 @@ async function handleJob(job: Job): Promise<void> {
       //   Akamai の throttle を温存するだけなので、静かに回復を待つ。
       const cdRemainMs = loginCooldownRemainingMs(job.shop_id);
       if (cdRemainMs > 0) {
-        await report({
-          job_id: job.id,
-          job_type: job.job_type,
-          status: "retryable_failed",
-          error: `ログインスロットル・クールダウン中(残り約${Math.ceil(cdRemainMs / 60_000)}分)。doLoginを叩かず回復待ち。`,
-        });
+        await report(
+          {
+            job_id: job.id,
+            job_type: job.job_type,
+            status: "retryable_failed",
+            error: `ログインスロットル・クールダウン中(残り約${Math.ceil(cdRemainMs / 60_000)}分)。doLoginを叩かず回復待ち。`,
+          },
+          page,
+        );
         console.log(`[job] done  ${tag} (login cooldown ${Math.ceil(cdRemainMs / 60_000)}m -> retryable)`);
         return;
       }
@@ -885,15 +906,18 @@ async function handleJob(job: Job): Promise<void> {
       }
 
       if (loginResult.status === "captcha") {
-        await report({
-          job_id: job.id,
-          status: "captcha_detected",
-          error: "captcha at login",
-          block: {
-            until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
-            reason: "reCAPTCHA encountered during login",
+        await report(
+          {
+            job_id: job.id,
+            status: "captcha_detected",
+            error: "captcha at login",
+            block: {
+              until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+              reason: "reCAPTCHA encountered during login",
+            },
           },
-        });
+          page,
+        );
         console.log(`[job] done  ${tag} (captcha)`);
         return;
       }
@@ -916,13 +940,16 @@ async function handleJob(job: Job): Promise<void> {
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
         }
-        await report({
-          job_id: job.id,
-          status: isAuthLike ? "login_required" : "retryable_failed",
-          error: isThrottle
-            ? `${reason} (Akamaiログインスロットルの可能性。約${Math.ceil(loginCooldownRemainingMs(job.shop_id) / 60_000)}分クールダウン)`
-            : reason,
-        });
+        await report(
+          {
+            job_id: job.id,
+            status: isAuthLike ? "login_required" : "retryable_failed",
+            error: isThrottle
+              ? `${reason} (Akamaiログインスロットルの可能性。約${Math.ceil(loginCooldownRemainingMs(job.shop_id) / 60_000)}分クールダウン)`
+              : reason,
+          },
+          page,
+        );
         console.log(
           `[job] done  ${tag} (login failed -> ${
             isAuthLike ? "login_required" : "retryable_failed"
@@ -962,12 +989,18 @@ async function handleJob(job: Job): Promise<void> {
         salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
         shopName: (job as { shop_name?: string | null }).shop_name ?? null,
       });
-      await reportScraperResult(job, "push_blog", result, {
-        content_post_id: p.content_post_id ?? null,
-        ...(result.status === "ok"
-          ? { external_id: result.externalId ?? null }
-          : {}),
-      });
+      await reportScraperResult(
+        job,
+        "push_blog",
+        result,
+        {
+          content_post_id: p.content_post_id ?? null,
+          ...(result.status === "ok"
+            ? { external_id: result.externalId ?? null }
+            : {}),
+        },
+        page,
+      );
       return;
     }
 
@@ -1043,17 +1076,20 @@ async function handleJob(job: Job): Promise<void> {
         );
       } else if (result.status === "confirm_only") {
         // 確認画面まで照合 OK。ENABLE_PUSH=false のため登録せず手動確認に回す。
-        await report({
-          job_id: job.id,
-          job_type: "push_booking",
-          status: "manual_required",
-          booking_id: payload.booking_id,
-          error_code: "PUSH_DISABLED",
-          error:
-            "確認画面の照合まで成功しましたが、自動登録が無効 (SALONBOARD_ENABLE_PUSH=未設定) のため登録していません。SalonBoard で内容を確認のうえ手動登録してください。",
-          manual_required: true,
-          result_payload: result.confirmed,
-        });
+        await report(
+          {
+            job_id: job.id,
+            job_type: "push_booking",
+            status: "manual_required",
+            booking_id: payload.booking_id,
+            error_code: "PUSH_DISABLED",
+            error:
+              "確認画面の照合まで成功しましたが、自動登録が無効 (SALONBOARD_ENABLE_PUSH=未設定) のため登録していません。SalonBoard で内容を確認のうえ手動登録してください。",
+            manual_required: true,
+            result_payload: result.confirmed,
+          },
+          page,
+        );
         console.log(`[job] done  ${tag} (push_booking confirm_only -> manual_required)`);
       } else {
         // failed: manualRequired によって failed / manual_required を切り替える。
@@ -1063,30 +1099,33 @@ async function handleJob(job: Job): Promise<void> {
         const exhausted = job.attempts >= cap;
         const toManual = result.manualRequired || exhausted;
         const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
-        await report({
-          job_id: job.id,
-          job_type: "push_booking",
-          status: isCaptcha
-            ? "captcha_detected"
-            : toManual
-              ? "manual_required"
-              : // 一時的失敗扱いにできるのは SLOT_NOT_AVAILABLE / UNKNOWN のみ。
-                "retryable_failed",
-          booking_id: payload.booking_id,
-          error_code: result.errorCode,
-          error: result.reason,
-          manual_required: toManual,
-          error_capture_b64: (result as { errorCaptureB64?: string })
-            .errorCaptureB64,
-          ...(isCaptcha
-            ? {
-                block: {
-                  until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
-                  reason: "reCAPTCHA during push_booking",
-                },
-              }
-            : {}),
-        });
+        await report(
+          {
+            job_id: job.id,
+            job_type: "push_booking",
+            status: isCaptcha
+              ? "captcha_detected"
+              : toManual
+                ? "manual_required"
+                : // 一時的失敗扱いにできるのは SLOT_NOT_AVAILABLE / UNKNOWN のみ。
+                  "retryable_failed",
+            booking_id: payload.booking_id,
+            error_code: result.errorCode,
+            error: result.reason,
+            manual_required: toManual,
+            error_capture_b64: (result as { errorCaptureB64?: string })
+              .errorCaptureB64,
+            ...(isCaptcha
+              ? {
+                  block: {
+                    until: new Date(Date.now() + 6 * 60 * 60_000).toISOString(),
+                    reason: "reCAPTCHA during push_booking",
+                  },
+                }
+              : {}),
+          },
+          page,
+        );
         console.log(
           `[job] done  ${tag} (push_booking ${result.errorCode}: ${result.reason})`,
         );
@@ -1122,9 +1161,15 @@ async function handleJob(job: Job): Promise<void> {
               // 失効時の同一ジョブ内自己回復。
               relogin: makeRelogin(page, baseUrl, job.credentials),
             });
-      await reportScraperResult(job, "cancel_booking", result, {
-        booking_id: p.booking_id ?? null,
-      });
+      await reportScraperResult(
+        job,
+        "cancel_booking",
+        result,
+        {
+          booking_id: p.booking_id ?? null,
+        },
+        page,
+      );
       return;
     }
 
@@ -1136,7 +1181,7 @@ async function handleJob(job: Job): Promise<void> {
         baseUrl,
         enablePush: ENABLE_PUSH,
       });
-      await reportScraperResult(job, "push_shifts", result);
+      await reportScraperResult(job, "push_shifts", result, {}, page);
       return;
     }
 
@@ -1147,7 +1192,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId,
         shopName,
       });
-      await reportScraperResult(job, "push_photo_gallery", result);
+      await reportScraperResult(job, "push_photo_gallery", result, {}, page);
       return;
     }
 
@@ -1157,14 +1202,20 @@ async function handleJob(job: Job): Promise<void> {
         baseUrl,
         enableDelete: ENABLE_PUSH,
       });
-      await reportScraperResult(job, "delete_blog", result, {
-        content_post_id: p.content_post_id ?? null,
-        // external_id は ok 時のみ。confirm_only/failed で送ると Admin が
-        // 早期に削除済みと誤判定しうる (PC worker-process.cjs と同じ)。
-        ...(result.status === "ok"
-          ? { external_id: result.externalId ?? p.external_blog_id ?? null }
-          : {}),
-      });
+      await reportScraperResult(
+        job,
+        "delete_blog",
+        result,
+        {
+          content_post_id: p.content_post_id ?? null,
+          // external_id は ok 時のみ。confirm_only/failed で送ると Admin が
+          // 早期に削除済みと誤判定しうる (PC worker-process.cjs と同じ)。
+          ...(result.status === "ok"
+            ? { external_id: result.externalId ?? p.external_blog_id ?? null }
+            : {}),
+        },
+        page,
+      );
       return;
     }
 
@@ -1174,9 +1225,15 @@ async function handleJob(job: Job): Promise<void> {
         baseUrl,
         enablePost: ENABLE_PUSH,
       });
-      await reportScraperResult(job, "push_review_reply", result, {
-        review_import_id: p.review_import_id ?? null,
-      });
+      await reportScraperResult(
+        job,
+        "push_review_reply",
+        result,
+        {
+          review_import_id: p.review_import_id ?? null,
+        },
+        page,
+      );
       return;
     }
 
@@ -1242,9 +1299,15 @@ async function handleJob(job: Job): Promise<void> {
           throw e;
         }
       }
-      await reportScraperResult(job, job.job_type, result, {
-        external_id: p.external_id ?? null,
-      });
+      await reportScraperResult(
+        job,
+        job.job_type,
+        result,
+        {
+          external_id: p.external_id ?? null,
+        },
+        page,
+      );
       return;
     }
 
@@ -1306,14 +1369,17 @@ async function handleJob(job: Job): Promise<void> {
       // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
       // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
       if ((debug as { loggedOut?: boolean } | undefined)?.loggedOut) {
-        await report({
-          job_id: job.id,
-          job_type: "fetch_bookings",
-          status: "retryable_failed",
-          error: `session lost during bookings scrape (landedOn=${
-            (debug as { landedOn?: string })?.landedOn ?? "?"
-          })`,
-        } as unknown as CallbackBody);
+        await report(
+          {
+            job_id: job.id,
+            job_type: "fetch_bookings",
+            status: "retryable_failed",
+            error: `session lost during bookings scrape (landedOn=${
+              (debug as { landedOn?: string })?.landedOn ?? "?"
+            })`,
+          } as unknown as CallbackBody,
+          page,
+        );
         console.log(`[job] done  ${tag} (fetch_bookings session lost -> retryable)`);
         return;
       }
@@ -1360,18 +1426,21 @@ async function handleJob(job: Job): Promise<void> {
           code === "SHIFT_PATTERNS_PARSE" ||
           code === "SHIFT_PATTERNS_EMPTY" ||
           exhausted;
-        await report({
-          job_id: job.id,
-          job_type: "fetch_shift_patterns",
-          status: isCaptcha
-            ? "captcha_detected"
-            : noRetry
-              ? "manual_required"
-              : "retryable_failed",
-          error_code: code,
-          error: String(err?.message ?? e).slice(0, 500),
-          manual_required: noRetry,
-        } as unknown as CallbackBody);
+        await report(
+          {
+            job_id: job.id,
+            job_type: "fetch_shift_patterns",
+            status: isCaptcha
+              ? "captcha_detected"
+              : noRetry
+                ? "manual_required"
+                : "retryable_failed",
+            error_code: code,
+            error: String(err?.message ?? e).slice(0, 500),
+            manual_required: noRetry,
+          } as unknown as CallbackBody,
+          page,
+        );
         console.log(`[job] done  ${tag} (fetch_shift_patterns ${code})`);
       }
       return;
@@ -1440,18 +1509,21 @@ async function handleJob(job: Job): Promise<void> {
           const exhausted = job.attempts >= cap;
           const isCaptcha = code === "RECAPTCHA_REQUIRED";
           const noRetry = isCaptcha || exhausted;
-          await report({
-            job_id: job.id,
-            job_type: job.job_type,
-            status: isCaptcha
-              ? "captcha_detected"
-              : noRetry
-                ? "manual_required"
-                : "retryable_failed",
-            error_code: code,
-            error: String(err?.message ?? e).slice(0, 500),
-            manual_required: noRetry,
-          } as unknown as CallbackBody);
+          await report(
+            {
+              job_id: job.id,
+              job_type: job.job_type,
+              status: isCaptcha
+                ? "captcha_detected"
+                : noRetry
+                  ? "manual_required"
+                  : "retryable_failed",
+              error_code: code,
+              error: String(err?.message ?? e).slice(0, 500),
+              manual_required: noRetry,
+            } as unknown as CallbackBody,
+            page,
+          );
           console.log(`[job] done  ${tag} (${job.job_type} ${code})`);
         }
         return;
@@ -1460,16 +1532,21 @@ async function handleJob(job: Job): Promise<void> {
 
     // 未実装ジョブ: succeeded ではなく not_implemented
     // (残: fetch_sales = scrapers.cjs に scraper 未実装のためスキップ。PC にも無い)
-    await report({
-      job_id: job.id,
-      status: "not_implemented",
-      error: `${job.job_type} scraper not implemented`,
-      summary: `${job.job_type} not implemented (login ok)`,
-    });
+    await report(
+      {
+        job_id: job.id,
+        status: "not_implemented",
+        error: `${job.job_type} scraper not implemented`,
+        summary: `${job.job_type} not implemented (login ok)`,
+      },
+      page,
+    );
     console.log(`[job] done  ${tag} (not_implemented)`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[job] error ${tag}: ${msg}`);
+    // page はこの try スコープ内で宣言されるため catch では参照不可。失敗ショットは
+    // 各ハンドラ内の report(..., page) で per-page 添付済み。ここは最終防衛のグローバル。
     await report({ job_id: job.id, status: "retryable_failed", error: msg });
   } finally {
     await ctx?.close().catch(() => {});
