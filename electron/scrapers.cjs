@@ -7909,6 +7909,24 @@ async function downscaleJpegViaBlank(page, file, maxDim = 1280, quality = 0.8) {
  * 完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B...)が入るかで判定する。
  * 戻り値: { ok, imageId?, reason? }
  */
+// ★_abck スコアを上げる「人間らしいマウス徘徊」(2026-07-11 画像アップロードERR_ABORTED/通信失敗対策)。
+// CNB スタイル画像の doUpload は Akamai に中断(ERR_ABORTED=「通信に失敗しました」)されやすい。
+// トリガー操作前に呼んでセンサースコアを上げ、アップロードPOSTが弾かれる確率を下げる。
+// best-effort・例外を投げない。
+async function humanizeMouseWander(page) {
+  const jit = (a, b) => a + Math.floor(Math.random() * (b - a));
+  try {
+    const vp = page.viewportSize() || { width: 1280, height: 800 };
+    const moves = jit(3, 6);
+    for (let i = 0; i < moves; i++) {
+      await page.mouse.move(jit(80, vp.width - 80), jit(120, vp.height - 120), { steps: jit(8, 22) });
+      await page.waitForTimeout(jit(90, 380));
+      if (i === 1) { await page.mouse.wheel(0, jit(120, 340)).catch(() => {}); await page.waitForTimeout(jit(180, 520)); }
+      if (i === 3) { await page.mouse.wheel(0, jit(-240, -80)).catch(() => {}); await page.waitForTimeout(jit(140, 460)); }
+    }
+  } catch (_e) { /* best-effort */ }
+}
+
 async function uploadHairStyleFrontImage(page, file) {
   const idHidden = page.locator('input#FRONT_IMG_ID, input[name="FRONT_IMG_ID"]').first();
   const before = await idHidden.inputValue().catch(() => '');
@@ -7959,6 +7977,8 @@ async function uploadHairStyleFrontImage(page, file) {
   // ★エステで実証済みの方式に統一: jQuery 委譲ハンドラ(img_upload_modal_view)で
   //   モーダルが開くため、普通の click だけだとハンドラが走らずモーダルが開かない。
   //   FRONT 画像へ本物の MouseEvent(mousedown/mouseup/click)を dispatch して確実に発火させる。
+  // ★アップロードPOST(doUpload)前に人間化して _abck スコアを上げる(ERR_ABORTED/通信失敗対策)。
+  await humanizeMouseWander(page);
   await trigger.scrollIntoViewIfNeeded({ timeout: 4_000 }).catch(() => {});
   // ★ERR_ABORTED 根治: モーダルは JS委譲ハンドラ(img_upload_modal_view)が AJAX GET で開く。
   //   従来は evaluate の MouseEvent dispatch と playwright click を「両方」撃っていたため
