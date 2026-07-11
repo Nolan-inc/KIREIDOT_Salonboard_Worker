@@ -7512,9 +7512,27 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
 
   // file chooser で入らなかったらモーダル/直 input にセット (直接POSTが使えない時のフォールバック)。
   if (!chooserDone) {
-    await page.waitForTimeout(700);
-    const fileInput = page.locator('input.jscImageUploaderModalInput, input[type="file"]:visible, .modal input[type="file"], input[type="file"]').first();
-    if ((await fileInput.count().catch(() => 0)) > 0) {
+    // ★モーダル(#imgUploadForm)は click 後に AJAX で開くため即座には現れない。
+    //   旧実装は 700ms 固定待ちで、AJAX 完了前に no_file_input で諦めていた(郡山 hair で多発)。
+    //   → file input を最大8秒ポーリング。現れなければトリガーを一度だけ再クリックして再度待つ
+    //   (click 取りこぼし / ログイン後モーダルが一瞬被さって初回クリックを奪ったケースの保険)。
+    const fileSel =
+      'input.jscImageUploaderModalInput, #imgUploadForm input[type="file"], .modal input[type="file"], input[type="file"]:visible, input[type="file"]';
+    let fileInput = page.locator(fileSel).first();
+    let appeared = await fileInput
+      .waitFor({ state: 'attached', timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!appeared) {
+      diag.push({ modal_reclick: true });
+      await trigger.click({ timeout: 4_000, force: true }).catch(() => {});
+      fileInput = page.locator(fileSel).first();
+      appeared = await fileInput
+        .waitFor({ state: 'attached', timeout: 6_000 })
+        .then(() => true)
+        .catch(() => false);
+    }
+    if (appeared) {
       await fileInput.setInputFiles(file, { timeout: 8_000 }).catch(() => {});
       await page.waitForTimeout(1200);
       // モーダルの「登録する」(input.jscImageUploaderModalSubmitButton)。
