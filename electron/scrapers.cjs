@@ -1426,6 +1426,18 @@ async function scrapeBookings(page, opts = {}) {
   ).length;
   if (stillNull > 0) diag.push(`duration未確定(残): ${stillNull} 件`);
 
+  // ★SB上の実際の設備(ベッド)を予約詳細の「設備」行から取得する (2026-07-11 向井さん指摘)。
+  //   HotPepper 予約はメールに席情報が無く、一覧にも設備列が無いため、KD側が自動割当していた。
+  //   → 予約詳細ページ(予約情報テーブルの「設備」行=「ベッド１ 14:30〜15:45」)から読む。
+  //   全件は重いので「未来 & 設備未取得」を近い順に最大 cap 件だけ。数回のfetchで backfill。
+  let equipFixed = 0;
+  try {
+    equipFixed = await enrichEquipmentFromDetail(page, rows, opts.baseUrl, { cap: 25 });
+    diag.push(`設備取得(detail): ${equipFixed} 件`);
+  } catch (e) {
+    diag.push(`設備取得(detail) 失敗: ${e?.message ?? e}`);
+  }
+
   return {
     rows,
     debug: {
@@ -1435,6 +1447,7 @@ async function scrapeBookings(page, opts = {}) {
       sampleSkipped,
       durationFixed,
       durationFixedDetail,
+      equipFixed,
       durationStillNull: stillNull,
       range: `${range.fromStr} 〜 ${range.toStr}`,
       diag,
@@ -2424,6 +2437,68 @@ async function checkReserveStatusById(page, reserveId, opts = {}) {
   } catch (_e) {
     return 'unknown';
   }
+}
+
+// 予約詳細ページ(予約情報テーブルの「設備」行)から、その予約に割り当てられた設備名
+// (例「ベッド１」)を読む。HotPepper 予約はメール/一覧に席情報が無いため、これが
+// 「SBが実際に確保している席」を知る確実な経路 (2026-07-11 向井さん指摘・実DOM確認済)。
+// 戻り値: 設備名 (時刻を除いた先頭) / 未割当・取得不可は null。
+async function readReservationEquipmentName(page, reserveId, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  if (!reserveId) return null;
+  // ネット予約(BF/BE)は net、電話/外部(YG)は ext を優先。
+  const detailCandidates = /^(BF|BE)/i.test(reserveId)
+    ? [`/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`, `/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`]
+    : [`/KLP/reserve/ext/extReserveDetail/?reserveId=${reserveId}`, `/KLP/reserve/net/reserveDetail/?reserveId=${reserveId}`];
+  for (const path of detailCandidates) {
+    try {
+      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    } catch (_e) { continue; }
+    if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return null;
+    const res = await page.evaluate(() => {
+      const norm = (s) => (s || '').replace(/[\s　]/g, '');
+      const cells = Array.from(document.querySelectorAll('th, td'));
+      for (let i = 0; i < cells.length; i++) {
+        if (norm(cells[i].textContent) === '設備') {
+          const row = cells[i].closest('tr');
+          const sibs = row ? Array.from(row.querySelectorAll('td, th')) : [];
+          const rawVal = sibs.length ? (sibs[sibs.length - 1].textContent || '') : (cells[i + 1]?.textContent || '');
+          // "ベッド１ 14:30 〜 15:45" → 時刻以降を落として設備名だけ。
+          const name = String(rawVal).replace(/[\s　]*\d{1,2}:\d{2}[\s\S]*$/, '').replace(/[\s　]+/g, '').trim();
+          return { found: true, name: name || null };
+        }
+      }
+      const hasInfo = /予約情報|予約番号/.test(document.body?.innerText || '');
+      return { found: false, hasInfo };
+    }).catch(() => ({ found: false }));
+    if (res.found) return res.name;
+    if (res.hasInfo) return null; // 詳細は開けたが設備行なし = 未割当
+  }
+  return null;
+}
+
+// rows のうち「未来 & 設備未取得 & reserveId形式」を近い順に最大 cap 件、予約詳細から
+// 設備名を読んで row.equipment_name に入れる。全件は重い/Akamai負荷のため上限を掛け、
+// 数回の fetch で backfill する。過去予約の席は同期不要(将来の競合検出に効くのは未来分)。
+async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
+  const cap = Number.isFinite(opts.cap) ? opts.cap : 25;
+  const now = Date.now();
+  const targets = (rows || [])
+    .filter((r) =>
+      !r.equipment_name &&
+      r.status !== 'cancelled' &&
+      /^(YG|BF|BE)\d+/i.test(String(r.external_id || '')) &&
+      Number.isFinite(Date.parse(r.scheduled_at)) &&
+      Date.parse(r.scheduled_at) >= now - 86_400_000)
+    .sort((a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at))
+    .slice(0, cap);
+  let read = 0;
+  for (const r of targets) {
+    const name = await readReservationEquipmentName(page, r.external_id, { baseUrl }).catch(() => null);
+    if (name) { r.equipment_name = name; read++; }
+  }
+  if (read) console.log(`[scrape] 設備を予約詳細から取得 ${read}/${targets.length}件`);
+  return read;
 }
 
 // =====================================================================
