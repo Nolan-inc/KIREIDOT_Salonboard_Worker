@@ -5526,13 +5526,38 @@ async function scrapeSalonInfo(page, opts = {}) {
           const e = document.querySelector(`[name="${n}"]`);
           return e ? norm(e.value) : null;
         };
-        // 道案内・アクセス: name に access/direction/root/guide を含む textarea/input(best-effort)。
+        // 道案内・アクセス: ① name ヒント ② ラベル「道案内/アクセス」を持つ行の隣接値、で拾う。
+        //   ※ salonEdit には "9.5/40" 等の掲載枠スコア表示があり誤検出しやすい。
+        //     住所/道案内らしい「日本語を含む・スコア形式でない・十分長い」値のみ採用する。
+        const looksLikeAccess = (s) =>
+          !!s &&
+          s.length >= 8 &&
+          /[぀-ヿ一-鿿ぁ-ん]/.test(s) && // かな/漢字を含む
+          !/^[\d.\/\s]+$/.test(s) && // "9.5/40" 等の数値スコアを除外
+          !/^\d+(\.\d+)?\s*\/\s*\d+$/.test(s);
         let access = null;
         for (const el of Array.from(document.querySelectorAll('textarea, input[type="text"]'))) {
           const key = el.name || el.id || '';
-          if (/access|direction|root|guide|douan/i.test(key) && norm(el.value)) {
-            access = norm(el.value).slice(0, 600);
+          const val = norm(el.value);
+          if (/access|direction|root|guide|douan/i.test(key) && looksLikeAccess(val)) {
+            access = val.slice(0, 600);
             break;
+          }
+        }
+        if (!access) {
+          const labels = Array.from(document.querySelectorAll('th, td, dt, label, p'));
+          for (const lb of labels) {
+            const t = norm(lb.textContent);
+            if (!/道案内|アクセス/.test(t) || t.length > 20) continue;
+            const row = lb.closest('tr, dl, .mod_form, .formArea') || lb.parentElement;
+            if (!row) continue;
+            const field = row.querySelector('textarea, input[type="text"]');
+            if (field && looksLikeAccess(norm(field.value))) { access = norm(field.value).slice(0, 600); break; }
+            for (const c of Array.from(row.querySelectorAll('td, dd'))) {
+              const cv = norm(c.textContent);
+              if (cv !== t && looksLikeAccess(cv) && !/道案内|アクセス/.test(cv)) { access = cv.slice(0, 600); break; }
+            }
+            if (access) break;
           }
         }
         return {
@@ -5613,6 +5638,20 @@ async function scrapeKodawari(page, opts = {}) {
         let pageId = null;
         const hid = tr.querySelector('input[name*="kodawariPageId"]');
         if (hid && hid.value) pageId = hid.value;
+        // 行内の onclick / href / data-* / value に埋まった pageId も拾う(詳細リンク等)。
+        if (!pageId) {
+          for (const el of Array.from(tr.querySelectorAll('a,button,input,[onclick],[data-id],[data-page-id]'))) {
+            const hay = [
+              el.getAttribute && el.getAttribute('onclick'),
+              el.getAttribute && el.getAttribute('href'),
+              el.getAttribute && el.getAttribute('data-id'),
+              el.getAttribute && el.getAttribute('data-page-id'),
+              el.value,
+            ].filter(Boolean).join(' ');
+            const mm = hay.match(/kodawariPageId["'\s:=(]+["']?(\d{3,})/i) || hay.match(/\bkodawariPageEdit\(['"]?(\d{3,})/i);
+            if (mm) { pageId = mm[1]; break; }
+          }
+        }
         if (!pageId) {
           const mm = (tr.innerHTML || '').match(/kodawariPageId["'\s:=]+["']?(\d{3,})/i);
           if (mm) pageId = mm[1];
