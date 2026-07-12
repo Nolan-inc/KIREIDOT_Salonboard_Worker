@@ -1180,8 +1180,16 @@ async function handleJob(job: Job): Promise<void> {
             }
           }
           const popup = await page
-            .evaluate(() => {
+            .evaluate((needle: string) => {
               const clip = (s: string, n: number) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+              // ポップアップ(.mod_popup_02:visible)の全文 + reserveId/booking_id の在処。
+              const pops = Array.from(document.querySelectorAll(".mod_popup_02")).filter(
+                (el) => (el as HTMLElement).offsetParent !== null,
+              );
+              const popupText = pops.map((el) => clip((el as HTMLElement).innerText || "", 1200)).join(" || ");
+              const popupHtml = pops.map((el) => (el as HTMLElement).innerHTML || "").join("");
+              const needleInPopupHtml = needle ? popupHtml.includes(needle) : false;
+              const needleInPopupText = needle ? popupText.includes(needle) : false;
               const btns = Array.from(document.querySelectorAll("a,button,input,[onclick]"))
                 .map((el) => {
                   const e = el as HTMLInputElement;
@@ -1194,10 +1202,10 @@ async function handleJob(job: Job): Promise<void> {
                     href: clip(e.getAttribute("href") || "", 140),
                   };
                 })
-                .filter((x) => /キャンセル|cancel|詳細|変更|メモ|お客様|カルテ|reserveDetail|fnc_|jsc/i.test(x.t + x.onclick + x.href + x.id + x.cls))
-                .slice(0, 80);
-              return { url: location.href, title: document.title, btns };
-            })
+                .filter((x) => (x.t && x.t.length > 0) || /btn|submit|Button|jsi|fnc_/i.test(x.id + x.cls + x.tag))
+                .slice(0, 90);
+              return { url: location.href, title: document.title, btns, popupText, needleInPopupHtml, needleInPopupText };
+            }, probe.findId || "")
             .catch((e) => ({ error: String(e) }));
           // findId: 予約ブロックが reserveId をどう埋めているか(onclick/data/id/href)を探す。
           let idHits: unknown = null;

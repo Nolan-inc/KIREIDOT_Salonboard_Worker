@@ -4739,24 +4739,20 @@ async function cancelViaSchedulePopup(page, p, opts = {}) {
 // =====================================================================
 async function cancelBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
-  const enableCancel = opts.enableCancel !== false; // 既定は実行
   const p = payload || {};
+  // dry_run(payload)なら確定せず確認のみ(実機の誤爆防止テスト用)。
+  const enableCancel = opts.enableCancel !== false && !(p && p.dry_run);
   const fail = (reason, errorCode, manualRequired) => {
     captureErrorShot(page, `cancel_fail_${errorCode || 'err'}`);
     return { status: 'failed', reason, errorCode, manualRequired };
   };
 
-  // ★優先: スケジュールのポップアップ経由キャンセル(詳細直リンクがSB遮断のため #fnc_cancel に
-  //   到達できず失敗するのを回避)。検証に通ったブロックのみ操作。失敗時のみ従来の詳細方式へ。
-  try {
-    const sp = await cancelViaSchedulePopup(page, p, opts);
-    if (sp && sp.ok) {
-      if (sp.confirmOnly) return { status: 'confirm_only' };
-      return { status: 'ok', externalId: (p.external_booking_id || '').trim() || null, viaSchedule: true, recoveredReserveId: p._recoveredReserveId || null };
-    }
-    // sp.ok=false は「スケジュールで特定不可」→ 従来の詳細ページ方式にフォールバック。
-  } catch (_e) { /* フォールバックへ */ }
-
+  // ★方針(2026-07-12 向井さん指摘で判明): 予約詳細は reserveId で一意に開けるため誤爆せず、
+  //   キャンセルボタンの ID がネット予約(HotPepper/BF)と電話予約(YG/ext)で違うだけだった:
+  //     電話/ext : <a id="fnc_cancel">キャンセルにする</a>
+  //     ネット/net: <a id="jsiCancelFeeConfirmButton">キャンセルにする</a>
+  //   → 詳細ページ方式を主とし、両IDを許容 + キャンセル料ダイアログ(#jsiNotCollectCancelFee)を処理。
+  //   スケジュールのポップアップ経由(cancelViaSchedulePopup)は、reserveId 特定不可時の最終手段に回す。
   let reserveId = (p.external_booking_id || '').trim();
 
   // reserveId が無い場合 (KIREIDOT で作成→push したが reserveId 未回収の予約等) は、
@@ -4814,8 +4810,8 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     for (const path of detailCandidates) {
       await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
       // ★高速化: networkidleを待たず、キャンセルボタンが出たら即進む。
-      await page.waitForSelector('#fnc_cancel', { timeout: 10_000 }).catch(() => {});
-      if ((await page.locator('#fnc_cancel').count().catch(() => 0)) > 0) return true;
+      await page.waitForSelector('#fnc_cancel, #jsiCancelFeeConfirmButton', { timeout: 10_000 }).catch(() => {});
+      if ((await page.locator('#fnc_cancel, #jsiCancelFeeConfirmButton').count().catch(() => 0)) > 0) return true;
       // 冪等: 既にキャンセル済みの詳細ページ(ボタン無し)は有効。エラーページのみ次候補へ。
       const t = (await page.title().catch(() => '')) || '';
       if (!/エラー/.test(t)) {
@@ -4867,30 +4863,45 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
 
   // 既にキャンセル済みなら成功扱い (冪等)
   const detailText = (await page.locator('body').innerText().catch(() => '')) || '';
-  if (/ステータス[\s\S]{0,30}(キャンセル|取消)/.test(detailText) && (await page.locator('#fnc_cancel').count().catch(() => 0)) === 0) {
+  // キャンセルボタンは 電話/ext=#fnc_cancel、ネット/net=#jsiCancelFeeConfirmButton の2系統。
+  const CANCEL_BTN = '#fnc_cancel, #jsiCancelFeeConfirmButton';
+  if (/ステータス[\s\S]{0,30}(キャンセル|取消)/.test(detailText) && (await page.locator(CANCEL_BTN).count().catch(() => 0)) === 0) {
     return { status: 'ok', externalId: reserveId, recoveredReserveId: p._recoveredReserveId || null };
   }
 
-  const cancelBtn = page.locator('#fnc_cancel').first();
+  const cancelBtn = page.locator(CANCEL_BTN).first();
   if ((await cancelBtn.count().catch(() => 0)) === 0) {
-    return fail(`キャンセルボタン(#fnc_cancel)が見つかりませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
+    return fail(`キャンセルボタン(${CANCEL_BTN})が見つかりませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
   if (!enableCancel) {
     return { status: 'confirm_only' };
   }
 
-  // 2) 「キャンセルにする」をクリック → HTML ダイアログを待つ
-  // (念のためネイティブ confirm が出るケースにも accept ハンドラを張る)
+  // 2) 「キャンセルにする」をクリック。ネット予約はキャンセル料ダイアログ
+  //    (#jsiNotCollectCancelFee=請求しない / #jsiCollectCancelFee=請求する)が出る → 請求しない。
+  //    電話予約は HTML ダイアログの「はい」(.accept)。両方に対応。ネイティブ confirm も accept。
   let nativeDialogAccepted = false;
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   let confirmClicked = false;
   try {
     await cancelBtn.click({ timeout: 12_000 }).catch(() => {});
-    // 3) ページ内ダイアログの「はい」(.accept) を待ってクリック
-    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
-    await yesBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    await page.waitForTimeout(1_200);
+    // 3a) キャンセル料ダイアログ(ネット予約) → 「請求しない」。
+    const noFee = page.locator('a#jsiNotCollectCancelFee:visible').first();
+    await noFee.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+    if ((await noFee.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        noFee.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmClicked = true;
+      await page.waitForTimeout(1_400);
+    }
+    // 3b) HTML ダイアログの「はい」(.accept)(電話予約 or 追加確認)。
+    const yesBtn = page.locator('a.accept:visible, .buttons a.accept:visible').first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
     if ((await yesBtn.count().catch(() => 0)) > 0) {
       await Promise.all([
         page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
