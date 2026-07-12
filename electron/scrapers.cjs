@@ -1465,7 +1465,9 @@ async function scrapeBookings(page, opts = {}) {
   //   全件は重いので「未来 & 設備未取得」を近い順に最大 cap 件だけ。数回のfetchで backfill。
   let equipFixed = 0;
   try {
-    equipFixed = await enrichEquipmentFromDetail(page, rows, opts.baseUrl, { cap: 25 });
+    equipFixed = await enrichEquipmentFromDetail(page, rows, opts.baseUrl, {
+      cap: 25, genre: opts.genre, salonId: opts.salonId, shopName: opts.shopName,
+    });
     diag.push(`設備取得(detail): ${equipFixed} 件`);
   } catch (e) {
     diag.push(`設備取得(detail) 失敗: ${e?.message ?? e}`);
@@ -2079,8 +2081,11 @@ async function scrapeMenus(page, opts = {}) {
 //   [5] チェック  [6] 詳細  [7] 非掲載/削除
 const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
 
-async function scrapeCoupons(page) {
-  await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+async function scrapeCoupons(page, opts = {}) {
+  // 掲載管理はジャンルで URL 接頭辞が違う(hair=/CNB/、他=/CNK/)。genre を受けないと
+  // hair 店でも /CNK/ を見て 0 件になる(ADER 開発店で判明 2026-07-12)。
+  const couponListUrl = draftUrl(opts.genre, 'couponList', opts.baseUrl);
+  await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // 一覧テーブルが描画されるまで少し待つ (couponId hidden が現れるか、最大8秒)
   await page
@@ -2151,8 +2156,8 @@ async function scrapeCoupons(page) {
   for (const it of baseItems) {
     try {
       // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
-      if (!page.url().includes('/CNK/draft/couponList')) {
-        await page.goto(COUPON_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      if (!page.url().includes('/draft/couponList')) {
+        await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
         await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
       }
       // couponEditForm に couponId をセットして submit
@@ -2515,6 +2520,8 @@ async function readReservationEquipmentName(page, reserveId, opts = {}) {
 // 数回の fetch で backfill する。過去予約の席は同期不要(将来の競合検出に効くのは未来分)。
 async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
   const cap = Number.isFinite(opts.cap) ? opts.cap : 25;
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const base = baseUrl || 'https://salonboard.com/';
   const now = Date.now();
   const targets = (rows || [])
     .filter((r) =>
@@ -2525,9 +2532,29 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
       Date.parse(r.scheduled_at) >= now - 86_400_000)
     .sort((a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at))
     .slice(0, cap);
+  if (targets.length === 0) return 0;
+  // ★2026-07-02以降、SB は素の reserveDetail 直リンクを汎用エラー(KPCL009V01)で弾く
+  //   (キャンセルと同事象・task#15)。一覧/スケジュールを一度開いて文脈(トークン/Cookie)を
+  //   作ってから詳細を開くと通る。これをしないと HotPepper(BF)予約の設備がほぼ全件0件になる。
+  const establishCtx = async () => {
+    try {
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      const ctxUrl = genre === 'hair'
+        ? new URL('/CLP/bt/schedule/salonSchedule/', base).toString()
+        : new URL('/KLP/reserve/reserveList/init', base).toString();
+      await page.goto(ctxUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      await page.waitForTimeout(600);
+    } catch (_e) { /* best-effort */ }
+  };
+  await establishCtx();
   let read = 0;
   for (const r of targets) {
-    const name = await readReservationEquipmentName(page, r.external_id, { baseUrl }).catch(() => null);
+    let name = await readReservationEquipmentName(page, r.external_id, { baseUrl: base }).catch(() => null);
+    if (!name) {
+      // 文脈切れ/直リンク遮断で弾かれた可能性 → 文脈を作り直して1回だけ再試行。
+      await establishCtx();
+      name = await readReservationEquipmentName(page, r.external_id, { baseUrl: base }).catch(() => null);
+    }
     if (name) { r.equipment_name = name; read++; }
   }
   if (read) console.log(`[scrape] 設備を予約詳細から取得 ${read}/${targets.length}件`);
@@ -3678,15 +3705,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
-  // ★開始時刻を過ぎた予約は SalonBoard の最終確定(doComplete)が通らない。
-  //   実測(2026-07-05 郡山): 09:00の当日予約を 09:04/09:11 に登録しようとして
-  //   「まだ登録されていません」で失敗。過去時刻は何度再試行しても永遠に成功しないため、
-  //   フォーム操作に入る前にここで明確に弾き、無駄な再試行(と誤解を招く「容量超過/設備不足」)を避ける。
+  // ★開始時刻を大きく過ぎた予約は SalonBoard の最終確定(doComplete)が通らない。
+  //   ただし SalonBoard は開始から約1時間以内の枠までは登録可能(運用実績)。そのため
+  //   「開始から1時間より前」の枠だけを弾き、直近1時間以内の当日枠は登録を試みる。
+  //   (過去実測 2026-07-05 郡山で 09:04/09:11 が失敗したのは別要因の可能性があり、
+  //    ここでは1時間グレースを設ける。)
   //   scheduled_at は JST ISO(+09:00) の絶対時刻なので、Date で now と直接比較できる(TZ非依存)。
+  const PAST_GRACE_MS = 60 * 60 * 1000; // 開始から1時間まで許容
   const startMs = new Date(p.scheduled_at).getTime();
-  if (Number.isFinite(startMs) && startMs < Date.now()) {
+  if (Number.isFinite(startMs) && startMs < Date.now() - PAST_GRACE_MS) {
     return fail(
-      `予約の開始時刻(${p.scheduled_at})を過ぎているため SalonBoard に登録できません(過去の時間枠は登録不可)。当日・過去分の予約は SalonBoard へ直接ご登録ください。`,
+      `予約の開始時刻(${p.scheduled_at})が1時間以上前のため SalonBoard に登録できません。当日・過去分の予約は SalonBoard へ直接ご登録ください。`,
       'BOOKING_TIME_PAST',
       true,
     );
@@ -5024,6 +5053,17 @@ const EQUIP_LIST_URL = 'https://salonboard.com/CNK/set/equipList/';
 const STYLIST_LIST_URL = 'https://salonboard.com/CNB/draft/stylistList/';
 const STYLE_LIST_URL = 'https://salonboard.com/CNB/draft/styleList/';
 
+// 掲載管理(draft)のパス接頭辞はジャンルで異なる:
+//   エステ/ネイル/まつげ = /CNK/draft/... 、美容室(hair) = /CNB/draft/...
+//   (実機URL 2026-07-12 ユーザ提供: 美容室は salon/menu/kodawari/special/coupon すべて /CNB/draft/)
+//   これを付けずに /CNK/ 固定で hair店を fetch すると全て 0件になる(ADER 開発店/郡山で判明)。
+function draftPrefix(genre) {
+  return genre === 'hair' ? 'CNB' : 'CNK';
+}
+function draftUrl(genre, page, baseUrl) {
+  return new URL(`/${draftPrefix(genre)}/draft/${page}`, baseUrl || 'https://salonboard.com/').toString();
+}
+
 /**
  * 美容室「スタイリスト掲載情報一覧」(/CNB/draft/stylistList/) を取得する。
  * エステの scrapeStaff の hair 版。出力 row 形は sendStaff 互換 (external_id/name/...)。
@@ -5275,7 +5315,7 @@ async function scrapeStyles(page, opts = {}) {
 async function scrapePhotoGallery(page, opts = {}) {
   const MAX_ITEMS = 100;
   let url;
-  try { url = new URL('/CNK/draft/photoGalleryEdit', 'https://salonboard.com').toString(); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
+  try { url = draftUrl(opts.genre, 'photoGalleryEdit', opts.baseUrl); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
@@ -5516,7 +5556,7 @@ async function scrapeSalonInfo(page, opts = {}) {
   try {
     await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
     await page
-      .goto(new URL('/CNK/draft/salonEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      .goto(draftUrl(opts.genre, 'salonEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 })
       .catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
     profile = await page
@@ -5614,7 +5654,7 @@ async function pushSalonProfileViaForm(page, payload, opts = {}) {
 
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
   await page
-    .goto(new URL('/CNK/draft/salonEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    .goto(draftUrl(opts.genre, 'salonEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 })
     .catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
@@ -5726,7 +5766,7 @@ async function pushKodawariViaForm(page, payload, opts = {}) {
     return fail(`こだわりの pageId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
   }
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-  await page.goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.goto(draftUrl(opts.genre, 'kodawariList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
   // 編集ページを開く: 行の編集リンク onclick=kodawariListEdit(event,'<pageId>') を実クリックし、
   //   SB側のネイティブハンドラに委ねる。フォーム手動 submit は onsubmit ハンドラ(modified 等の
@@ -5835,7 +5875,7 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
   }
   const wantPublished = p.is_published !== false;
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-  await page.goto(new URL('/CNK/draft/specialList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.goto(draftUrl(opts.genre, 'specialList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
   if ((await page.locator('form#specialListPresentForm, [name="specialId"]').count().catch(() => 0)) === 0) {
     const cap = await captureScrapeDebug(page, 'feature', 'no_form', { diagnostics: { url: page.url() } });
@@ -5915,7 +5955,7 @@ async function scrapeKodawari(page, opts = {}) {
   // グループ店舗(1ログイン複数サロン)は先にサロンを選ぶ。
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
   await page
-    .goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), {
+    .goto(draftUrl(opts.genre, 'kodawariList', baseUrl), {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     })
@@ -5979,7 +6019,7 @@ async function scrapeKodawari(page, opts = {}) {
       try {
         // kodawariEdit は POST 遷移(kodawariPageEditForm に pageId を入れて submit)。
         //   一覧に戻り該当フォームを submit して編集ページを開く(GET は空になりがち)。
-        await page.goto(new URL('/CNK/draft/kodawariList', baseUrl).toString(), {
+        await page.goto(draftUrl(opts.genre, 'kodawariList', baseUrl), {
           waitUntil: 'domcontentloaded', timeout: 20_000,
         }).catch(() => {});
         await page.waitForTimeout(300);
@@ -6048,7 +6088,7 @@ async function scrapeFeature(page, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
   await page
-    .goto(new URL('/CNK/draft/specialList', baseUrl).toString(), {
+    .goto(draftUrl(opts.genre, 'specialList', baseUrl), {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     })
@@ -7083,7 +7123,9 @@ async function postReviewReplyViaForm(page, payload, opts = {}) {
 async function scrapeBlogs(page, opts = {}) {
   // 詳細ページから本文を取得する最大件数 (順次アクセスのため負荷に注意)
   const maxDetails = Number.isFinite(opts.maxDetails) ? opts.maxDetails : 60;
-  await page.goto(BLOG_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  // ブログ一覧もジャンルで異なる: hair=/CLP/bt/blog/blogList/、エステ=/KLP/blog/blogList/。
+  const blogListUrl = `https://salonboard.com${reservePathRoot(opts.genre)}/blog/blogList/`;
+  await page.goto(blogListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   // ----------------------------------------------------------------
@@ -7990,7 +8032,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
   const caption = (p.caption && String(p.caption).trim()) || '';
 
   let formUrl;
-  try { formUrl = new URL('/CNK/draft/photoGalleryEdit', baseUrl).toString(); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
+  try { formUrl = draftUrl(opts.genre, 'photoGalleryEdit', baseUrl); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
   await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
@@ -9878,7 +9920,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
   const content = p.content ?? p.content_explanation ?? null;
 
-  await page.goto(new URL('/CNK/draft/couponList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -9944,7 +9986,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
   // 送信後に couponEdit を再取得し couponName が保存されているか確認 (couponList→couponEditForm submit)
-  await page.goto(new URL('/CNK/draft/couponList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   await page.evaluate((couponId) => {
     const form = document.querySelector('#couponEditForm');
