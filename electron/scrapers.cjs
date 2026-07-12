@@ -4887,26 +4887,33 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   let confirmClicked = false;
   try {
     await cancelBtn.click({ timeout: 12_000 }).catch(() => {});
-    await page.waitForTimeout(1_200);
-    // 3a) キャンセル料ダイアログ(ネット予約) → 「請求しない」。
+    await page.waitForTimeout(1_500);
+    // 3a) キャンセル料ダイアログ(出る場合)→「請求しない」。ネット予約は既定で
+    //     collectCancelFee=false のまま reserveCancel(キャンセルメール記入)へ遷移する。
     const noFee = page.locator('a#jsiNotCollectCancelFee:visible').first();
-    await noFee.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
     if ((await noFee.count().catch(() => 0)) > 0) {
-      await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-        noFee.click({ timeout: 10_000 }).catch(() => {}),
-      ]);
+      await Promise.all([page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}), noFee.click({ timeout: 10_000 }).catch(() => {})]);
       confirmClicked = true;
       await page.waitForTimeout(1_400);
     }
-    // 3b) HTML ダイアログの「はい」(.accept)(電話予約 or 追加確認)。
+    // 3b) ネット予約(HotPepper): reserveCancel(キャンセルメール記入)の「送信メールを確認する」
+    //     (#sendMailConfirm)でメール送信=キャンセル確定。ネイティブ confirm は onDialog で accept。
+    const sendMail = page.locator('a#sendMailConfirm, #sendMailConfirm').first();
+    if ((await sendMail.count().catch(() => 0)) > 0) {
+      await Promise.all([page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {}), sendMail.click({ timeout: 10_000 }).catch(() => {})]);
+      confirmClicked = true;
+      await page.waitForTimeout(1_800);
+      // 送信確認の最終ボタン(モーダルの「送信する」/「はい」)があれば押す。
+      const finalSend = page.locator('a.accept:visible, a:visible:has-text("送信する"), a:visible:has-text("はい"), input[type="submit"][value*="送信"]:visible, a.jscExecuteButton:visible').first();
+      if ((await finalSend.count().catch(() => 0)) > 0) {
+        await Promise.all([page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {}), finalSend.click({ timeout: 10_000 }).catch(() => {})]);
+        await page.waitForTimeout(1_500);
+      }
+    }
+    // 3c) 電話/ext予約 or 追加確認: HTML ダイアログの「はい」(.accept)。
     const yesBtn = page.locator('a.accept:visible, .buttons a.accept:visible').first();
-    await yesBtn.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
     if ((await yesBtn.count().catch(() => 0)) > 0) {
-      await Promise.all([
-        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
-      ]);
+      await Promise.all([page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}), yesBtn.click({ timeout: 10_000 }).catch(() => {})]);
       confirmClicked = true;
       await page.waitForTimeout(1500);
     }
@@ -4921,8 +4928,9 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   // 4) 検証: 完了表示 or ステータスがキャンセルになったか
   const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
   const looksCancelled =
-    /キャンセルしました|キャンセルが完了|キャンセルを受け付け|取り消しました|キャンセル済/.test(bodyText) ||
-    /ステータス[\s\S]{0,30}(キャンセル|取消)/.test(bodyText);
+    /キャンセルしました|キャンセルが完了|キャンセルを受け付け|取り消しました|キャンセル済|キャンセルになりました|キャンセルメール/.test(bodyText) ||
+    /ステータス[\s\S]{0,30}(キャンセル|取消)/.test(bodyText) ||
+    /\/reserveCancel\//.test(page.url());
   const looksError = /エラー|失敗|できませんでした/.test(bodyText) && !looksCancelled;
 
   if (looksError) {
