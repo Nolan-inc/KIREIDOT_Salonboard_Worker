@@ -1156,6 +1156,81 @@ async function handleJob(job: Job): Promise<void> {
           dump.push({ requested: u, error: String(e) });
         }
       }
+      // ★interactiveプローブ: スケジュール上の予約ブロックをクリックして出るポップアップ
+      //   (詳細/変更/キャンセル…)のDOMを取る。クリックで出る要素は通常dumpに写らないため。
+      //   payload.probe = { url, clickText, salonId?, shopName? }。
+      const probe = (job.payload as { probe?: { url?: string; clickText?: string; salonId?: string; shopName?: string; findId?: string } })?.probe;
+      if (probe?.url) {
+        try {
+          if (probe.salonId || probe.shopName) {
+            await (scrapers as unknown as { ensureSalonSelected?: (p: Page, o: unknown) => Promise<unknown> })
+              .ensureSalonSelected?.(page, { salonId: probe.salonId, shopName: probe.shopName })
+              .catch(() => {});
+          }
+          const purl = /^https?:\/\//.test(probe.url) ? probe.url : new URL(probe.url, baseUrl).toString();
+          await page.goto(purl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+          await page.waitForTimeout(1800);
+          let clicked = false;
+          if (probe.clickText) {
+            const loc = page.locator(`text=${probe.clickText}`).first();
+            if ((await loc.count().catch(() => 0)) > 0) {
+              await loc.click({ timeout: 8_000 }).catch(() => {});
+              clicked = true;
+              await page.waitForTimeout(1500);
+            }
+          }
+          const popup = await page
+            .evaluate(() => {
+              const clip = (s: string, n: number) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+              const btns = Array.from(document.querySelectorAll("a,button,input,[onclick]"))
+                .map((el) => {
+                  const e = el as HTMLInputElement;
+                  return {
+                    tag: e.tagName,
+                    id: e.id || "",
+                    cls: clip(e.className || "", 50),
+                    t: clip(e.textContent || e.value || "", 24),
+                    onclick: clip(e.getAttribute("onclick") || "", 140),
+                    href: clip(e.getAttribute("href") || "", 140),
+                  };
+                })
+                .filter((x) => /キャンセル|cancel|詳細|変更|メモ|お客様|カルテ|reserveDetail|fnc_|jsc/i.test(x.t + x.onclick + x.href + x.id + x.cls))
+                .slice(0, 80);
+              return { url: location.href, title: document.title, btns };
+            })
+            .catch((e) => ({ error: String(e) }));
+          // findId: 予約ブロックが reserveId をどう埋めているか(onclick/data/id/href)を探す。
+          let idHits: unknown = null;
+          const fid = probe.findId;
+          if (fid) {
+            idHits = await page
+              .evaluate((needle: string) => {
+                const clip = (s: string, n: number) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+                const out: Array<Record<string, string>> = [];
+                for (const el of Array.from(document.querySelectorAll("*"))) {
+                  const e = el as HTMLElement;
+                  const oc = e.getAttribute("onclick") || "";
+                  const attrs = Array.from(e.attributes || []).map((a) => `${a.name}=${a.value}`).join(" ");
+                  if ((oc + " " + attrs).includes(needle)) {
+                    out.push({
+                      tag: e.tagName,
+                      id: e.id || "",
+                      cls: clip(e.className || "", 60),
+                      t: clip(e.textContent || "", 30),
+                      onclick: clip(oc, 160),
+                      attrs: clip(attrs, 200),
+                    });
+                  }
+                }
+                return out.slice(0, 20);
+              }, fid)
+              .catch((e) => ({ error: String(e) }));
+          }
+          dump.push({ probe: true, clicked, ...popup, findId: fid ?? null, idHits });
+        } catch (e) {
+          dump.push({ probe: true, error: String(e) });
+        }
+      }
       console.log("[discover] RESULT_JSON " + JSON.stringify(dump));
       await report(
         {

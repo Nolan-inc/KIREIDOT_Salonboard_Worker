@@ -4625,6 +4625,99 @@ async function pushBookingViaForm(page, payload, opts = {}) {
 }
 
 // =====================================================================
+// スケジュールのポップアップ経由でキャンセルする(2026-07-12 実機DOM確認)。
+//   予約詳細への"素の直リンク"は 2026-07-02〜 SB が遮断するため(#fnc_cancelに到達不能)、
+//   スケジュール画面で予約ブロックをクリック→ポップアップ(.mod_popup_02)の
+//   <a class="btn_schedule_cancel">キャンセル</a> を押す動線を使う(in-context click)。
+//   誤キャンセル防止のため、ポップアップ内テキストで対象予約を検証してからのみ操作する:
+//     KIREIDOT予約ID(booking_id) 一致 > reserveId 一致 > 顧客名(姓)+開始時刻 一致。
+//   キャンセル料ダイアログは「請求しない」(#jsiNotCollectCancelFee)を選ぶ。
+// 戻り値: { ok, confirmOnly?, looksCancelled?, already?, reason? }
+// =====================================================================
+async function cancelViaSchedulePopup(page, p, opts = {}) {
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+  const root = genre === 'hair' ? '/CLP/bt' : '/KLP';
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  // dry_run(payload)なら検証のみ(実キャンセルしない)。誤爆防止の実機検証に使う。
+  const enableCancel = opts.enableCancel !== false && !(p && p.dry_run);
+  const when = parseJstPartsForPush(p.scheduled_at);
+  if (!when) return { ok: false, reason: 'invalid scheduled_at' };
+  const ymd = when.yyyymmdd;
+  const hhmm = `${String(when.hour).padStart(2, '0')}:${String(when.minute).padStart(2, '0')}`;
+  const custName = String(p.customer_name || '').trim();
+  const family = (custName.split(/[\s　]+/)[0] || custName).trim();
+  const bookingId = String(p.booking_id || '').trim();
+  const reserveId = String(p.external_booking_id || '').trim();
+  if (!custName && !bookingId) return { ok: false, reason: 'no customer_name/booking_id to match' };
+
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  const schedUrl = new URL(`${root}/schedule/salonSchedule/?date=${ymd}`, baseUrl).toString();
+  await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+  await page.waitForTimeout(800);
+
+  const blocks = page.locator(`text=${family}`);
+  const n = Math.min(await blocks.count().catch(() => 0), 10);
+  if (n === 0) return { ok: false, reason: `schedule: 顧客名(${family})の予約ブロック無し` };
+
+  for (let i = 0; i < n; i++) {
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.locator('.mod_popup_02 .jscDialogCloseBtn:visible, .mod_popup_02 a:has-text("閉じる"):visible').first().click({ timeout: 1_000 }).catch(() => {});
+    await blocks.nth(i).click({ timeout: 6_000 }).catch(() => {});
+    await page.waitForTimeout(900);
+    const popup = page.locator('.mod_popup_02:visible').first();
+    if ((await popup.count().catch(() => 0)) === 0) continue;
+    const popupText = (await popup.innerText().catch(() => '')) || '';
+    const idMatch = !!bookingId && popupText.includes(bookingId);
+    const ridMatch = !!reserveId && popupText.includes(reserveId);
+    const nameMatch = !!family && popupText.includes(family);
+    const timeMatch = popupText.includes(hhmm);
+    if (!(idMatch || ridMatch || (nameMatch && timeMatch))) continue;
+
+    await captureScrapeDebug(page, 'cancel', `sched_match_${reserveId || bookingId || i}`, {
+      diagnostics: { idMatch, ridMatch, nameMatch, timeMatch, enableCancel, hhmm, family },
+    });
+    const cancelBtn = popup.locator('a.btn_schedule_cancel:visible').first();
+    if ((await cancelBtn.count().catch(() => 0)) === 0) {
+      if (/キャンセル済|取消済|ステータス[\s\S]{0,20}(キャンセル|取消)/.test(popupText)) return { ok: true, already: true };
+      return { ok: false, reason: 'popup にキャンセルボタン無し(検証済ブロック)' };
+    }
+    if (!enableCancel) return { ok: true, confirmOnly: true };
+
+    let dialogAccepted = false;
+    const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+    page.on('dialog', onDialog);
+    try {
+      await cancelBtn.click({ timeout: 8_000 }).catch(() => {});
+      await page.waitForTimeout(1_200);
+      // キャンセル料ダイアログ → 「請求しない」。
+      const noFee = page.locator('a#jsiNotCollectCancelFee:visible').first();
+      if ((await noFee.count().catch(() => 0)) > 0) {
+        await noFee.click({ timeout: 6_000 }).catch(() => {});
+        await page.waitForTimeout(1_000);
+      }
+      // 最終確認(はい/キャンセルする/確定)があれば押す。
+      const yes = page.locator('.mod_popup_02 a.accept:visible, a.jscExecuteButton:visible, a:has-text("キャンセルする"):visible, a.accept:visible').first();
+      if ((await yes.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+          yes.click({ timeout: 8_000 }).catch(() => {}),
+        ]);
+        await page.waitForTimeout(1_200);
+      }
+    } finally {
+      page.off('dialog', onDialog);
+    }
+    await captureScrapeDebug(page, 'cancel', `sched_after_${reserveId || bookingId || i}`, { diagnostics: { dialogAccepted } });
+    await page.waitForTimeout(700);
+    const after = (await page.locator('body').innerText().catch(() => '')) || '';
+    const looksCancelled = /キャンセルしました|取消しました|キャンセルが完了|キャンセル完了/.test(after) || dialogAccepted;
+    return { ok: true, looksCancelled };
+  }
+  return { ok: false, reason: `schedule: 検証に通る予約ブロック無し(顧客=${family}/${hhmm})` };
+}
+
+// =====================================================================
 // 予約キャンセル (KIREIDOT → SalonBoard)
 // reserveId(external_booking_id) をキーに SalonBoard 上の予約をキャンセルする。
 //
@@ -4652,6 +4745,18 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     captureErrorShot(page, `cancel_fail_${errorCode || 'err'}`);
     return { status: 'failed', reason, errorCode, manualRequired };
   };
+
+  // ★優先: スケジュールのポップアップ経由キャンセル(詳細直リンクがSB遮断のため #fnc_cancel に
+  //   到達できず失敗するのを回避)。検証に通ったブロックのみ操作。失敗時のみ従来の詳細方式へ。
+  try {
+    const sp = await cancelViaSchedulePopup(page, p, opts);
+    if (sp && sp.ok) {
+      if (sp.confirmOnly) return { status: 'confirm_only' };
+      return { status: 'ok', externalId: (p.external_booking_id || '').trim() || null, viaSchedule: true, recoveredReserveId: p._recoveredReserveId || null };
+    }
+    // sp.ok=false は「スケジュールで特定不可」→ 従来の詳細ページ方式にフォールバック。
+  } catch (_e) { /* フォールバックへ */ }
+
   let reserveId = (p.external_booking_id || '').trim();
 
   // reserveId が無い場合 (KIREIDOT で作成→push したが reserveId 未回収の予約等) は、
