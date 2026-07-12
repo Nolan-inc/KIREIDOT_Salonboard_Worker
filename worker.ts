@@ -1156,6 +1156,115 @@ async function handleJob(job: Job): Promise<void> {
           dump.push({ requested: u, error: String(e) });
         }
       }
+      // ★interactiveプローブ: スケジュール上の予約ブロックをクリックして出るポップアップ
+      //   (詳細/変更/キャンセル…)のDOMを取る。クリックで出る要素は通常dumpに写らないため。
+      //   payload.probe = { url, clickText, salonId?, shopName? }。
+      const probe = (job.payload as { probe?: { url?: string; clickText?: string; clickSelector?: string; salonId?: string; shopName?: string; findId?: string } })?.probe;
+      if (probe?.url) {
+        try {
+          if (probe.salonId || probe.shopName) {
+            await (scrapers as unknown as { ensureSalonSelected?: (p: Page, o: unknown) => Promise<unknown> })
+              .ensureSalonSelected?.(page, { salonId: probe.salonId, shopName: probe.shopName })
+              .catch(() => {});
+          }
+          const purl = /^https?:\/\//.test(probe.url) ? probe.url : new URL(probe.url, baseUrl).toString();
+          await page.goto(purl, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+          await page.waitForTimeout(1800);
+          let clicked = false;
+          const chain = (job.payload as { probe?: { clickChain?: string[] } })?.probe?.clickChain;
+          if (Array.isArray(chain) && chain.length) {
+            for (const sel of chain) {
+              const loc = page.locator(sel).first();
+              if ((await loc.count().catch(() => 0)) > 0) {
+                await loc.click({ timeout: 8_000 }).catch(() => {});
+                clicked = true;
+                await page.waitForTimeout(2000);
+              }
+            }
+          } else if (probe.clickSelector) {
+            const loc = page.locator(probe.clickSelector).first();
+            if ((await loc.count().catch(() => 0)) > 0) {
+              await loc.click({ timeout: 8_000 }).catch(() => {});
+              clicked = true;
+              await page.waitForTimeout(1600);
+            }
+          } else if (probe.clickText) {
+            const loc = page.locator(`text=${probe.clickText}`).first();
+            if ((await loc.count().catch(() => 0)) > 0) {
+              await loc.click({ timeout: 8_000 }).catch(() => {});
+              clicked = true;
+              await page.waitForTimeout(1500);
+            }
+          }
+          const popup = await page
+            .evaluate((needle: string) => {
+              const clip = (s: string, n: number) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+              // ポップアップ(.mod_popup_02:visible)の全文 + reserveId/booking_id の在処。
+              const pops = Array.from(document.querySelectorAll(".mod_popup_02")).filter(
+                (el) => (el as HTMLElement).offsetParent !== null,
+              );
+              const popupText = pops.map((el) => clip((el as HTMLElement).innerText || "", 1200)).join(" || ");
+              const popupHtml = pops.map((el) => (el as HTMLElement).innerHTML || "").join("");
+              const needleInPopupHtml = needle ? popupHtml.includes(needle) : false;
+              const needleInPopupText = needle ? popupText.includes(needle) : false;
+              // ページ本文(確認文言) + フォーム(action/submit) を捕捉。
+              const pageText = clip((document.body && document.body.innerText) || "", 900);
+              const forms = Array.from(document.querySelectorAll("form")).map((f) => ({
+                id: f.getAttribute("id") || "",
+                action: f.getAttribute("action") || "",
+                submits: Array.from(f.querySelectorAll('input[type="submit"],button[type="submit"],a[onclick*="submit"],a.jsc'))
+                  .map((s) => `${(s as HTMLElement).tagName}:${(s as HTMLElement).id || ""}:${clip((s as HTMLElement).textContent || (s as HTMLInputElement).value || "", 20)}`)
+                  .slice(0, 12),
+              })).slice(0, 8);
+              const btns = Array.from(document.querySelectorAll("a,button,input,[onclick]"))
+                .map((el) => {
+                  const e = el as HTMLInputElement;
+                  return {
+                    tag: e.tagName,
+                    id: e.id || "",
+                    cls: clip(e.className || "", 50),
+                    t: clip(e.textContent || e.value || "", 24),
+                    onclick: clip(e.getAttribute("onclick") || "", 140),
+                    href: clip(e.getAttribute("href") || "", 140),
+                  };
+                })
+                .filter((x) => (x.t && x.t.length > 0) || /btn|submit|Button|jsi|fnc_/i.test(x.id + x.cls + x.tag))
+                .slice(0, 90);
+              return { url: location.href, title: document.title, btns, popupText, needleInPopupHtml, needleInPopupText, pageText, forms };
+            }, probe.findId || "")
+            .catch((e) => ({ error: String(e) }));
+          // findId: 予約ブロックが reserveId をどう埋めているか(onclick/data/id/href)を探す。
+          let idHits: unknown = null;
+          const fid = probe.findId;
+          if (fid) {
+            idHits = await page
+              .evaluate((needle: string) => {
+                const clip = (s: string, n: number) => (s || "").replace(/\s+/g, " ").trim().slice(0, n);
+                const out: Array<Record<string, string>> = [];
+                for (const el of Array.from(document.querySelectorAll("*"))) {
+                  const e = el as HTMLElement;
+                  const oc = e.getAttribute("onclick") || "";
+                  const attrs = Array.from(e.attributes || []).map((a) => `${a.name}=${a.value}`).join(" ");
+                  if ((oc + " " + attrs).includes(needle)) {
+                    out.push({
+                      tag: e.tagName,
+                      id: e.id || "",
+                      cls: clip(e.className || "", 60),
+                      t: clip(e.textContent || "", 30),
+                      onclick: clip(oc, 160),
+                      attrs: clip(attrs, 200),
+                    });
+                  }
+                }
+                return out.slice(0, 20);
+              }, fid)
+              .catch((e) => ({ error: String(e) }));
+          }
+          dump.push({ probe: true, clicked, ...popup, findId: fid ?? null, idHits });
+        } catch (e) {
+          dump.push({ probe: true, error: String(e) });
+        }
+      }
       console.log("[discover] RESULT_JSON " + JSON.stringify(dump));
       await report(
         {
