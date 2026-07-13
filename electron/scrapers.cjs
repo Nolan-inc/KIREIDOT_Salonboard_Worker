@@ -734,6 +734,13 @@ async function scrapeHairBookings(page, opts = {}) {
   const seen = new Set();
   let capturedOnce = false;
   let MAX_DAYS = dates.length;
+  // ★#1 fetch堅牢化: スケジュール枠を確実に描画できた日(coveredDates)と、
+  //   リトライしても未描画で取りこぼした可能性のある日(incompleteDates)を分けて記録する。
+  //   将来の cancel検出は「完全取得できた日」だけを対象にできる(誤削除防止)。
+  const coveredDates = [];
+  const incompleteDates = [];
+  // SB「残り受付可能数」(surplus行) を表示用に取得。KDの受付可能数UIがSB実数を鏡写しにする。
+  const allAcceptance = [];
 
   // グループアカウント(ADER等)はサロン選択後 /CLP/bt/top/ に居る。スケジュールへ直接 goto すると
   // SB が無効セッション扱い(「有効期限切れ/再度ログイン」エラー画面)にするため(実機 2026-06-28)、
@@ -807,20 +814,34 @@ async function scrapeHairBookings(page, opts = {}) {
     } catch (_e) {
       schedUrl = `https://salonboard.com/CLP/bt/schedule/salonSchedule/?date=${ymd}`;
     }
-    try {
-      await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      // networkidle は SalonBoard の常時稼働するトラッキング script のため
-      // ほぼ毎回 12s 全部待ってしまい、1日めくるのに 5〜10s かかる原因だった。
-      // スケジュールはサーバーレンダリング(初期HTMLに #scheduleItemArea / 予約ブロックが
-      // 入っている)なので、networkidle は待たず「スケジュール領域 or 予約ブロックの出現」
-      // だけを最大 3.5s 待つ。出現したら即抽出に進む。
-      await page.waitForSelector(
-        '#scheduleItemArea, #stylistScheduleArea, div.panel_reserve[id^="reserve_item_"], div.mod_btn_22[id^="stylist_"]',
-        { timeout: 3_500 },
-      ).catch(() => {});
-    } catch (_e) {
-      diag.push(`hair: ${ymd} goto失敗`);
-      continue;
+    // ★#1 fetch堅牢化: 描画レース対策。従来は goto→3.5秒待ち→即抽出で、プロキシ/Akamai で
+    //   描画が遅れた日は「スケジュール枠が出る前に 0 件抽出」して黙って取りこぼしていた
+    //   (実在予約すら欠落 → KDに古い予約が残る主因)。ここでは「スケジュール枠(コンテナ)が
+    //   出現したか」を明示的に判定し、未出現ならリロードして最大2回まで再試行する。
+    //   コンテナはサーバーレンダリングで初期HTMLに入るため、happy path は即解決=通常日は遅くならない。
+    let rendered = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      } catch (_e) {
+        diag.push(`hair: ${ymd} goto失敗 (try ${attempt})`);
+        await page.waitForTimeout(700).catch(() => {});
+        continue;
+      }
+      // 空の日でもスケジュール枠自体は出る。枠の出現＝「その日を確実に描画できた」証拠。
+      // networkidle は常時稼働トラッキングで待ちすぎるため使わない。
+      const hasContainer = await page
+        .waitForSelector('#scheduleItemArea, #stylistScheduleArea', {
+          timeout: attempt === 1 ? 5_000 : 8_000,
+        })
+        .then(() => true)
+        .catch(() => false);
+      if (hasContainer) {
+        rendered = true;
+        break;
+      }
+      diag.push(`hair: ${ymd} スケジュール枠未描画 (try ${attempt}) -> reload`);
+      await page.waitForTimeout(600).catch(() => {});
     }
 
     // 1日目だけ capture (DOM確認用) + セッション切れ判定。
@@ -852,6 +873,18 @@ async function scrapeHairBookings(page, opts = {}) {
         diagnostics: { url: page.url(), date: ymd, hasSchedule: expired.hasSchedule },
       }).catch(() => null);
     }
+
+    // ★#1: 描画確認できた日だけを covered に記録。未描画の日は取りこぼし扱いにして
+    //   件数抽出しない(0件で「その日は予約なし」と誤認しない)。
+    if (!rendered) {
+      incompleteDates.push(ymd);
+      if (i < MAX_DAYS - 1) {
+        const r0 = (Math.random() + Math.random()) / 2;
+        await page.waitForTimeout(Math.round(300 + r0 * 700)).catch(() => {});
+      }
+      continue;
+    }
+    coveredDates.push(ymd);
 
     // 予約ブロックを抽出。
     const dayItems = await page.evaluate(() => {
@@ -924,6 +957,34 @@ async function scrapeHairBookings(page, opts = {}) {
     }
     if (added > 0) diag.push(`hair ${ymd}: ${added}件`);
 
+    // SB「残り受付可能数」(店舗全体×時間枠) を取得。#limitSchedule の td#surplus_HHMM の値と
+    // 合計予約数 #tm_reserve_HHMM。集計欄が視覚的に隠れていても DOM(thead)には在るので抽出可。
+    const dayAccept = await page.evaluate(() => {
+      const num = (s) => { const n = parseInt(String(s == null ? '' : s).trim(), 10); return Number.isFinite(n) ? n : null; };
+      const out = [];
+      for (const td of Array.from(document.querySelectorAll('tr#limitSchedule td[id^="surplus_"]'))) {
+        const hhmm = (td.id || '').replace('surplus_', '');
+        if (!/^\d{4}$/.test(hhmm)) continue;
+        out.push({
+          hhmm,
+          remaining: num((td.querySelector('p') || {}).textContent),
+          reserved: num((document.getElementById('tm_reserve_' + hhmm) || {}).textContent),
+        });
+      }
+      return out;
+    }).catch(() => []);
+    for (const a of dayAccept) {
+      const sm = parseInt(a.hhmm.slice(0, 2), 10) * 60 + parseInt(a.hhmm.slice(2, 4), 10);
+      if (!Number.isFinite(sm)) continue;
+      allAcceptance.push({
+        date: `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`,
+        slot_min: sm,
+        sb_remaining: a.remaining,
+        sb_reserved: a.reserved,
+      });
+    }
+    if (dayAccept.length > 0) diag.push(`hair ${ymd}: 受付可能数 ${dayAccept.length}枠`);
+
     // 日付めくりの間隔を一定にしない (人手の操作に近づける/BAN回避)。
     // ユーザー要望でテンポを上げる: 0.3〜1.2秒(中央 約0.7秒)。三角分布気味で
     // 値が揃いすぎないようにする。最終日(これ以上めくらない)は待たない。
@@ -939,22 +1000,37 @@ async function scrapeHairBookings(page, opts = {}) {
   // Akamai 対策で maxOpen 件まで・人手風待機つき。取りこぼしは次回 sync に回す。
   let durationFixedDetail = 0;
   try {
+    // ★#3 ADERスループット: 所要補正は「近日予約を優先(soonest-first)」で開き、
+    //   件数(maxOpen)と時間(budgetMs)で打ち切る。所要は一度確定すれば変わらないので、
+    //   毎回全件(~120)の detail を開いていた分がADER 1店 fetch を~25分に膨らませ、
+    //   グループ直列(4店)で鯖江が枯渇する主因だった。手前を確実に取れば実害は無い。
     durationFixedDetail = await enrichDurationsFromDetail(page, allRows, baseUrl, {
       onlyNull: false,
+      maxOpen: 80,
+      budgetMs: 180_000,
     });
     diag.push(`duration補正(detail): ${durationFixedDetail} 件`);
   } catch (e) {
     diag.push(`duration補正(detail) 失敗: ${e?.message ?? e}`);
   }
 
+  diag.push(`hair: covered ${coveredDates.length}日 / incomplete ${incompleteDates.length}日`);
+
   return {
     rows: allRows,
+    // SB「残り受付可能数」スナップショット (表示用)。covered日のみ含む。
+    acceptance: allAcceptance,
     debug: {
       itemsFound: allRows.length,
       genre: 'hair',
       source: 'salonSchedule',
       durationFixedDetail,
       range: `${range.fromStr} 〜 ${range.toStr}`,
+      // ★#1: 完全取得できた日数/取りこぼした日数。incomplete>0 は要注意(再取得推奨)。
+      coveredDays: coveredDates.length,
+      incompleteDays: incompleteDates.length,
+      incompleteDates: incompleteDates.slice(0, 30),
+      acceptanceSlots: allAcceptance.length,
       diag,
     },
   };
@@ -1634,6 +1710,9 @@ async function enrichDurationsFromDetail(page, rows, baseUrl, options = {}) {
   if (!rows || rows.length === 0) return 0;
   const onlyNull = options.onlyNull !== false; // 既定: null の行だけ
   const maxOpen = Number.isFinite(options.maxOpen) ? options.maxOpen : 120;
+  // ★#3: 経過時間で打ち切る上限 (ms)。0/未指定なら時間制限なし(従来動作)。
+  const budgetMs = Number.isFinite(options.budgetMs) ? options.budgetMs : 0;
+  const startTs = Date.now();
 
   // 対象: duration_min が未確定 (null/0/NaN) で、reserveId 形式の external_id を持つ行。
   // status が cancelled の行は所要が要らない (画面表示にも使わない) ので除外。
@@ -1647,10 +1726,18 @@ async function enrichDurationsFromDetail(page, rows, baseUrl, options = {}) {
   });
   if (targets.length === 0) return 0;
 
+  // ★#3: 近日予約を優先して所要を確定させる。件数/時間で打ち切られても
+  //   カレンダー上で重要な手前の予約は確実に正確な所要になる。遠い先の予約は
+  //   粗い colspan のまま残り、日が近づいた次回以降の fetch で確定される。
+  targets.sort((a, b) =>
+    String(a.scheduled_at || '9').localeCompare(String(b.scheduled_at || '9')),
+  );
+
   let fixed = 0;
   let opened = 0;
   for (const r of targets) {
     if (opened >= maxOpen) break;
+    if (budgetMs > 0 && Date.now() - startTs > budgetMs) break;
     opened++;
     const reserveId = r.external_id.trim();
     // ext (電話/外部) → net (ネット予約) の順で変更フォームを開く。
@@ -10385,6 +10472,170 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
 }
 
+/**
+ * 受付可能数(スケジュールの「残り受付数」)の手動オーバーライドを SalonBoard へ同期する。美容室(hair)専用。
+ * payload: { date:'YYYY-MM-DD', slots:[{ slot_min:int(0時からの分), delta:int(±) }], dry_run?:bool }
+ * 冪等モデル: 戻す(SB既定へリセット) → 各slotに |delta| 回 +/- クリック → 設定(保存)。再実行で同一結果。
+ * 確定DOM(2026-07-13 鯖江H000684640): thead #limitSchedule 内の td#surplus_HHMM(HHMM=0900..2030/30分)。
+ *   セル内 a.mod_btn_08=＋(増) / <p>現在値</p> / a.mod_btn_09=−(減)。戻す=a.mod_sch_reset.scheduleReset、
+ *   設定=a.mod_sch_update.scheduleUpdate。受付可能数は「店舗全体×時間枠」の1行(スタイリスト別ではない)。
+ * 例外は投げない(ブラウザを閉じない)。dry_run では一切クリックしない(selector検証+現在値readのみ)。
+ */
+async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePush = !!opts.enablePush;
+  const p = payload || {};
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
+  if (genre !== 'hair') return fail('受付可能数の同期は美容室(hair)のみ対応です', 'GENRE_UNSUPPORTED', false);
+
+  const dateStr = String(p.date || '').trim();
+  const md = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!md) return fail(`date が不正です (${dateStr})`, 'UNKNOWN_ERROR', true);
+  const ymd = md[1] + md[2] + md[3];
+  const hhmm = (mm) => String(Math.floor(mm / 60)).padStart(2, '0') + String(mm % 60).padStart(2, '0');
+
+  const slots = (Array.isArray(p.slots) ? p.slots : [])
+    .map((s) => ({ slot_min: Number(s.slot_min), delta: Math.trunc(Number(s.delta)) }))
+    .filter((s) => Number.isFinite(s.slot_min) && s.slot_min >= 0 && s.slot_min < 24 * 60 && Number.isFinite(s.delta) && s.delta !== 0);
+  const dryRun = p.dry_run === true || !enablePush;
+
+  // --- スケジュール到達 (scrapeHairBookings と同じ堅牢化) ---
+  // ★単店(salonIdはあるが非グループ)は /CNC/groupTop/ が無効パスで SESSION_EXPIRED になるため
+  //   groupTop を強制しない。まず現在文脈から scheduleリンク→bare goto を試み、失効時のみ relogin→
+  //   (group)サロン再選択→再到達を1回だけ行う。
+  const navigateToSchedule = async () => {
+    try {
+      const schedLink = page.locator('a[href*="/CLP/bt/schedule/salonSchedule"]').first();
+      await schedLink.waitFor({ state: 'attached', timeout: 5_000 }).catch(() => {});
+      if ((await schedLink.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}),
+          schedLink.click({ timeout: 6_000 }).catch(() => {}),
+        ]);
+      } else {
+        await page.goto(new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      }
+      const u = new URL('/CLP/bt/schedule/salonSchedule/', baseUrl);
+      u.searchParams.set('date', ymd);
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      await page.waitForSelector('#scheduleItemArea, #limitSchedule', { timeout: 8_000 }).catch(() => {});
+    } catch (_e) { /* 到達判定へ */ }
+  };
+  const checkReached = () => page.evaluate(() => {
+    const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+    return {
+      hasLimit: !!document.getElementById('limitSchedule'),
+      expired: /有効期限|再度ログイン|操作されなかった/.test(body) || !!document.querySelector('input[type="password"]'),
+    };
+  }).catch(() => ({ hasLimit: false, expired: false }));
+
+  if (opts.salonId) {
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  }
+  await navigateToSchedule();
+  let reached = await checkReached();
+  if ((reached.expired || !reached.hasLimit) && typeof opts.relogin === 'function') {
+    const ok = await opts.relogin().catch(() => false);
+    if (ok) {
+      if (opts.salonId) {
+        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      }
+      await navigateToSchedule();
+      reached = await checkReached();
+    }
+  }
+  if (reached.expired) return fail('セッション切れ/ログイン画面に着地しました', 'SESSION_EXPIRED', false);
+  // 休業日は SB が受付数行を描画しない → 失敗にせずスキップ(受付枠が無いので調整不要)。
+  const isClosed = await page.evaluate(() => /指定した日付は休業日/.test((document.body && document.body.innerText) || '')).catch(() => false);
+  if (isClosed && !reached.hasLimit) {
+    return { status: 'ok', skipped: true, summary: `受付可能数(${ymd}): 休業日のため受付数行なし・スキップ`, date: dateStr };
+  }
+  if (!reached.hasLimit) return fail(`残り受付数行(#limitSchedule)が見つかりません (url=${page.url().replace('https://salonboard.com', '')})`, 'ACCEPTANCE_ROW_NOT_FOUND', true);
+
+  // 集計欄が隠れている場合は表示 (best-effort)。
+  await page.evaluate(() => {
+    const el = Array.from(document.querySelectorAll('a,span,div,p')).find(
+      (e) => /集計欄を表示/.test((e.textContent || '').trim()) && e.offsetParent !== null,
+    );
+    if (el) el.click();
+  }).catch(() => {});
+  await page.waitForTimeout(300).catch(() => {});
+
+  // 対象slotの存在 + 現在値。
+  const preview = await page.evaluate((targets) => {
+    return targets.map((t) => {
+      const cell = document.getElementById('surplus_' + t.hhmm);
+      if (!cell) return { hhmm: t.hhmm, delta: t.delta, found: false };
+      const cur = parseInt(((cell.querySelector('p') || {}).textContent || '').trim(), 10);
+      return {
+        hhmm: t.hhmm, delta: t.delta, found: true,
+        current: Number.isFinite(cur) ? cur : null,
+        hasPlus: !!cell.querySelector('a.mod_btn_08'),
+        hasMinus: !!cell.querySelector('a.mod_btn_09'),
+      };
+    });
+  }, slots.map((s) => ({ hhmm: hhmm(s.slot_min), delta: s.delta }))).catch(() => []);
+
+  const bad = preview.filter((x) => !x.found || !x.hasPlus || !x.hasMinus);
+  if (slots.length > 0 && bad.length === slots.length) {
+    return fail(`対象slotの +/- ボタンが見つかりません (例 surplus_${bad[0] ? bad[0].hhmm : '?'})`, 'ACCEPTANCE_BTN_NOT_FOUND', true);
+  }
+
+  const fmtHH = (h) => `${h.slice(0, 2)}:${h.slice(2)}`;
+  if (dryRun) {
+    const vals = preview.filter((x) => x.found).map((x) => `${fmtHH(x.hhmm)}=${x.current == null ? '?' : x.current}(→${x.delta > 0 ? '+' : ''}${x.delta})`).join(' ');
+    return {
+      status: 'ok', dryRun: true,
+      summary: `受付可能数 dry-run(${ymd}) 現在値: ${vals || slots.length + '枠'} / selector検証OK・設定押さず`,
+      date: dateStr, slots: preview,
+    };
+  }
+
+  // --- 本番: 戻す(SB既定へ) → 各slot +/- → 設定 ---
+  await page.evaluate(() => { const r = document.querySelector('a.mod_sch_reset.scheduleReset, a.scheduleReset'); if (r) r.click(); }).catch(() => {});
+  await page.waitForTimeout(500).catch(() => {});
+
+  const applied = [];
+  for (const s of slots) {
+    const key = hhmm(s.slot_min);
+    const btnSel = s.delta > 0 ? 'a.mod_btn_08' : 'a.mod_btn_09';
+    for (let i = 0; i < Math.abs(s.delta); i++) {
+      await page.evaluate(({ id, btnSel }) => {
+        const cell = document.getElementById(id);
+        const b = cell && cell.querySelector(btnSel);
+        if (b) b.click();
+      }, { id: 'surplus_' + key, btnSel }).catch(() => {});
+      await page.waitForTimeout(120).catch(() => {});
+    }
+    const after = await page.evaluate((k) => {
+      const cell = document.getElementById('surplus_' + k);
+      const cur = parseInt(((cell && cell.querySelector('p') || {}).textContent || '').trim(), 10);
+      const edit = document.querySelector('input[name="tm_edit_surplus_' + k + '"]');
+      return { value: Number.isFinite(cur) ? cur : null, edit: edit ? Number(edit.value) : null };
+    }, key).catch(() => ({ value: null, edit: null }));
+    applied.push({ hhmm: key, delta: s.delta, resultValue: after.value, editValue: after.edit });
+  }
+
+  // 設定(保存)。確認ダイアログが出たら OK。
+  await page.evaluate(() => { const u = document.querySelector('a.mod_sch_update.scheduleUpdate, a.scheduleUpdate'); if (u) u.click(); }).catch(() => {});
+  await page.waitForTimeout(1500).catch(() => {});
+  await page.evaluate(() => { const ok = document.querySelector('#confirmOK, #dialogOK'); if (ok && ok.offsetParent !== null) ok.click(); }).catch(() => {});
+  await page.waitForTimeout(1500).catch(() => {});
+
+  const post = await page.evaluate(() => ({
+    warn: ((document.querySelector('#warningMessageArea') || {}).innerText || '').replace(/\s+/g, ' ').trim(),
+  })).catch(() => ({ warn: '' }));
+
+  return {
+    status: 'ok',
+    summary: `受付可能数 設定(${ymd}): ${applied.map((a) => `${fmtHH(a.hhmm)}→${a.resultValue == null ? '?' : a.resultValue}(${a.delta > 0 ? '+' : ''}${a.delta})`).join(' ') || '0枠'}${post.warn ? ' 警告:' + post.warn.slice(0, 50) : ''}`,
+    date: dateStr, applied, warn: post.warn || null,
+  };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
@@ -10420,6 +10671,7 @@ module.exports = {
   pushSalonProfileViaForm,
   pushKodawariViaForm,
   pushFeatureViaForm,
+  pushAcceptanceViaSchedule,
   getLastErrorShot,
   getLastErrorShotForPage,
   resetLastErrorShot,

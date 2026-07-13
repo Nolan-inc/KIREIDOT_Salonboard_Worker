@@ -409,7 +409,9 @@ type JobType =
   // 掲載系 write (KIREIDOT→SB)
   | "push_salon"
   | "push_kodawari"
-  | "push_feature";
+  | "push_feature"
+  // 受付可能数 (残り受付数) の手動オーバーライドを SB スケジュールへ同期 (美容室のみ)
+  | "push_acceptance";
 
 type Job = {
   id: string;
@@ -821,7 +823,7 @@ async function handleJob(job: Job): Promise<void> {
       "push_booking", "cancel_booking", "push_shifts", "push_shift_patterns",
       "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
-      "push_salon", "push_kodawari", "push_feature",
+      "push_salon", "push_kodawari", "push_feature", "push_acceptance",
     ]);
     const isWriteJob = WRITE_JOBS.has(job.job_type);
     const forceResidential = writeViaResidentialEnabled() && isWriteJob;
@@ -1442,9 +1444,11 @@ async function handleJob(job: Job): Promise<void> {
     }
 
     // ---- Phase 2: scrapers.cjs 再利用ハンドラ群 ----------------------------
-    // salon_id / shop_name は worker.ts の job/credentials には現状無いため null
-    // フォールバック (単一サロン店舗は問題なし。複数サロン店舗の正確な選択には
-    // Admin 側で credentials.salon_id / shop_name を同梱する必要がある)。
+    // salon_id は Admin の jobs API が credentials に同梱する(reveal RPC が
+    // salonboard_credentials.salonboard_salon_id を salon_id として返す)。
+    // グループ店(1ログイン複数サロン)は ensureSalonSelected が groupTop の
+    // <a id="H..."> を salon_id で一致検索してDOMクリック→遷移する。未設定時のみ店名一致に
+    // フォールバック(SuperAdminでサロンID必須化済=通常は常に埋まる)。
     const salonId = (job.credentials as { salon_id?: string | null }).salon_id ?? null;
     const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
     // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
@@ -1542,6 +1546,39 @@ async function handleJob(job: Job): Promise<void> {
         },
         page,
       );
+      return;
+    }
+
+    // 受付可能数(残り受付数)の手動オーバーライドを SB スケジュールへ同期 (美容室のみ)。
+    // payload={date:'YYYY-MM-DD', slots:[{slot_min,delta}], dry_run?}。冪等: 戻す→+/-→設定。
+    if (job.job_type === "push_acceptance") {
+      const p = job.payload as Record<string, unknown>;
+      const aGenre =
+        (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
+      const aSalonId =
+        (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+      const aShopName = (job as { shop_name?: string | null }).shop_name ?? null;
+      // Akamai warmup (fetch_bookings と同じ): cold profile が深いページで tarpit → SESSION_EXPIRED を防ぐ。
+      try {
+        const warmupPath = aSalonId ? "/CNC/groupTop/" : "/KLP/top/";
+        await page.goto(new URL(warmupPath, baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
+        await page.waitForTimeout(2200);
+        await page.mouse.move(240, 220).catch(() => {});
+        await page.mouse.move(620, 430, { steps: 12 }).catch(() => {});
+        await page.mouse.wheel(0, 600).catch(() => {});
+        await page.waitForTimeout(1400);
+      } catch {
+        /* warmup best-effort */
+      }
+      const result = await (scrapers as unknown as Record<string, ScraperFn>).pushAcceptanceViaSchedule(page, p, {
+        baseUrl,
+        enablePush: ENABLE_PUSH,
+        genre: aGenre,
+        salonId: aSalonId,
+        shopName: aShopName,
+        relogin: makeRelogin(page, baseUrl, job.credentials),
+      });
+      await reportScraperResult(job, "push_acceptance", result, {}, page);
       return;
     }
 
@@ -1676,7 +1713,7 @@ async function handleJob(job: Job): Promise<void> {
         /* warmup is best-effort */
       }
       // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
-      const { rows, debug } = await scrapers.scrapeBookings(page, {
+      const { rows, debug, acceptance } = (await scrapers.scrapeBookings(page, {
         baseUrl,
         genre,
         salonId,
@@ -1685,7 +1722,7 @@ async function handleJob(job: Job): Promise<void> {
         password: job.credentials.password,
         // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
         relogin: makeRelogin(page, baseUrl, job.credentials),
-      });
+      })) as { rows: unknown[]; debug?: unknown; acceptance?: unknown[] };
       // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
       // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
       if ((debug as { loggedOut?: boolean } | undefined)?.loggedOut) {
@@ -1706,14 +1743,17 @@ async function handleJob(job: Job): Promise<void> {
       const bookings = rows ?? [];
       // Admin callback (job_type=fetch_bookings) が bookings[] を
       // salonboard_bulk_upsert_bookings RPC で upsert する。PC の定期ループと同 RPC。
+      const acceptanceRows = Array.isArray(acceptance) ? acceptance : [];
       await report({
         job_id: job.id,
         job_type: "fetch_bookings",
         status: "succeeded",
         bookings,
-        summary: `fetch_bookings: ${bookings.length}件取得 (genre=${genre})`,
+        // SB「残り受付可能数」スナップショット (表示用)。Admin callback が対応時に取込む。
+        acceptance: acceptanceRows,
+        summary: `fetch_bookings: ${bookings.length}件取得 (genre=${genre})${acceptanceRows.length ? ` / 受付可能数${acceptanceRows.length}枠` : ""}`,
       } as unknown as CallbackBody);
-      console.log(`[job] done  ${tag} (fetch_bookings ${bookings.length}件)`);
+      console.log(`[job] done  ${tag} (fetch_bookings ${bookings.length}件, 受付可能数${acceptanceRows.length}枠)`);
       return;
     }
 
