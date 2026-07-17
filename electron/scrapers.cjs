@@ -3574,6 +3574,27 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     plans.push(...groups.values());
   }
 
+  // ★Shift Parity安全ガード(表参道「シフトが消えた」誤解の再発防止):
+  //   off-plan(=SBで出勤中の日を「休」にする=実シフトを消す操作)が異常に多い時は、
+  //   KDのシフトが不完全なまま push して SB を大量に休化する事故の恐れがある
+  //   (掛け持ちスタッフの店舗按分ズレ・KD未入力 等)。閾値超過なら休化(clearing)は
+  //   保留し、出勤の追加/更新だけ反映して警告する(=SBの実シフトを消さない)。
+  const offClearDays = plans.reduce((n, pl) => n + (pl.kind === 'off' ? pl.days.length : 0), 0);
+  const MAX_CLEAR = Number(process.env.SB_SHIFT_MAX_CLEAR ?? 12);
+  if (offClearDays > MAX_CLEAR) {
+    const detail = plans
+      .filter((pl) => pl.kind === 'off' && pl.days.length)
+      .map((pl) => `${pl.staffName}:${pl.days.length}日`)
+      .join(', ');
+    warnings.push(
+      `安全ガード: SBの出勤${offClearDays}日分を休化しようとしたため保留(閾値${MAX_CLEAR}日)。`
+      + `KDのシフトが不完全でSB実シフトを消す恐れ→休化は反映せず、出勤の追加のみ反映。要KD確認 [${detail}]`,
+    );
+    for (let i = plans.length - 1; i >= 0; i--) {
+      if (plans[i].kind === 'off') { totalChanges -= plans[i].days.length; plans.splice(i, 1); }
+    }
+  }
+
   if (totalChanges === 0) {
     return { status: 'ok', summary: `変更なし (全${entries.length}名のシフトはSalonBoardと一致)`, changed: 0, warnings, patterns: patternsOut };
   }
