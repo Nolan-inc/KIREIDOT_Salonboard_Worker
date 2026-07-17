@@ -805,6 +805,8 @@ async function scrapeHairBookings(page, opts = {}) {
   }
 
   for (let i = 0; i < MAX_DAYS; i++) {
+    // ★preemption: 予約書込が来たら fetch を即中断してレーンを譲る(3分SLA)。取得済み分は捨てる。
+    if (opts.abortSignal && opts.abortSignal.aborted) throw new Error('aborted: preempted by booking write');
     const ymd = dates[i];
     let schedUrl;
     try {
@@ -1004,10 +1006,14 @@ async function scrapeHairBookings(page, opts = {}) {
     //   件数(maxOpen)と時間(budgetMs)で打ち切る。所要は一度確定すれば変わらないので、
     //   毎回全件(~120)の detail を開いていた分がADER 1店 fetch を~25分に膨らませ、
     //   グループ直列(4店)で鯖江が枯渇する主因だった。手前を確実に取れば実害は無い。
+    // ★予約書込3分SLA最優先化(2026-07-17): 所要補正(detail 1件ずつ開く)は fetch を数分伸ばし、
+    //   同一アカウントのlaneを長く塞いで push_booking を遅延させる主因。予算を大幅短縮して
+    //   fetch を短時間で終わらせ、レーンを早く空ける(所要は best-effort、取りこぼしは次回)。
     durationFixedDetail = await enrichDurationsFromDetail(page, allRows, baseUrl, {
       onlyNull: false,
-      maxOpen: 80,
-      budgetMs: 180_000,
+      maxOpen: Number(process.env.SB_ENRICH_MAX_OPEN ?? 20),
+      budgetMs: Number(process.env.SB_ENRICH_BUDGET_MS ?? 25_000),
+      abortSignal: opts.abortSignal,
     });
     diag.push(`duration補正(detail): ${durationFixedDetail} 件`);
   } catch (e) {
@@ -1224,8 +1230,12 @@ async function scrapeBookings(page, opts = {}) {
         range, diag, baseUrl: opts.baseUrl,
         // 失効時の自己回復(relogin)後にサロンを選び直すため salonId/shopName も渡す。
         salonId: opts.salonId, shopName: opts.shopName, relogin: opts.relogin,
+        abortSignal: opts.abortSignal,
       });
     } catch (e) {
+      // ★preemption の abort は握りつぶさず伝播させる(worker が requeue する)。
+      if (opts.abortSignal && opts.abortSignal.aborted) throw e;
+      if (/aborted: preempted/.test(String(e?.message ?? e))) throw e;
       const capDir = await captureScrapeDebug(page, 'bookings', 'hair_scrape_error', {
         diagnostics: { url: page.url(), error: e?.message ?? String(e) },
       }).catch(() => null);
@@ -1358,6 +1368,8 @@ async function scrapeBookings(page, opts = {}) {
   const MAX_PAGES = 60;
   const visitedPageHashes = new Set();
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+    // ★preemption: 予約書込が来たら fetch を即中断してレーンを譲る(3分SLA)。
+    if (opts.abortSignal && opts.abortSignal.aborted) throw new Error('aborted: preempted by booking write');
     const items = await extractBookingItemsFromCurrentPage(page);
     allItems.push(...items);
     diag.push(`page ${pageNum}: ${items.length} rows`);
@@ -1525,7 +1537,11 @@ async function scrapeBookings(page, opts = {}) {
   // これをしないと duration_min=null のまま DB に渡り、60分で上書きされる。
   let durationFixedDetail = 0;
   try {
-    durationFixedDetail = await enrichDurationsFromDetail(page, rows, opts.baseUrl);
+    durationFixedDetail = await enrichDurationsFromDetail(page, rows, opts.baseUrl, {
+      maxOpen: Number(process.env.SB_ENRICH_MAX_OPEN ?? 20),
+      budgetMs: Number(process.env.SB_ENRICH_BUDGET_MS ?? 25_000),
+      abortSignal: opts.abortSignal,
+    });
     diag.push(`duration補正(detail): ${durationFixedDetail} 件`);
   } catch (e) {
     diag.push(`duration補正(detail) 失敗: ${e?.message ?? e}`);
@@ -1738,6 +1754,8 @@ async function enrichDurationsFromDetail(page, rows, baseUrl, options = {}) {
   for (const r of targets) {
     if (opened >= maxOpen) break;
     if (budgetMs > 0 && Date.now() - startTs > budgetMs) break;
+    // ★preemption: 予約書込が来たら所要補正を即打切る(所要は best-effort、次回に回す)。
+    if (options.abortSignal && options.abortSignal.aborted) break;
     opened++;
     const reserveId = r.external_id.trim();
     // ext (電話/外部) → net (ネット予約) の順で変更フォームを開く。
@@ -3234,26 +3252,99 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   })();
 
-  // (1) シフト設定ページを開く (直接 goto。失敗時は monthlySetup のリンク経由)
-  const openSetup = async () => {
-    const u = new URL('/KLP/set/shiftSetup/', baseUrl);
-    u.searchParams.set('date', month);
-    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 12_000 }).catch(() => {});
-    if ((await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0) return true;
-    // フォールバック: 毎月の受付設定からリンクをクリック
-    await page.goto(new URL('/KLP/set/monthlySetup/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    const link = page.locator(`a[href*="shiftSetup/?date=${month}"]`).first();
-    if ((await link.count().catch(() => 0)) === 0) return false;
+  // ★ジャンル別: シフト設定(毎月の受付設定)のパス接頭辞が異なる。美容室(hair)は /CLP/bt/set 配下、
+  //   エステ系は /KLP/set。従来 /KLP 固定だったため ADER/マグ等 hair 店が全滅していた。
+  //   加えて hair のグループ店(ADER等)はサロン未選択だと空になるため、groupTop→サロン選択で
+  //   店舗文脈を確立してから開く(scrapeHairBookings / pushStaffProfileViaForm と同様)。
+  const shiftGenre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
+  const monthlyPrefix = shiftGenre === 'hair' ? '/CLP/bt/set/' : '/KLP/set/';
+
+  // ★hair文脈確立(受付可能数同期 pushAcceptanceViaSchedule と同方式):
+  //   ログイン直後(グループ店=/CNC/groupTop、単店=salon top)から ensureSalonSelected
+  //   (salonId優先・無ければ shopName一致=fetchと同経路)で対象サロンへ。groupTop は強制 goto
+  //   しない(非グループ単店は groupTop で SESSION_EXPIRED)。失効時のみ relogin→groupTop→再選択。
+  const selectSalon = async (viaGroupTop) => {
+    if (shiftGenre !== 'hair') return;
+    if (viaGroupTop) {
+      await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    }
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  };
+  // 「毎月の受付設定」へ。現在文脈のナビリンクをクリック優先(hairは直gotoで失効しやすい)→失敗時 bare-goto。
+  const navigateToMonthly = async () => {
+    const link = page.locator(`a[href*="${monthlyPrefix}monthlySetup"], a:has-text("毎月の受付設定")`).first();
+    if ((await link.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}),
+        link.click({ timeout: 8_000 }).catch(() => {}),
+      ]);
+    }
+    if (!/monthlySetup/.test(page.url())) {
+      await page.goto(new URL(monthlyPrefix + 'monthlySetup/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    }
+  };
+  const monthlyState = () => page.evaluate(() => {
+    const body = (document.body && document.body.innerText) || '';
+    return {
+      onMonthly: /シフト設定/.test(body) && /受付設定/.test(body),
+      expired: /有効期限|再度ログイン|操作されなかった|指定されたURLは存在しません/.test(body) || !!document.querySelector('input[type="password"]'),
+    };
+  }).catch(() => ({ onMonthly: false, expired: false }));
+  // 「シフト設定」対象月ボタンを複数戦略で探しクリック(esthe/hair 両対応)。
+  const tryShiftBtn = async () => {
+    const shiftBtn = page.locator(
+      `a[href*="hiftSetup"][href*="${month}"], a[onclick*="hiftSetup"][onclick*="${month}"], `
+      + `a[href*="shiftSetup/?date=${month}"], a[onclick*="${month}"][onclick*="hift"]`,
+    ).first();
+    if ((await shiftBtn.count().catch(() => 0)) === 0) return false;
     await Promise.all([
-      page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 15_000 }).catch(() => {}),
-      link.click({ timeout: 10_000 }).catch(() => {}),
+      page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 12_000 }).catch(() => {}),
+      shiftBtn.click({ timeout: 10_000 }).catch(() => {}),
     ]);
     return (await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0;
   };
+  const openSetup = async () => {
+    // esthetic: 従来の直 shiftSetup?date が最速(月が設定済みなら即到達)。まず試す。
+    if (shiftGenre !== 'hair') {
+      const u = new URL('/KLP/set/shiftSetup/', baseUrl);
+      u.searchParams.set('date', month);
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 8_000 }).catch(() => {});
+      if ((await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0) return true;
+    }
+    // 文脈確立→毎月の受付設定→(失効なら relogin+groupTop再選択で1回リトライ)→シフト設定ボタン
+    await selectSalon(false);
+    await navigateToMonthly();
+    let st = await monthlyState();
+    if ((st.expired || !st.onMonthly) && typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok) { await selectSalon(true); await navigateToMonthly(); st = await monthlyState(); }
+    }
+    if (st.onMonthly && await tryShiftBtn()) return true;
+    // 到達できたが対象ボタンを掴めない/到達できない → 実DOMダンプ(シフト設定ボタンパターン確定用)
+    const snap = await page.evaluate(() => ({
+      url: location.pathname,
+      onMonthly: /シフト設定/.test((document.body && document.body.innerText) || ''),
+      btns: Array.from(document.querySelectorAll('a, input[type="button"], input[type="submit"], button'))
+        .filter((e) => /設定|hift|Setup/i.test(((e.textContent || '') + (e.getAttribute('href') || '') + (e.getAttribute('onclick') || '') + (e.value || ''))))
+        .slice(0, 16)
+        .map((e) => ({ t: ((e.textContent || e.value || '').replace(/\s+/g, ' ').trim().slice(0, 10)), href: (e.getAttribute('href') || '').slice(0, 64), oc: (e.getAttribute('onclick') || '').slice(0, 64) })),
+    })).catch(() => null);
+    console.log('[SHIFTDBG monthly ' + shiftGenre + '] ' + JSON.stringify(snap).slice(0, 1400));
+    return false;
+  };
   try {
     if (!(await openSetup())) {
-      return fail(`シフト設定画面 (shiftSetup ${month}) を開けませんでした。「毎月の受付設定」でこの月が設定済みか確認してください。`, 'UNKNOWN_ERROR', true);
+      // 診断ダンプ: 到達URLとシフト系要素の有無(hair実機の実体をログで確認して次を打つ)
+      const diag = await page.evaluate(() => ({
+        url: location.pathname + location.search,
+        hasShiftSchedule: !!document.querySelector('#shiftSchedule'),
+        shiftdateCount: document.querySelectorAll('#shiftSchedule a.shiftdate').length,
+        monthlyLinks: Array.from(document.querySelectorAll('a[href*="shiftSetup"]')).slice(0, 6).map((a) => a.getAttribute('href')),
+        bodyHead: ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 160),
+      })).catch(() => null);
+      console.log('[SHIFTDBG open-fail ' + shiftGenre + '] ' + JSON.stringify(diag).slice(0, 700));
+      return fail(`シフト設定画面 (shiftSetup ${month}, genre=${shiftGenre}) を開けませんでした。「毎月の受付設定」でこの月が設定済みか確認してください。${diag ? ' url=' + diag.url : ''}`, 'UNKNOWN_ERROR', true);
     }
   } catch (e) {
     return fail(`シフト設定画面を開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
@@ -3280,14 +3371,37 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   }
 
   // (3) 一括入力パネルを開いて勤務パターン一覧 (id/name/時間帯) を取得
+  //   ★hair(/CLP/bt/schedule/shiftSetup)は DOM は同じ(#batchSetPanel/#batchSetLabel/#shiftIdBatch)だが、
+  //   パネルが Playwright の isVisible 判定に乗らないことがある。パネルの可視性ではなく
+  //   中身の select#shiftIdBatch が読めるか(=存在)で ready 判定する(esthetic/hair 共通)。
   const ensureBatchPanel = async () => {
-    const panel = page.locator('#batchSetPanel');
-    if (await panel.isVisible().catch(() => false)) return true;
+    const hasSelect = async () => (await page.locator('#shiftIdBatch').count().catch(() => 0)) > 0;
+    if (await hasSelect()) {
+      // 時間帯表示(#shiftTextBatch)のためパネルは開けたら開く(開けなくても続行可)。
+      if (!(await page.locator('#batchSetPanel').isVisible().catch(() => false))) {
+        await page.locator('#batchSetLabel').click({ timeout: 6_000 }).catch(() => {});
+        await page.locator('#batchSetPanel').waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+      }
+      return true;
+    }
     await page.locator('#batchSetLabel').click({ timeout: 8_000 }).catch(() => {});
-    await panel.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
-    return await panel.isVisible().catch(() => false);
+    await page.locator('#batchSetPanel').waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
+    return await hasSelect();
   };
   if (!(await ensureBatchPanel())) {
+    // ★hairのシフト設定UIは esthetic と id が違う可能性。実DOMを一括ダンプして次で正確に対応する。
+    const dump = await page.evaluate(() => {
+      const pick = (e) => ({ tag: e.tagName.toLowerCase(), id: e.id || '', cls: (typeof e.className === 'string' ? e.className : '').split(/\s+/).slice(0, 2).join('.'), t: ((e.textContent || e.value || '').replace(/\s+/g, ' ').trim().slice(0, 14)) });
+      return {
+        url: location.pathname + location.search,
+        ids: Array.from(document.querySelectorAll('[id]')).map((e) => e.id).filter((x) => /atch|hift|anel|yotei|update|work|pattern|Set/i.test(x)).slice(0, 30),
+        selects: Array.from(document.querySelectorAll('select')).slice(0, 8).map((e) => ({ id: e.id, name: e.name, opts: e.options.length })),
+        labelBtns: Array.from(document.querySelectorAll('a, button, label, input[type="button"]')).filter((e) => /一括|入力|パターン|設定|出勤|休/.test((e.textContent || e.value || ''))).slice(0, 16).map(pick),
+        shiftTable: !!document.querySelector('#shiftSchedule'),
+        firstRowIds: Array.from(document.querySelectorAll('#shiftSchedule a.shiftdate')).slice(0, 3).map((a) => a.id),
+      };
+    }).catch(() => null);
+    console.log('[SHIFTDBG setUI ' + shiftGenre + '] ' + JSON.stringify(dump).slice(0, 1600));
     return fail('一括入力パネル (#batchSetPanel) を開けませんでした', 'UNKNOWN_ERROR', true);
   }
   let patterns = await page.evaluate(() => {
@@ -3417,14 +3531,22 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
             continue;
           }
           if (!base.covers) {
-            warnings.push(`${entry.staff_name ?? ext} ${date}: ${day.start}〜${day.end} を包含するパターンが無いため、最も近い「${base.pattern.name}」(${base.pattern.start}〜${base.pattern.end})に合わせて予定設定`);
+            // ★Shift Parity: シフト時刻を「包含する」SB勤務パターンが無い日に、最も近い
+            //   別時間帯パターンを近似で書き込むと、SBに全く違うシフト時刻が入り
+            //   (実例: KD 12:30-21:00 のシフトに SB 10:00-11:00 が入る)、その時間帯の
+            //   予約が「受付可能数超過」で失敗する。→ 近似反映はやめ、未反映として
+            //   「要・勤務パターン登録」を報告する(誤った時刻でSBを汚さない)。
+            warnings.push(`${entry.staff_name ?? ext} ${date}: ${day.start}〜${day.end} を包含するSB勤務パターンが無いため未反映(SBに該当時間帯を含む勤務パターンの登録が必要)`);
             outOfPatternDetails.push({
               staffName: entry.staff_name ?? ext,
               date,
               start: day.start, end: day.end,
               baseName: base.pattern.name,
               baseStart: base.pattern.start, baseEnd: base.pattern.end,
+              applied: false,
             });
+            skipped++;
+            continue;
           }
           customPlans.push({
             staffExt: ext,
@@ -3468,8 +3590,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   // (5) 一括入力で反映 (5日ずつ)
   const applyChunk = async (plan, chunkDays, firstYmd, expectText) => {
     if (!(await ensureBatchPanel())) throw new Error('一括入力パネルを開けません');
-    // スタッフ選択 (対象のみON)
-    const boxes = page.locator('input[name="staffIdList"]');
+    // スタッフ選択 (対象のみON)。★hair(/CLP/bt)は checkbox 名が stylistIdList、
+    //   esthetic は staffIdList。両対応にする(hairで staffIdList だけだと0件=誰も選択されず
+    //   一括入力が空振り→セルが変わらない、を実機ADERで確認)。
+    const boxes = page.locator('input[name="staffIdList"], input[name="stylistIdList"]');
     const n = await boxes.count().catch(() => 0);
     for (let i = 0; i < n; i++) {
       const b = boxes.nth(i);
@@ -3514,6 +3638,21 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
         const t = ((await page.locator(cellSel).textContent().catch(() => '')) || '').trim();
         if (plan.kind === 'off' ? t === '休' : t && t !== '休') return;
       }
+      // ★一括入力が反映されなかった(hair): batch panel の実DOMをダンプしてセレクタを確定する。
+      const dbg = await page.evaluate((sExt) => {
+        const cbNames = [...new Set(Array.from(document.querySelectorAll('input[type="checkbox"]')).map((e) => e.name).filter(Boolean))];
+        const staffCb = Array.from(document.querySelectorAll('input[type="checkbox"]')).find((e) => (e.value || '').toUpperCase() === sExt);
+        return {
+          staffIdList_n: document.querySelectorAll('input[name="staffIdList"]').length,
+          cbNames: cbNames.slice(0, 10),
+          radios: [...new Set(Array.from(document.querySelectorAll('input[type="radio"]')).map((e) => e.id || e.name).filter(Boolean))].slice(0, 14),
+          holidayBatch: !!document.getElementById('holidayBatch'),
+          workdayBatch: !!document.getElementById('workdayBatch'),
+          batchSet: !!document.getElementById('batchSet'),
+          targetCbName: staffCb ? (staffCb.name || '(noname)') : '(NOT FOUND)',
+        };
+      }, plan.staffExt).catch(() => null);
+      console.log('[SHIFTDBG batch ' + plan.staffExt + '] ' + JSON.stringify(dbg).slice(0, 700));
       // タイムアウトでも致命とせず続行 (最後の検証で拾う)
     } finally {
       page.off('dialog', onDialog);
@@ -4461,7 +4600,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // mouse/timing テレメトリを採点し、機械的な即クリックを bot とみなして高リスクな
   // 登録POSTを間欠的に 500/challenge する(銀座書込500の一因)。submit直前に少量の
   // マウス移動+hover+ランダム間(人間の確認時間)を挟みセンサースコアを上げ書込500を抑える。
-  const humanizeBeforeSubmit = async () => {
+  const humanizeBeforeSubmit = async (targetBtn) => {
+    const btn = targetBtn || registerBtn;
     const jit = (a, b) => a + Math.floor(Math.random() * (b - a));
     try {
       const vp = page.viewportSize() || { width: 1280, height: 800 };
@@ -4477,10 +4617,10 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         if (i === 3) { await page.mouse.wheel(0, jit(-260, -80)).catch(() => {}); await page.waitForTimeout(jit(150, 500)); }
       }
       // 登録ボタンへ「近づく→乗る」の2段。人間はボタン付近で一度止まる。
-      await registerBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await btn.scrollIntoViewIfNeeded().catch(() => {});
       await page.mouse.move(jit(120, vp.width - 120), jit(120, vp.height - 120), { steps: jit(10, 20) });
       await page.waitForTimeout(jit(200, 600));
-      await registerBtn.hover().catch(() => {});
+      await btn.hover().catch(() => {});
       await page.waitForTimeout(jit(900, 2200)); // 人間の "最終確認" 時間(長め)
     } catch (_e) { /* 人間化は best-effort */ }
   };
@@ -4511,6 +4651,10 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       if (!needsFinal) break;
       const finalBtn = page.locator('a#regist').first();
       if ((await finalBtn.count().catch(() => 0)) === 0) break;
+      // ★doComplete の最終「登録」POST も Akamai に採点される。従来ここが機械的な即クリック
+      //   だったため、書込500「混み合っている」/「まだ登録されていません」の一因になっていた
+      //   (Slack: doComplete を確定できませんでした)。押す前に人間化してセンサースコアを上げる。
+      await humanizeBeforeSubmit(finalBtn);
       await finalBtn.click({ timeout: 10_000 }).catch(() => {});
       finalConfirmClicked = true;
       const dl2 = Date.now() + 12_000;
@@ -4554,6 +4698,35 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       return fail(`SalonBoard側で対象時間が空いていません (${errText.slice(0, 60)})`, 'SLOT_NOT_AVAILABLE', false);
     }
     return fail(`登録時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
+  }
+
+  // SalonBoard の最終確認警告は jQuery UI のモーダルとして表示され、上の
+  // エラー専用 selector に入らない店舗がある。ここを見落とすと、明確な
+  // 「スタッフ受付可能数超過 / スタッフ予定あり」まで Akamai の一時障害
+  // (SB_REGISTER_INCOMPLETE) と誤分類して同じ予約を繰り返し送信してしまう。
+  // body 全文を使うのは、この SalonBoard 固有の明確な拒否文言だけに限定する。
+  const submitPageText = await page
+    .locator('body')
+    .innerText()
+    .catch(() => '');
+  const capacityExceeded = /スタッフの受付可能数を超えて/.test(submitPageText);
+  const scheduleConflict = /入力された振り分け日時にスタッフの予定が入っています/.test(submitPageText);
+  if (capacityExceeded || scheduleConflict) {
+    // ★エラーメッセージをスクショと一致させる(2026-07-17 ユーザ指摘): 「受付可能数超過」か
+    //   「予定重複」かを判別し、可能なら受付可能数の実値も読んで、曖昧な"または"を出さない。
+    let capVal = null;
+    try {
+      capVal = await page.evaluate(() => {
+        const m = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').match(/受付可能数[:：\s]*([0-9]+)/);
+        return m ? m[1] : null;
+      });
+    } catch (_e) { /* noop */ }
+    // このページ(=受付可能数/予定重複の警告画面)のスクショを撮り、通知の文言と画像を一致させる。
+    captureErrorShot(page, capacityExceeded ? 'capacity_exceeded' : 'schedule_conflict');
+    const reason = capacityExceeded
+      ? `SalonBoard側で担当スタッフの受付可能数を超過${capVal != null ? `(受付可能数=${capVal})` : ''}しているため登録できません。該当日時のシフト/受付枠が不足しています(シフト未設定なら0枠、既存予約で満杯なら上限到達)。担当スタッフのシフト・受付可能数をご確認ください。`
+      : 'SalonBoard側で同時刻に担当スタッフの予定(既存予約/ブロック)が入っているため登録できません。予約日時・担当スタッフをご確認ください。';
+    return fail(reason, 'SLOT_NOT_AVAILABLE', true);
   }
 
   // 完了画面から reserveId / detail_url
@@ -5175,6 +5348,24 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   if (!enableChange) {
     return { status: 'confirm_only' };
   }
+
+  // 3.5) ★電話番号のハイフン除去。変更フォームは既存の電話番号を保持しているが、SB の
+  //   変更バリデーションはハイフン付きを「※ハイフンなしで入力してください」で弾く。
+  //   電話予約(YG)は手入力でハイフンが入りがちで、こちらは電話を変更しないのに
+  //   既存値のまま送信 → 弾かれて失敗していた(実障害: YG88774889 で4連敗)。
+  //   送信前に電話らしきフィールド(ハイフン有り+数字10桁以上)のみ数字のみへ正規化する。
+  await page.evaluate(() => {
+    const looksPhone = (v) => typeof v === 'string' && /-/.test(v) && v.replace(/[^\d]/g, '').length >= 10;
+    document
+      .querySelectorAll('input#tel, input[name="tel"], input[type="tel"], input[name*="Tel"], input[name*="phone" i]')
+      .forEach((el) => {
+        if (el && looksPhone(el.value)) {
+          el.value = el.value.replace(/[^\d]/g, '');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+  }).catch(() => {});
 
   // 4) 確定: 実DOMでは画面下部の <a id="change" class="mod_btn_50">確定する</a> が
   //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
@@ -10374,30 +10565,111 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   const role = p.role ?? p.job_type ?? p.position ?? null;
   const nomination = p.nomination ?? p.shimei ?? null; // '可能' | '不可'
 
-  // staffList → 該当行の staffEdit へ遷移
-  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  // ★掲載管理はジャンルで URL 接頭辞が違う。美容室(hair)=スタイリスト掲載=/CNB/draft/stylistList、
+  //   エステ/ネイル/まつげ=/CNK/draft/staffList。hair店で /CNK 固定だと該当スタッフが居らず
+  //   staffEdit に到達できず全 hair店が no_edit_page で失敗していた(2026-07-16 26件/24h)。
+  const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
+  const listUrl = genre === 'hair' ? '/CNB/draft/stylistList/' : '/CNK/draft/staffList';
+
+  // staffList/stylistList → 該当行の 編集画面 へ遷移
+  if (genre === 'hair') {
+    // ★hair掲載スタイリスト一覧はサロン未選択だと「ユーザエラー」で空になる(count=0)。
+    //   動く scrapeStylists と同様 groupTop→サロン選択→一覧 の順で入り、跳ね返り時は再選択して入り直す。
+    if (opts.salonId) {
+      await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    }
+    await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => ({ selected: false }));
+    if (sel && sel.selected) {
+      await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+  } else {
+    await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
 
-  // 詳細リンク(onclick に extId を含む a) をクリック。無ければ staffEdit(extId) を直接呼ぶ。
-  const navLink = page.locator(`a[onclick*="${extId}"]`).first();
+  // ★probe: genre別に一覧の編集導線と {id,名前} を掴む。
+  //   hair=掲載T-code(frmStylistListStylistDtoList.stylistId), esthetic=staffEdit('Wxxx') onclick。
+  if (p.probe === true) {
+    const ld = await page.evaluate((g) => {
+      if (g === 'hair') {
+        const ids = Array.from(document.querySelectorAll('input[name^="frmStylistListStylistDtoList["][name$=".stylistId"]')).filter((el) => (el.value || '').trim());
+        const list = ids.slice(0, 30).map((inp) => {
+          const tr = inp.closest('tr');
+          const cells = tr ? Array.from(tr.querySelectorAll('td.td_value_store_c')).map((c) => (c.textContent || '').trim().replace(/\s+/g, ' ')).filter((t) => t && t !== '-' && !/^No\.?\s*\d*$/.test(t)) : [];
+          return { id: inp.value.trim(), name: cells[0] || '' };
+        });
+        return { mode: 'hair', count: ids.length, list };
+      }
+      // esthetic: staffEdit('Wxxx') を含む onclick を持つ要素を集める
+      const eds = Array.from(document.querySelectorAll('[onclick]')).filter((e) => /staffEdit|staffId|W0\d/.test(e.getAttribute('onclick') || ''));
+      const list = eds.slice(0, 30).map((e) => {
+        const oc = e.getAttribute('onclick') || '';
+        const m = oc.match(/'([A-Za-z]?\d{6,})'/) || oc.match(/(W0\d{6,})/);
+        const tr = e.closest('tr');
+        const nm = tr ? (Array.from(tr.querySelectorAll('td')).map((c) => (c.textContent || '').trim()).filter((t) => t && t.length < 30 && !/^\d+$/.test(t))[0] || '') : (e.textContent || '').trim().slice(0, 16);
+        return { id: m ? m[1] : '?', tag: e.tagName.toLowerCase(), oc: oc.slice(0, 50), name: nm };
+      });
+      // 一覧が空なら、テーブル行 + 全リンクのサンプルも返す
+      const anyRows = document.querySelectorAll('table tr').length;
+      return { mode: 'esthetic', count: eds.length, anyRows, list };
+    }, genre).catch((e) => String((e && e.message) || e));
+    console.log('[STAFFDBG list ' + genre + ' url=' + page.url().replace('https://salonboard.com', '') + '] ' + JSON.stringify(ld).slice(0, 2200));
+  }
+
+  // ★編集リンクは staffEdit('Wxxx')/stylistEdit(...) を明示指定する。
+  //   1行に showErrorPopup/staffEdit/staffUnpresent/staffDelete の4アンカーが全てextIdを含むため、
+  //   単純な a[onclick*=extId] だと先頭の showErrorPopup を掴んで編集画面に行けなかった(no_edit_page 真因)。
+  const navLink = page.locator(`a[onclick*="staffEdit('${extId}')"], a[onclick*="stylistEdit('${extId}')"]`).first();
   if ((await navLink.count().catch(() => 0)) > 0) {
     await Promise.all([
       page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}),
       navLink.click({ timeout: 10_000 }).catch(() => {}),
     ]);
   } else {
-    await page.evaluate((id) => { try { if (typeof staffEdit === 'function') staffEdit(id); } catch (_e) { /* noop */ } }, extId).catch(() => {});
+    await page.evaluate((id) => {
+      try { if (typeof stylistEdit === 'function') { stylistEdit(id); return; } } catch (_e) { /* noop */ }
+      try { if (typeof staffEdit === 'function') staffEdit(id); } catch (_e) { /* noop */ }
+    }, extId).catch(() => {});
     await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
   }
   await page.waitForTimeout(800);
-  // staffEdit 到達確認 (名前 or フリガナ ラベルの入力欄)
+  // 編集画面 到達確認 (名前 or フリガナ ラベルの入力欄 / URL)
   const onEdit = (await page.locator('tr:has(th:has-text("名前")) input, tr:has(th:has-text("フリガナ")) input').count().catch(() => 0)) > 0
-    || /staffEdit/i.test(page.url());
+    || /staffEdit|stylistEdit/i.test(page.url());
   if (!onEdit) {
-    const cap = await captureScrapeDebug(page, 'staffprofile', 'no_edit_page', { diagnostics: { url: page.url(), extId } });
-    return fail(`スタッフ編集画面(staffEdit)に到達できませんでした (capture=${cap || '?'})`, 'STAFF_MAPPING_NOT_FOUND', true);
+    const cap = await captureScrapeDebug(page, 'staffprofile', 'no_edit_page', { diagnostics: { url: page.url(), extId, genre, listUrl } });
+    // ★一覧のロード遅延/同時実行負荷で staffEdit リンクを掴めないことが多い(中目黒で
+    //   no_edit_page→再試行で成功を実証)。retryable にして自動再試行に任せる
+    //   (max_attempts で有界。真にSB未登録のスタッフは試行を使い切って manual に落ちる)。
+    return fail(`スタッフ編集画面(staffEdit/stylistEdit ${genre})に到達できませんでした (url=${page.url().replace('https://salonboard.com', '')}, capture=${cap || '?'})`, 'STAFF_MAPPING_NOT_FOUND', false);
   }
+  // ★hair の stylistEdit はフォーム項目のラベルが staffEdit と違う可能性があるため、初回に th ラベルと
+  //   入力欄の対応を1行だけダンプして実体を確認する(genre-aware化の検証用)。
+  if (p.probe === true) {
+    const fld = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('tr')).filter((tr) => tr.querySelector('th') && tr.querySelector('input,textarea,select'));
+      return rows.map((tr) => {
+        const th = (tr.querySelector('th') || {}).textContent || '';
+        const inp = tr.querySelector('input,textarea,select');
+        return (th.replace(/\s+/g, '') + '=' + (inp ? (inp.tagName.toLowerCase() + (inp.type ? '[' + inp.type + ']' : '') + (inp.name ? '#' + inp.name : '')) : '?'));
+      }).slice(0, 25).join(' | ');
+    }).catch((e) => String((e && e.message) || e));
+    const btns = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('a,button,input[type="submit"],input[type="button"],input[type="image"]'))
+        .filter((e) => { const t = (e.textContent || '') + (e.getAttribute('value') || '') + (e.getAttribute('alt') || '') + (e.getAttribute('onclick') || ''); return /登録|確定|保存|設定|更新|regist|submit|confirm|save|complete|doRegist|check/i.test(t); })
+        .map((e) => (e.tagName.toLowerCase() + (e.type ? '[' + e.type + ']' : '') + ':' + ((e.textContent || e.getAttribute('value') || e.getAttribute('alt') || '').trim().slice(0, 12)) + (e.className ? '.' + e.className.slice(0, 20) : '') + (e.getAttribute('onclick') ? '#oc=' + e.getAttribute('onclick').slice(0, 40) : '')))
+        .slice(0, 12).join(' | ');
+    }).catch((e) => String((e && e.message) || e));
+    console.log('[STAFFDBG ' + genre + '] url=' + page.url().replace('https://salonboard.com', '') + ' fields=' + fld + ' || BTNS=' + btns);
+    if (p.probe === true) return { status: 'ok', probe: true, summary: `到達OK(${genre}) ${page.url().replace('https://salonboard.com', '')}`, fields: fld };
+  }
+  // probe: 到達確認のみ(書込しない)。genre-aware化の安全検証用。
+  if (p.probe === true) return { status: 'ok', probe: true, summary: `到達OK(${genre}) ${page.url().replace('https://salonboard.com', '')}` };
 
   // ラベルベースで各欄を入力 (th ラベルと同じ行の入力欄)
   const fillText = async (label, value) => {
@@ -10408,9 +10680,27 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     await loc.fill(String(value), { timeout: 5000 }).catch(() => {});
     return true;
   };
+  // ★名前/フリガナは SB上「姓」+「名」の2欄で両方必須。KD は単一の name/furigana しか持たないため
+  //   「姓だけ埋めて名が空」→ SBが「名前(名)を入力してください / フリガナ(名)…」で保存拒否していた
+  //   (中目黒 Hinako 実障害・ユーザ提供スクショで確定)。
+  //   方針: 姓欄が既に入っている(=SB登録済で名前は既に正しい)なら 名前/フリガナ は一切触らず、
+  //   SBの厳格な再バリデーションを誘発せずプロフィール項目(キャッチ/自己紹介/職種/性別/指名)だけ同期する。
+  //   姓が空(新規)の時だけ、空白区切りで 姓/名 に分割して両欄を埋める(単一トークンは姓のみ)。
+  const fillName = async (label, value) => {
+    const inputs = page.locator(`tr:has(th:has-text("${label}")) input[type="text"], tr:has(th:has-text("${label}")) input:not([type])`);
+    const n = await inputs.count().catch(() => 0);
+    if (n === 0) return false;
+    const seiCur = ((await inputs.nth(0).inputValue().catch(() => '')) || '').trim();
+    if (seiCur !== '') return 'kept'; // 既存名を保持(上書きせず、名欄が空でも触らない=再バリデーション回避)
+    if (value == null || String(value).trim() === '') return false;
+    const parts = String(value).trim().split(/[\s　]+/).filter(Boolean);
+    await inputs.nth(0).fill(parts[0] || String(value).trim(), { timeout: 5000 }).catch(() => {});
+    if (n > 1 && parts.length > 1) await inputs.nth(1).fill(parts.slice(1).join(' '), { timeout: 5000 }).catch(() => {});
+    return true;
+  };
   const applied = {};
-  applied.name = await fillText('名前', name);
-  applied.furigana = await fillText('フリガナ', furigana);
+  applied.name = await fillName('名前', name);
+  applied.furigana = await fillName('フリガナ', furigana);
   applied.catch = await fillText('キャッチ', catchCopy);
   applied.bio = await fillText('自己紹介', bio);
   applied.role = await fillText('職種', role);
@@ -10430,26 +10720,56 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   try {
-    const btn = page.locator('a:has-text("登録"):visible, input[type="submit"][value*="登録"], input[type="image"][alt*="登録"], input[type="button"][value*="登録"], button:has-text("登録")').first();
+    // ★登録は <a onclick="moveToRegist('staffForm',...)"> を厳密に狙う。
+    //   a.moveBtn.chk 等を union に入れると Playwright は DOM順で先頭を返すため、別の「設定」アンカーを
+    //   掴んで /KLP/schedule へ飛ぶ不具合があった(2026-07-17)。まず staffForm の登録を単独で探す。
+    let btn = page.locator(`a[onclick*="moveToRegist('staffForm'"]`).first();
+    if ((await btn.count().catch(() => 0)) === 0) {
+      // 他genre / フォールバック: 登録テキスト・画像ボタン
+      btn = page.locator(`input[type="image"][alt="登録"], input[type="submit"][value="登録"], a:has-text("登録する"):visible, a:has-text("登録"):visible, button:has-text("登録")`).first();
+    }
     if ((await btn.count().catch(() => 0)) === 0) {
       const cap = await captureScrapeDebug(page, 'staffprofile', 'no_regist', { diagnostics: { url: page.url() } });
       return fail(`スタッフ編集の登録ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
     await Promise.all([
       page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-      btn.click({ timeout: 12_000 }).catch(() => {}),
+      btn.click({ timeout: 12_000, force: true }).catch(() => {}),
     ]);
     await page.waitForTimeout(1500);
-    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("OK"):visible').first();
+    if (p.debug_submit === true) {
+      const d = await page.evaluate(() => {
+        const bt = Array.from(document.querySelectorAll('a,button,input[type="submit"],input[type="button"],input[type="image"]'))
+          .filter((e) => (e.offsetParent !== null))
+          .map((e) => (e.tagName.toLowerCase() + ':' + ((e.textContent || e.getAttribute('value') || e.getAttribute('alt') || '').trim().slice(0, 12)) + (e.getAttribute('onclick') ? '#' + e.getAttribute('onclick').slice(0, 40) : ''))).filter((x) => x.length > 3).slice(0, 14);
+        const body = (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 200);
+        return { btns: bt.join(' | '), bodyHead: body };
+      }).catch((e) => String((e && e.message) || e));
+      console.log('[STAFFDBG post-submit] url=' + page.url().replace('https://salonboard.com', '') + ' ' + JSON.stringify(d));
+    }
+    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("OK"):visible, a[onclick*="doRegist"]:visible, a[onclick*="moveToRegist"]:visible').first();
     if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
   } finally {
     page.off('dialog', onDialog);
   }
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
-  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正|文字数).{0,30}/);
-  // reRead: staffEdit を再度開き 名前 が保存されているか
-  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  const re = page.locator(`a[onclick*="${extId}"]`).first();
+  const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須項目|エラー|不正な|文字数).{0,30}/);
+  // ★SB が「登録が完了しました」を返したら保存成功が確定(doRegister着地)。
+  //   reRead ナビゲーションは doRegister 直後だと不安定で current=null 偽陰性になるため、
+  //   まず完了メッセージ/URL で成功判定する。(HPB反映は掲載管理の「反映申請」が別途必要=下記注記)
+  const registeredOk = /登録が完了|変更が完了|完了しました/.test(afterBody) || /doRegister|doRegist/i.test(page.url());
+  if (registeredOk && !errMatch) {
+    return { status: 'ok', externalId: extId, summary: `スタッフ情報を更新しました(${genre})`, confirmed: { ...applied, dialogAccepted, registered: true }, note: 'HPB反映は掲載管理の反映申請が別途必要' };
+  }
+  // reRead: 編集画面を再度開き 名前 が保存されているか
+  if (genre === 'hair' && opts.salonId) {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  }
+  await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+  const re = page.locator(`a[onclick*="staffEdit('${extId}')"], a[onclick*="stylistEdit('${extId}')"]`).first();
   if ((await re.count().catch(() => 0)) > 0) {
     await Promise.all([page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}), re.click({ timeout: 10_000 }).catch(() => {})]);
     await page.waitForTimeout(800);
@@ -10464,10 +10784,16 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     }
     return { persisted: wantName == null || cur === wantName, current: cur };
   }, name).catch(() => ({ persisted: false, current: null }));
-  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
-  if (name && !reRead.persisted) {
+  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead, nameApplied: applied.name };
+  // 名前は「kept(既存保持)」の場合は上書きしていないので永続化検証しない(false-fail防止)。
+  if (name && applied.name === true && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'staffprofile', 'not_persisted', { diagnostics: diag });
-    return { status: 'failed', reason: `スタッフ名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+    // ★バリデーションエラー(利用不可文字/必須未入力等)は決定的なので manual。
+    //   それ以外(err=null で完了サイン未検出/reRead で current=null)は Akamai/描画遅延・
+    //   同時実行負荷による一過性が大半(単発では成功する: Hinako 実証)。retryable にして
+    //   ジョブ単位の自動再試行(max_attempts)で確実に通す。
+    const deterministic = !!errMatch;
+    return { status: 'failed', reason: `スタッフ名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: deterministic ? 'UNKNOWN_ERROR' : 'STAFF_SAVE_UNVERIFIED', manualRequired: deterministic, diag };
   }
   return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
 }
@@ -10485,7 +10811,15 @@ async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const p = payload || {};
-  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+  // ★ネイティブ confirm() を承認する。SB の 設定(scheduleUpdate)は
+  //   「受付可能数を変更します。よろしいですか？」の window.confirm() を出すが、dialog ハンドラ未登録だと
+  //   Playwright が既定で Cancel(dismiss)→保存が中断され値が baseline に戻る(=画面3→保存後1 の真因)。
+  //   他の全書込スクレイパと同様 accept() する。dialogMsgs / lastSaveInfo は診断用。
+  const dialogMsgs = [];
+  let lastSaveInfo = null;
+  const onDialog = async (d) => { dialogMsgs.push(String(d.message() || '').slice(0, 120)); try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired, debug: { dialogMsgs, lastSaveInfo } });
 
   const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
   if (genre !== 'hair') return fail('受付可能数の同期は美容室(hair)のみ対応です', 'GENRE_UNSUPPORTED', false);
@@ -10594,46 +10928,146 @@ async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
     };
   }
 
-  // --- 本番: 戻す(SB既定へ) → 各slot +/- → 設定 ---
-  await page.evaluate(() => { const r = document.querySelector('a.mod_sch_reset.scheduleReset, a.scheduleReset'); if (r) r.click(); }).catch(() => {});
-  await page.waitForTimeout(500).catch(() => {});
-
-  const applied = [];
-  for (const s of slots) {
-    const key = hhmm(s.slot_min);
-    const btnSel = s.delta > 0 ? 'a.mod_btn_08' : 'a.mod_btn_09';
-    for (let i = 0; i < Math.abs(s.delta); i++) {
-      await page.evaluate(({ id, btnSel }) => {
-        const cell = document.getElementById(id);
-        const b = cell && cell.querySelector(btnSel);
-        if (b) b.click();
-      }, { id: 'surplus_' + key, btnSel }).catch(() => {});
-      await page.waitForTimeout(120).catch(() => {});
+  // --- 本番: 集計欄表示 → 戻す → 各slot +/-(実クリック) → 設定 → 再読込で保存を検証 ---
+  // ★実クリック(locator.click)にする理由: page.evaluate の el.click() は <p> 表示は
+  //   更新するが、+/- の jQuery ハンドラ(tm_edit_surplus 更新)や 設定AJAX が完全に発火せず
+  //   「設定成功に見えるが SB に保存されない」不具合があった(2026-07-14 郡山 15:30→4 が
+  //   保存されず 3 のまま)。ユーザーと同じ実クリックにし、設定後は再読込して保存値を検証する。
+  const keys = slots.map((s) => hhmm(s.slot_min));
+  // 集計欄を表示(実クリック)。既に「隠す」状態=表示済みなら skip。
+  //   evaluate click では AJAX の集計欄ロードが発火しないことがあった → 実クリック(isTrusted)にする。
+  const revealTally = async () => {
+    const hide = page.locator('text=集計欄を隠す').first();
+    if ((await hide.count().catch(() => 0)) > 0 && (await hide.isVisible().catch(() => false))) return;
+    const show = page.locator('text=集計欄を表示').first();
+    if ((await show.count().catch(() => 0)) > 0) {
+      await show.scrollIntoViewIfNeeded().catch(() => {});
+      await show.click({ timeout: 5_000, force: true }).catch(() => {});
+      await page.locator('text=残り受付可能数').first().waitFor({ state: 'attached', timeout: 6_000 }).catch(() => {});
+      await page.waitForTimeout(500).catch(() => {});
     }
-    const after = await page.evaluate((k) => {
+  };
+  const readSlots = (ks) => page.evaluate((keys2) => {
+    const out = {};
+    for (const k of keys2) {
       const cell = document.getElementById('surplus_' + k);
       const cur = parseInt(((cell && cell.querySelector('p') || {}).textContent || '').trim(), 10);
-      const edit = document.querySelector('input[name="tm_edit_surplus_' + k + '"]');
-      return { value: Number.isFinite(cur) ? cur : null, edit: edit ? Number(edit.value) : null };
-    }, key).catch(() => ({ value: null, edit: null }));
-    applied.push({ hhmm: key, delta: s.delta, resultValue: after.value, editValue: after.edit });
+      out[k] = Number.isFinite(cur) ? cur : null;
+    }
+    return out;
+  }, ks).catch(() => ({}));
+
+  // ★「残り受付可能数」ラベル(▼)をタップして +/- 編集モードを展開する。これが reveal の本体。
+  //   ユーザ提供手順(2026-07-15)で確定: 集計欄を表示 だけでは +/- は display:none のまま。
+  //   残り受付可能数 をタップすると +/- と 戻す/設定 が現れ編集モードに入り、実クリックが SB に登録される。
+  let beforeVals = {};
+  const surplusVisible = async () => (await page.locator('#surplus_' + keys[0] + ' a.mod_btn_08').isVisible().catch(() => false));
+  const expandSurplusEdit = async () => {
+    if (keys.length === 0) return false;
+    if (await surplusVisible()) return true;
+    // ★#limitSchedule の th 内 <a class="mod_btn_47 limitSeats">残り受付数</a> を実クリックすると
+    //   隠れていた 戻す/設定(span.mod_separator_01) が現れ、各セルの +/-(mod_btn_08/09) が可視化される。
+    const toggle = page.locator('#limitSchedule a.limitSeats, a.mod_btn_47.limitSeats, a.limitSeats').first();
+    await toggle.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {}); // 初回はページ描画待ちで空振りしやすい
+    for (let i = 0; i < 5; i++) {
+      if ((await toggle.count().catch(() => 0)) > 0) {
+        await toggle.scrollIntoViewIfNeeded().catch(() => {});
+        await toggle.click({ timeout: 4_000, force: true }).catch(() => {});
+      } else {
+        await revealTally();
+      }
+      await page.waitForTimeout(700).catch(() => {});
+      if (await surplusVisible()) return true;
+    }
+    return surplusVisible();
+  };
+
+  const applyOnce = async () => {
+    await revealTally();
+    await expandSurplusEdit();
+    const resetBtn = page.locator('a.scheduleReset, a.mod_sch_reset').first();
+    if ((await resetBtn.count().catch(() => 0)) > 0) {
+      await resetBtn.scrollIntoViewIfNeeded().catch(() => {});
+      await resetBtn.click({ timeout: 5_000, force: true }).catch(() => {});
+      await page.waitForTimeout(500).catch(() => {});
+    }
+    // 戻す後(=baseline)の値を記録。期待値 = baseline + delta。inPage/persisted がこれと一致しなければ
+    // 「+/- が効いていない偽成功」or「未保存」として失敗にする。
+    beforeVals = await readSlots(keys);
+    // 編集モードで可視化された +/- を実クリック(isTrusted)。SB が変更を登録し 設定が保存POSTを出す。
+    for (const s of slots) {
+      const key = hhmm(s.slot_min);
+      const btnCls = s.delta > 0 ? 'mod_btn_08' : 'mod_btn_09';
+      const btnLoc = page.locator('#surplus_' + key + ' a.' + btnCls).first();
+      await btnLoc.scrollIntoViewIfNeeded().catch(() => {});
+      for (let i = 0; i < Math.abs(s.delta); i++) {
+        const ok = await btnLoc.click({ timeout: 3_000 }).then(() => true).catch(() => false);
+        if (!ok) await btnLoc.click({ timeout: 2_000, force: true }).catch(() => {});
+        await page.waitForTimeout(160).catch(() => {});
+      }
+    }
+    const inPage = await readSlots(keys);
+    const saveBtn = page.locator('a.scheduleUpdate, a.mod_sch_update').first();
+    if ((await saveBtn.count().catch(() => 0)) > 0) {
+      await saveBtn.scrollIntoViewIfNeeded().catch(() => {});
+      const [saveResp] = await Promise.all([
+        page.waitForResponse((r) => r.request().method() === 'POST' && /salonSchedule|schedule|surplus|receipt|Setting/i.test(r.url()), { timeout: 12_000 }).catch(() => null),
+        saveBtn.click({ timeout: 5_000, force: true }).catch(() => {}),
+      ]);
+      if (saveResp) { try { lastSaveInfo = `${saveResp.status()} ${saveResp.url().replace('https://salonboard.com', '')}`; } catch (_e) { /* noop */ } }
+      else lastSaveInfo = 'no-post-captured';
+      await page.waitForTimeout(1_200).catch(() => {});
+      for (const okSel of ['#confirmOK', '#dialogOK', '#dragDialog a.mod_btn_116', '#dragDialog a.mod_btn_118', 'a.mod_btn_07.scheduleUpdate']) {
+        const ok = page.locator(okSel).first();
+        if ((await ok.count().catch(() => 0)) > 0 && (await ok.isVisible().catch(() => false))) {
+          await ok.click({ timeout: 4_000, force: true }).catch(() => {});
+          await page.waitForTimeout(800).catch(() => {});
+          break;
+        }
+      }
+      await page.waitForTimeout(1_000).catch(() => {});
+    }
+    return inPage;
+  };
+
+  const reload = async () => {
+    const u2 = new URL('/CLP/bt/schedule/salonSchedule/', baseUrl);
+    u2.searchParams.set('date', ymd);
+    await page.goto(u2.toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    await page.waitForSelector('#limitSchedule', { timeout: 8_000 }).catch(() => {});
+    await revealTally();
+    return readSlots(keys);
+  };
+  // 期待値(戻す後 + delta)に保存後が達していなければ未達 → 再試行対象。
+  const needsRetry = (pe) => slots.some((s) => {
+    const k = hhmm(s.slot_min);
+    const exp = beforeVals[k] != null ? beforeVals[k] + s.delta : null;
+    return exp != null && pe[k] != null && pe[k] !== exp;
+  });
+
+  let inPage = await applyOnce();
+  let persisted = await reload();
+  if (needsRetry(persisted)) {
+    // 1回だけ再試行 (一時的な保存失敗/展開失敗の救済)。
+    inPage = await applyOnce();
+    persisted = await reload();
   }
 
-  // 設定(保存)。確認ダイアログが出たら OK。
-  await page.evaluate(() => { const u = document.querySelector('a.mod_sch_update.scheduleUpdate, a.scheduleUpdate'); if (u) u.click(); }).catch(() => {});
-  await page.waitForTimeout(1500).catch(() => {});
-  await page.evaluate(() => { const ok = document.querySelector('#confirmOK, #dialogOK'); if (ok && ok.offsetParent !== null) ok.click(); }).catch(() => {});
-  await page.waitForTimeout(1500).catch(() => {});
-
-  const post = await page.evaluate(() => ({
-    warn: ((document.querySelector('#warningMessageArea') || {}).innerText || '').replace(/\s+/g, ' ').trim(),
-  })).catch(() => ({ warn: '' }));
-
-  return {
-    status: 'ok',
-    summary: `受付可能数 設定(${ymd}): ${applied.map((a) => `${fmtHH(a.hhmm)}→${a.resultValue == null ? '?' : a.resultValue}(${a.delta > 0 ? '+' : ''}${a.delta})`).join(' ') || '0枠'}${post.warn ? ' 警告:' + post.warn.slice(0, 50) : ''}`,
-    date: dateStr, applied, warn: post.warn || null,
-  };
+  const applied = slots.map((s) => {
+    const k = hhmm(s.slot_min);
+    const before = beforeVals[k] ?? null;
+    const expected = before != null ? before + s.delta : null;
+    return { hhmm: k, delta: s.delta, before, expected, inPage: inPage[k] ?? null, persisted: persisted[k] ?? null };
+  });
+  // 失敗: 保存後(persisted)が 期待値(戻す後 + delta)と一致しない。
+  //   → 「+/-が効かず偽成功」も「未保存」もここで検出する(persisted==before の場合を含む)。
+  const notPersisted = applied.filter((a) => a.expected != null && a.persisted != null && a.persisted !== a.expected);
+  const summary = `受付可能数 ${notPersisted.length ? '⚠未保存' : '設定'}(${ymd}): ${applied.map((a) => `${fmtHH(a.hhmm)}→${a.persisted == null ? '?' : a.persisted}(${a.delta > 0 ? '+' : ''}${a.delta})`).join(' ') || '0枠'}`;
+  if (notPersisted.length) {
+    const b = notPersisted[0];
+    return { status: 'failed', reason: `設定がSBに保存されませんでした (例 ${fmtHH(b.hhmm)}: 戻す後${b.before}+(${b.delta})=期待${b.expected}→保存後${b.persisted})`, errorCode: 'ACCEPTANCE_NOT_PERSISTED', manualRequired: true, summary, date: dateStr, applied, debug: { dialogMsgs, lastSaveInfo } };
+  }
+  return { status: 'ok', summary, date: dateStr, applied, debug: { dialogMsgs, lastSaveInfo } };
 }
 
 module.exports = {

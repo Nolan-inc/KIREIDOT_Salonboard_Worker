@@ -178,6 +178,65 @@ const WORKER_CAPABILITIES = (process.env.WORKER_CAPABILITIES ?? "").trim();
 const APP_VERSION = process.env.APP_VERSION ?? readPkgVersion();
 const PLATFORM = process.platform;
 const POLL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
+
+// ── 予約書込3分SLA: fetch preemption ─────────────────────────────
+// 予約書込(push_booking/cancel_booking)が来た瞬間、同店で走行中の fetch を即 abort し、
+// SBセッション(同一アカウント同時1)を解放して書込を最優先実行する。
+// worker は Supabase の SECURITY DEFINER RPC salonboard_pending_write_shop_ids() を anon で叩き、
+// 走行中 fetch の shop_id が含まれたら AbortController.abort() する(scrapeBookings が signal を見て打切り)。
+const SUPABASE_URL =
+  process.env.SB_SUPABASE_URL ?? "https://cxbqbjrxsuuabhxlrdpz.supabase.co";
+const SUPABASE_ANON_KEY =
+  process.env.SB_SUPABASE_ANON_KEY ??
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN4YnFianJ4c3V1YWJoeGxyZHB6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MzQxODksImV4cCI6MjA5MDAxMDE4OX0.2HtTA5VQ4dArBjLmM5hg_T5bhb42d_xHgK8azBfP6dE";
+// jobId -> { shopId, controller, page }。走行中 fetch のみ登録。
+// page も持ち、preempt 時に close して in-flight のページ操作を即座に打切る(signalだけだと
+// ループ外の goto/waitForSelector を待ってしまい数十秒かかるため)。
+const _fetchAbort = new Map<
+  string,
+  { shopId: string; controller: AbortController; page: { close: () => Promise<void> } }
+>();
+async function fetchPendingWriteShops(): Promise<string[]> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/rpc/salonboard_pending_write_shop_ids`,
+      {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      },
+    );
+    if (!res.ok) return [];
+    const arr = (await res.json()) as unknown;
+    return Array.isArray(arr) ? (arr as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+async function preemptFetchesForWrites(): Promise<void> {
+  if (_fetchAbort.size === 0) return;
+  const shops = await fetchPendingWriteShops();
+  if (!shops.length) return;
+  const pending = new Set(shops);
+  for (const [jobId, f] of _fetchAbort) {
+    if (pending.has(f.shopId) && !f.controller.signal.aborted) {
+      console.log(
+        `[preempt] 予約書込pending shop=${f.shopId.slice(0, 8)} -> fetch ${jobId.slice(0, 8)} を中断`,
+      );
+      f.controller.abort();
+      // in-flight のページ操作を即中断(goto/waitForSelector 等が Target closed で throw)。
+      try {
+        void f.page.close();
+      } catch {
+        /* noop */
+      }
+    }
+  }
+}
 const DRY_RUN =
   /^(1|true|yes)$/i.test(process.env.DRY_RUN ?? "") ||
   process.argv.includes("--dry-run");
@@ -1492,6 +1551,12 @@ async function handleJob(job: Job): Promise<void> {
       const result = await scrapers.pushShiftsViaForm(page, job.payload, {
         baseUrl,
         enablePush: ENABLE_PUSH,
+        // ★genre/salonId を渡す。美容室(hair)はシフト設定が /CLP/bt/set 配下 + サロン選択必須で、
+        //   従来は /KLP 固定だったため ADER/マグ等 hair 店が全て「毎月の受付設定」未到達で失敗していた。
+        genre,
+        salonId,
+        shopName,
+        relogin: makeRelogin(page, baseUrl, job.credentials),
       });
       await reportScraperResult(job, "push_shifts", result, {}, page);
       return;
@@ -1712,17 +1777,50 @@ async function handleJob(job: Job): Promise<void> {
       } catch {
         /* warmup is best-effort */
       }
-      // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
-      const { rows, debug, acceptance } = (await scrapers.scrapeBookings(page, {
-        baseUrl,
-        genre,
-        salonId,
-        shopName,
-        loginId: job.credentials.login_id,
-        password: job.credentials.password,
-        // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
-        relogin: makeRelogin(page, baseUrl, job.credentials),
-      })) as { rows: unknown[]; debug?: unknown; acceptance?: unknown[] };
+      // ★preemption: このfetch用 AbortController を登録。予約書込が来たら preemptFetchesForWrites が abort。
+      const _fetchAc = new AbortController();
+      _fetchAbort.set(job.id, {
+        shopId: (job as { shop_id: string }).shop_id,
+        controller: _fetchAc,
+        page: page as unknown as { close: () => Promise<void> },
+      });
+      let rows: unknown[];
+      let debug: unknown;
+      let acceptance: unknown[] | undefined;
+      try {
+        // loginId/password は debug capture の PII マスク用に渡す (PC と同じ)。
+        ({ rows, debug, acceptance } = (await scrapers.scrapeBookings(page, {
+          baseUrl,
+          genre,
+          salonId,
+          shopName,
+          loginId: job.credentials.login_id,
+          password: job.credentials.password,
+          // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
+          relogin: makeRelogin(page, baseUrl, job.credentials),
+          abortSignal: _fetchAc.signal,
+        })) as { rows: unknown[]; debug?: unknown; acceptance?: unknown[] });
+      } catch (e) {
+        if (
+          _fetchAc.signal.aborted ||
+          /aborted|preempt|target closed|has been closed|closed/i.test(
+            String((e as { message?: string })?.message ?? e),
+          )
+        ) {
+          // 予約書込にレーンを譲るため fetch を中断。requeue して次回取得に回す。
+          await report({
+            job_id: job.id,
+            job_type: "fetch_bookings",
+            status: "retryable_failed",
+            error: "preempted by booking write (requeue)",
+          } as unknown as CallbackBody);
+          console.log(`[job] done  ${tag} (fetch_bookings preempted -> requeue)`);
+          return;
+        }
+        throw e;
+      } finally {
+        _fetchAbort.delete(job.id);
+      }
       // hair フローはログアウトを throw せず debug.loggedOut で返すことがある。
       // succeeded(0件) にすると同期がサイレントに消えるので retryable に倒す。
       if ((debug as { loggedOut?: boolean } | undefined)?.loggedOut) {
@@ -1975,6 +2073,11 @@ let _lastProxyCheck = 0;
 // 保証するので、ここでは「プロセス全体の同時実行数」だけを上限管理する。別店舗(=別ISP
 // IP/別セッション)は安全に並行可能(店舗→IPは pickProxy で sticky)。
 const _inFlight = new Map<string, Promise<unknown>>();
+// ★②A(セッション保護): 現在開いている全 BrowserContext を追跡する。デプロイ(SIGTERM)時に
+//   これらを明示 close して cookie/_abck を userDataDir に flush する。docker の SIGKILL で
+//   Chrome を強制killするとセッションが未flush → 次起動で全店再ログイン → Akamaiスロットル、
+//   という今日の障害連鎖を断つ。close は Playwright の 'close' イベントで自動的に集合から外す。
+const _openContexts = new Set<BrowserContext>();
 // 同時実行数。env追加はコンテナ再作成(=全店セッション消失)になるため、ファイルでも上書き可。
 // 既定は控えめ。Decodo IP数(現状10)が真の上限。インスタンス増強後はファイルで引き上げる。
 function maxConcurrency(): number {
@@ -2451,6 +2554,9 @@ async function launchStealthContext(opts: {
       }
     })
     .catch(() => {});
+  // ★②A: このコンテキストを追跡。close時(正常/シャットダウン)に集合から自動除外。
+  _openContexts.add(ctx);
+  ctx.on("close", () => _openContexts.delete(ctx));
   return ctx;
 }
 
@@ -4433,8 +4539,13 @@ const JOB_SAFETY_TIMEOUT_MS = Number(
 // fetch_bookings は美容室(hair)の日次スケジュール巡回で 90日×数秒 ≒ 9分かかるため別枠。
 // 8分だと毎回タイムアウト→レーン解放→次ジョブが生きた Chrome と同一プロファイルで衝突
 // →セッション相互破壊→ログイン連打で IP フラグ、という連鎖の起点になっていた(2026-07-04 郡山)。
+// ★予約書込3分SLAは (1) claim RPCの fetch同時実行cap(=書込用に常時2スロット予約) と
+//   (2) 同一lane走行fetchの preemption(AbortController+page.close) の2段で担保するように
+//   なったため、fetch を短時間で強制killする必要はなくなった。むしろ 210s だと正当な
+//   90日hair fetch(~9分)を毎回kill→再キュー→再実行の二重走行/storm を招いていた
+//   (実測: 242件doneの直後にTIMEOUTログ→再キューの競合)。真のハング検出用に 12分へ戻す。
 const FETCH_SAFETY_TIMEOUT_MS = Number(
-  process.env.SB_FETCH_TIMEOUT_MS ?? 15 * 60_000, // 既定 15 分
+  process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
 );
 
 async function handleJobGuarded(job: Job): Promise<void> {
@@ -4942,17 +5053,39 @@ async function main() {
   while (!stopping) {
     const processed = await pollOnce();
     if (stopping) break;
+    // ★予約書込が来ていたら、その店で走行中の fetch を即 abort(preemption)。
+    await preemptFetchesForWrites();
     // ジョブがあった/進行中なら短め(スロットを埋める)。完全アイドル時のみ最大5s。
+    // fetch 走行中は preemption を早く効かせるため 1.5s 周期にする。
     const busy = processed > 0 || _inFlight.size > 0;
-    const wait = busy ? 1_000 : Math.min(POLL_MS, 5_000);
+    const wait =
+      _fetchAbort.size > 0 ? 1_500 : busy ? 1_000 : Math.min(POLL_MS, 5_000);
     await sleep(wait);
   }
-  // シャットダウン時は進行中ジョブの完了を待つ(callback を取りこぼさない)。
+  // ★②A(セッション保護シャットダウン):
+  //  1) in-flight を最大 SHUTDOWN_DRAIN_MS 待つ(callback取りこぼし防止。書込のcritical section
+  //     は requestShutdown により submit前に中断済み)。長尺fetchは待ち切らない。
+  //  2) 残存も含め **全 BrowserContext を明示 close** して cookie/_abck を userDataDir に flush。
+  //     → 次起動は isLoggedIn=true で **再ログイン不要 → Akamaiスロットル回避**(今日の障害の根治)。
+  //  ⚠️ docker の stop 猶予(stop_grace_period / stop -t)を SHUTDOWN_DRAIN_MS より長く設定必須。
+  //     既定10秒だと SIGKILL が先行し この処理が走らず、セッション未flush→再ログイン嵐を再発する。
+  const SHUTDOWN_DRAIN_MS = Number(process.env.SB_SHUTDOWN_DRAIN_MS ?? 25_000);
   if (_inFlight.size > 0) {
-    console.log(`[boot] draining ${_inFlight.size} in-flight job(s)...`);
-    await Promise.allSettled(Array.from(_inFlight.values()));
+    console.log(
+      `[boot] draining ${_inFlight.size} in-flight job(s) (<=${Math.round(SHUTDOWN_DRAIN_MS / 1000)}s)...`,
+    );
+    await Promise.race([
+      Promise.allSettled(Array.from(_inFlight.values())),
+      sleep(SHUTDOWN_DRAIN_MS),
+    ]);
   }
-  console.log("[boot] bye");
+  if (_openContexts.size > 0) {
+    console.log(`[boot] closing ${_openContexts.size} browser context(s) to flush sessions...`);
+    await Promise.allSettled(
+      Array.from(_openContexts).map((c) => c.close().catch(() => {})),
+    );
+  }
+  console.log("[boot] bye (sessions flushed)");
 }
 
 function sleep(ms: number) {
