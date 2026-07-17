@@ -48,3 +48,4 @@ release/linux-unpacked/
 # 配布用 .app の Resources/ に同梱される
 build-resources/playwright-browsers/
 scratch_deploy/
+local_tasks.db
