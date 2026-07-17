@@ -3404,29 +3404,87 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     console.log('[SHIFTDBG setUI ' + shiftGenre + '] ' + JSON.stringify(dump).slice(0, 1600));
     return fail('一括入力パネル (#batchSetPanel) を開けませんでした', 'UNKNOWN_ERROR', true);
   }
-  let patterns = await page.evaluate(() => {
-    const sel = document.querySelector('#shiftIdBatch');
-    if (!sel) return null;
-    return Array.from(sel.options)
-      .filter((o) => o.value)
-      .map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
-  }).catch(() => null);
+  // 一括入力パネルの select#shiftIdBatch から勤務パターン(id/name/時間帯)を読む。
+  //   時間帯は各optionを選択→#shiftTextBatch表示をパースして得る。
+  //   ★不足パターンをSBに新規登録した後に再取得するため関数化(B: KD時刻直書き)。
+  const readBatchPatterns = async () => {
+    const list = await page.evaluate(() => {
+      const sel = document.querySelector('#shiftIdBatch');
+      if (!sel) return null;
+      return Array.from(sel.options).filter((o) => o.value).map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
+    }).catch(() => null);
+    if (!list) return null;
+    for (const pat of list) {
+      await page.evaluate((id) => {
+        const sel = document.querySelector('#shiftIdBatch');
+        if (!sel) return;
+        sel.value = id;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }, pat.id).catch(() => {});
+      await page.waitForTimeout(250);
+      const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
+      const tr = parseTimeRange(txt);
+      if (tr) { pat.start = tr.start; pat.end = tr.end; }
+    }
+    return list;
+  };
+  let patterns = await readBatchPatterns();
   if (!patterns || patterns.length === 0) {
     return fail('勤務パターン一覧 (select#shiftIdBatch) を取得できませんでした', 'UNKNOWN_ERROR', true);
   }
-  for (const pat of patterns) {
-    await page.evaluate((id) => {
-      const sel = document.querySelector('#shiftIdBatch');
-      if (!sel) return;
-      sel.value = id;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    }, pat.id).catch(() => {});
-    await page.waitForTimeout(250);
-    const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
-    const tr = parseTimeRange(txt);
-    if (tr) { pat.start = tr.start; pat.end = tr.end; }
-  }
-  const timedPatterns = patterns.filter((x) => x.start && x.end);
+  const timeKey = (s, e) => `${s}-${e}`;
+  let timedPatterns = patterns.filter((x) => x.start && x.end);
+  let patternById = new Map(patterns.map((x) => [String(x.id), x]));
+  let patternByTime = new Map(timedPatterns.map((x) => [timeKey(x.start, x.end), x]));
+
+  const warnings = [];
+
+  // ── ★B(根治): KD時刻を直接SBへ。exact(開始・終了が完全一致)するSB勤務パターンが
+  //    無いKD時刻は、その場でSBに新規登録(KD→SB一方向)し、以後 exact で割り当てる。
+  //    これで fetch_shift_patterns / matched_preset_id 依存と、近似(予定方式/covers:false)
+  //    を撤廃し、常に KDの正しい時刻を SB へ書けるようにする。作成は enablePush 時のみ。
+  const ensureKdPatterns = async () => {
+    const needed = new Map(); // 'HH:MM-HH:MM' -> {start,end}
+    for (const entry of entries) {
+      for (const day of entry.days || []) {
+        if (!day || day.kind !== 'work') continue;
+        const date = String(day.date || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < todayJst) continue;
+        if (!/^\d{1,2}:\d{2}$/.test(String(day.start || '')) || !/^\d{1,2}:\d{2}$/.test(String(day.end || ''))) continue;
+        const k = timeKey(day.start, day.end);
+        if (!patternByTime.has(k)) needed.set(k, { start: day.start, end: day.end });
+      }
+    }
+    if (needed.size === 0) return;
+    if (!enablePush) {
+      for (const { start, end } of needed.values()) warnings.push(`要SB勤務パターン新規登録: ${start}-${end} (KD時刻・確認のみ)`);
+      return;
+    }
+    const toCreate = Array.from(needed.values()).map(({ start, end }) => ({
+      name: `KD ${start}-${end}`,
+      short_name: `${start}${end}`.replace(/:/g, ''), // 例 10001530 (SB短縮名; 切詰め時はテストで調整)
+      start, end,
+    }));
+    const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e) }));
+    for (const r of (cr?.results || [])) {
+      if (r.status === 'failed') warnings.push(`勤務パターン新規登録に失敗: ${r.name} (${r.reason || ''})`);
+    }
+    // 作成後: シフト設定画面へ戻り、パターン一覧とセルを再取得。
+    if (!(await openSetup())) {
+      warnings.push('不足勤務パターン登録後にシフト設定画面へ戻れませんでした(今回は既存パターンのみで反映)');
+      return;
+    }
+    await ensureBatchPanel();
+    const re = await readBatchPatterns();
+    if (re && re.length) {
+      patterns = re;
+      timedPatterns = patterns.filter((x) => x.start && x.end);
+      patternById = new Map(patterns.map((x) => [String(x.id), x]));
+      patternByTime = new Map(timedPatterns.map((x) => [timeKey(x.start, x.end), x]));
+    }
+    cells = await readCells().catch(() => cells);
+  };
+  await ensureKdPatterns();
   // DB保存用 (worker-process が salonboard_bulk_upsert_shift_patterns へ upsert する)
   const patternsOut = patterns.map((x) => ({
     external_id: x.id,
@@ -3434,9 +3492,6 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     start_time: x.start ?? '',
     end_time: x.end ?? '',
   }));
-  const patternById = new Map(patterns.map((x) => [String(x.id), x]));
-
-  const warnings = [];
   const cellMatchesPattern = (text, pat) => {
     const t = String(text || '').trim();
     if (!t || t === '休') return false;
@@ -3507,7 +3562,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       if (cur === undefined) continue; // セルが無い日 (月外)
 
       if (day.kind === 'work') {
-        const mapped = day.sb_pattern_id ? patternById.get(String(day.sb_pattern_id)) : null;
+        // ★B: KD時刻に exact 一致するSBパターンを最優先(ensureKdPatterns で作成済のはず)。
+        //    次点で従来の紐付け sb_pattern_id。どちらも無い時のみ従来の近似フォールバックへ。
+        const exact = (day.start && day.end) ? patternByTime.get(timeKey(day.start, day.end)) : null;
+        const mapped = exact || (day.sb_pattern_id ? patternById.get(String(day.sb_pattern_id)) : null);
         if (mapped) {
           // 紐付け済みパターンで一括入力
           if (cellMatchesPattern(cur, mapped)) { skipped++; continue; }
