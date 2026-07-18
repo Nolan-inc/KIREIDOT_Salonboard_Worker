@@ -4746,8 +4746,30 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
       }).catch(() => false);
       if (!needsFinal) break;
-      const finalBtn = page.locator('a#regist').first();
-      if ((await finalBtn.count().catch(() => 0)) === 0) break;
+      // ★最終「登録」は a#regist 以外の変種がある(2026-07-18 心斎橋: doComplete到達・
+      //   「まだ登録されていません」表示なのに a#regist 不在で final未クリック→
+      //   SB_REGISTER_INCOMPLETE を無限リトライ)。候補を広めに順に試し、
+      //   全滅時は実DOMの登録系要素をログして次の失敗で確実に特定できるようにする。
+      const finalBtnSelectors = [
+        'a#regist',
+        '#regist:visible',
+        'input[type="submit"][value*="登録"]:visible, input[type="button"][value*="登録"]:visible, button:has-text("登録する"):visible',
+        'a.mod_btn_entry_08:visible, a:has-text("登録する"):visible',
+      ];
+      let finalBtn = null;
+      for (const sel of finalBtnSelectors) {
+        const cand = page.locator(sel).first();
+        if ((await cand.count().catch(() => 0)) > 0) { finalBtn = cand; break; }
+      }
+      if (!finalBtn) {
+        const dump = await page.evaluate(() => Array.from(document.querySelectorAll('a, button, input[type="submit"], input[type="button"]'))
+          .filter((e) => /登録|regist|確定|complete/i.test(`${e.textContent || ''} ${e.value || ''} ${e.id || ''} ${e.className || ''}`))
+          .slice(0, 12)
+          .map((e) => `${e.tagName.toLowerCase()}#${e.id || '-'}.${String(e.className || '').split(/\s+/)[0] || '-'}[${(e.textContent || e.value || '').replace(/\s+/g, '').slice(0, 12)}]${e.offsetParent === null ? ':hidden' : ''}`)
+          .join(' | ')).catch(() => 'dump-fail');
+        console.log(`[pushstep] ${(p.booking_id || '').slice(0, 8)} doComplete final-btn NOT FOUND: ${dump}`);
+        break;
+      }
       // ★doComplete の最終「登録」POST も Akamai に採点される。従来ここが機械的な即クリック
       //   だったため、書込500「混み合っている」/「まだ登録されていません」の一因になっていた
       //   (Slack: doComplete を確定できませんでした)。押す前に人間化してセンサースコアを上げる。
