@@ -3455,14 +3455,19 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
         if (!patternByTime.has(k)) needed.set(k, { start: day.start, end: day.end });
       }
     }
+    console.log('[SHIFT-B] enablePush=' + enablePush + ' entries=' + entries.length
+      + ' live=' + JSON.stringify(timedPatterns.map((p) => `${p.start}-${p.end}`))
+      + ' needed=' + JSON.stringify(Array.from(needed.keys())));
     if (needed.size === 0) return;
     if (!enablePush) {
       for (const { start, end } of needed.values()) warnings.push(`要SB勤務パターン新規登録: ${start}-${end} (KD時刻・確認のみ)`);
       return;
     }
-    const toCreate = Array.from(needed.values()).map(({ start, end }) => ({
+    // ★SB「短縮名」は半角英数記号あわせて2文字以内。8桁コードは弾かれる(実機確認)。
+    //   一意な2文字コードを割当てる(セル表示用)。名称(maxlength40)は可読な KD HH:MM-HH:MM。
+    const toCreate = Array.from(needed.values()).map(({ start, end }, i) => ({
       name: `KD ${start}-${end}`,
-      short_name: `${start}${end}`.replace(/:/g, ''), // 例 10001530 (SB短縮名; 切詰め時はテストで調整)
+      short_name: (i + 1).toString(36).toUpperCase().padStart(2, '0').slice(-2), // 01..09,0A.. 一意2文字
       start, end,
     }));
     const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e) }));
@@ -3653,6 +3658,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
   }
 
+  console.log('[SHIFT-B] plan totalChanges=' + totalChanges + ' skipped=' + skipped
+    + ' plans=' + plans.length + ' custom=' + customPlans.length
+    + ' cellsSample=' + JSON.stringify(Object.entries(cells).slice(0, 6))
+    + ' warn=' + JSON.stringify(warnings.slice(0, 10)));
   if (totalChanges === 0) {
     return { status: 'ok', summary: `変更なし (全${entries.length}名のシフトはSalonBoardと一致)`, changed: 0, warnings, patterns: patternsOut };
   }
