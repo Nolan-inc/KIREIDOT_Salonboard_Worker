@@ -4741,10 +4741,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     //   押して確定する。容量に余裕のある予約は1段階で完了するためこのループは即抜ける
     //   (2026-06-25 実機で doComplete=確認ページと判明。worker は従来ここで止まり未登録だった)。
     for (let step = 0; step < 2; step++) {
-      const needsFinal = await page.evaluate(() => {
-        const t = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
-        return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
-      }).catch(() => false);
+      // ★doComplete の確認文言は描画/AJAX完了が遅れることがあり、即時1回判定だと
+      //   needsFinal=false で素通り→final未クリックのまま後段チェックが
+      //   「まだ登録されていません」を検知して SB_REGISTER_INCOMPLETE 空振りになる
+      //   (2026-07-18 心斎橋 実機: finalClicked=false かつ final-btn ダンプ無し=ここで素通り)。
+      //   doComplete URL に居る間は最大6秒ポーリングして判定する。
+      let needsFinal = false;
+      const ndl = Date.now() + 6_000;
+      while (Date.now() < ndl) {
+        needsFinal = await page.evaluate(() => {
+          const t = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+          return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
+        }).catch(() => false);
+        if (needsFinal) break;
+        if (!/doComplete/i.test(page.url())) break; // 完了遷移済み = 確認不要
+        await page.waitForTimeout(400);
+      }
       if (!needsFinal) break;
       // ★最終「登録」は a#regist 以外の変種がある(2026-07-18 心斎橋: doComplete到達・
       //   「まだ登録されていません」表示なのに a#regist 不在で final未クリック→
