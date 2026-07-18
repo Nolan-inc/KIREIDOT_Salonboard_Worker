@@ -52,6 +52,20 @@
 | 4 | verify_shifts ドリフト検知 + 予約前ガード | worker+cron | 再発防止・失敗の可視化 |
 | 5 | 代々木/新宿で実証 → 全店ロールアウト + manual_required 再enqueue | 運用 | 待機の実解消 |
 
+## 実装状況(2026-07-18 追記)
+- **② 不足パターン自動登録 + ③ 予定方式抑制を push_shifts 内に実装済**
+  (`electron/scrapers.cjs` `pushShiftsViaForm`)。
+  - 反映前プリパス(`neededPatterns`)で、KDシフト時刻と**完全一致するSB勤務パターンが無い work日**を検出。
+  - `enablePush` 時は既存 `pushWorkPatternViaForm` を再利用してその時刻の勤務パターンをSBへ自動登録
+    (名称=`HH:MM-HH:MM`)。登録後にシフト設定へ戻り、パターン一覧・セルを再取得。
+  - work日の一括入力は、`sb_pattern_id` 紐付けが無くても**時刻完全一致パターン(自動登録分含む)**を
+    優先して使用 → 近似(covers:false=未反映)/予定方式(時間丸め)を回避し **SB時刻==KD時刻** を実現。
+  - 登録に失敗した場合のみ従来どおり予定方式/未反映へフォールバック(誤時刻はSBに書かない安全設計は維持)。
+  - 効果: 「Adminのシフトが未反映」「時刻ズレ」「代々木上原の時刻/日付ズレ」を、
+    実行のたびに正しい時刻で自動上書き修正。
+- 残: ① Admin側の自動マッチ(時刻一致で `matched_preset_id` 設定)/ ④ verify_shifts /
+  hairグループ店の勤務パターン登録画面のサロン選択(現状 esthetic 系で確実に動作)。
+
 ## 完了の定義
 - 任意店・任意スタッフで **SBシフト時刻 == KDシフト時刻**(verifyで0ドリフト)。
 - manual_required にした予約を再enqueue → **登録成功**。
