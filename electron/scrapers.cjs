@@ -3404,37 +3404,38 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     console.log('[SHIFTDBG setUI ' + shiftGenre + '] ' + JSON.stringify(dump).slice(0, 1600));
     return fail('一括入力パネル (#batchSetPanel) を開けませんでした', 'UNKNOWN_ERROR', true);
   }
-  let patterns = await page.evaluate(() => {
-    const sel = document.querySelector('#shiftIdBatch');
-    if (!sel) return null;
-    return Array.from(sel.options)
-      .filter((o) => o.value)
-      .map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
-  }).catch(() => null);
+  // ★勤務パターン一覧 (select#shiftIdBatch + 選択時 #shiftTextBatch の時間帯) を読む。
+  //   不足パターンの自動登録後にもう一度取得できるよう関数化する。
+  const readPatternList = async () => {
+    const list = await page.evaluate(() => {
+      const sel = document.querySelector('#shiftIdBatch');
+      if (!sel) return null;
+      return Array.from(sel.options)
+        .filter((o) => o.value)
+        .map((o) => ({ id: o.value, name: (o.textContent || '').trim() }));
+    }).catch(() => null);
+    if (!list || list.length === 0) return null;
+    for (const pat of list) {
+      await page.evaluate((id) => {
+        const sel = document.querySelector('#shiftIdBatch');
+        if (!sel) return;
+        sel.value = id;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }, pat.id).catch(() => {});
+      await page.waitForTimeout(250);
+      const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
+      const tr = parseTimeRange(txt);
+      if (tr) { pat.start = tr.start; pat.end = tr.end; }
+    }
+    return list;
+  };
+  let patterns = await readPatternList();
   if (!patterns || patterns.length === 0) {
     return fail('勤務パターン一覧 (select#shiftIdBatch) を取得できませんでした', 'UNKNOWN_ERROR', true);
   }
-  for (const pat of patterns) {
-    await page.evaluate((id) => {
-      const sel = document.querySelector('#shiftIdBatch');
-      if (!sel) return;
-      sel.value = id;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    }, pat.id).catch(() => {});
-    await page.waitForTimeout(250);
-    const txt = await page.locator('#shiftTextBatch').innerText().catch(() => '');
-    const tr = parseTimeRange(txt);
-    if (tr) { pat.start = tr.start; pat.end = tr.end; }
-  }
-  const timedPatterns = patterns.filter((x) => x.start && x.end);
-  // DB保存用 (worker-process が salonboard_bulk_upsert_shift_patterns へ upsert する)
-  const patternsOut = patterns.map((x) => ({
-    external_id: x.id,
-    name: x.name,
-    start_time: x.start ?? '',
-    end_time: x.end ?? '',
-  }));
-  const patternById = new Map(patterns.map((x) => [String(x.id), x]));
+  // ↓ 不足パターン自動登録で再取得したら差し替えるため let。
+  let timedPatterns = patterns.filter((x) => x.start && x.end);
+  let patternById = new Map(patterns.map((x) => [String(x.id), x]));
 
   const warnings = [];
   const cellMatchesPattern = (text, pat) => {
@@ -3477,6 +3478,87 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return { pattern: scored[0].pattern, covers: false };
   };
 
+  // (3b) ★不足パターン自動登録 (Shift Parity / docs/shift-parity-design.md):
+  //   KDシフト時刻と「完全一致」するSB勤務パターンが無い work日は、従来 近似(covers:false=未反映)や
+  //   予定方式(時間丸め)に落ち、SBシフト時刻がKDと合わず「連携できていない/時刻ズレ」の主因だった。
+  //   → その時刻の勤務パターンを SB へ自動登録し(既存 pushWorkPatternViaForm を再利用)、以降は
+  //     正確な時刻で一括入力する。「1 KDシフト時刻 ⇔ 1 SB勤務パターン(同一時刻)」を満たす。
+  //   登録は enablePush 時のみ。登録失敗時は従来どおり予定方式/未反映にフォールバック(誤時刻は書かない)。
+  const normHHMM = (t) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || ''));
+    return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(t || '');
+  };
+  const knownExtsPre = new Set(Object.keys(cells).map((k) => k.split('_')[0]));
+  const neededPatterns = (() => {
+    const need = new Map(); // `${sMin}-${eMin}` → {name, short_name, start, end}
+    for (const entry of entries) {
+      const ext = String(entry.staff_external_id || '').toUpperCase();
+      if (!ext || !knownExtsPre.has(ext)) continue;
+      for (const day of entry.days || []) {
+        if (day.kind !== 'work') continue;
+        const date = String(day.date || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < todayJst) continue;
+        const ymd = date.replace(/-/g, '');
+        if (cells[`${ext}_${ymd}`] === undefined) continue; // 月外セル
+        if (day.sb_pattern_id && patternById.get(String(day.sb_pattern_id))) continue; // 紐付け済み
+        const s = toMin(day.start); const e = toMin(day.end);
+        if (s == null || e == null) continue;
+        if (timedPatterns.some((x) => toMin(x.start) === s && toMin(x.end) === e)) continue; // 完全一致パターン既存
+        const key = `${s}-${e}`;
+        if (!need.has(key)) {
+          const st = normHHMM(day.start); const en = normHHMM(day.end);
+          need.set(key, { name: `${st}-${en}`, short_name: `${st}-${en}`, start: st, end: en });
+        }
+      }
+    }
+    return [...need.values()];
+  })();
+  let registeredCount = 0;
+  if (neededPatterns.length > 0) {
+    if (enablePush) {
+      const reg = await pushWorkPatternViaForm(page, { patterns: neededPatterns }, {
+        baseUrl, enablePush: true, genre: shiftGenre, salonId: opts.salonId, shopName: opts.shopName,
+      }).catch((e) => ({ status: 'failed', reason: String(e?.message ?? e), results: [] }));
+      const regResults = reg && Array.isArray(reg.results) ? reg.results : [];
+      if (regResults.length === 0 && reg && reg.status === 'failed') {
+        // 画面到達不可 / reCAPTCHA 等で登録処理自体に入れなかった。時刻ズレを書かないため
+        // 該当日は従来どおり予定方式/未反映にフォールバックする(警告のみ残す)。
+        warnings.push(`勤務パターン自動登録を実行できませんでした: ${reg.reason || ''}`);
+      }
+      for (const r of regResults) {
+        if (r.status === 'ok') registeredCount++;
+        else if (r.status === 'failed') warnings.push(`勤務パターン自動登録に失敗 (${r.name}): ${r.reason || ''}`);
+      }
+      // シフト設定へ戻り、勤務パターン一覧とセルを再取得 (登録した勤務パターンを反映する)。
+      if (!(await openSetup())) {
+        return fail('勤務パターン自動登録後にシフト設定画面へ戻れませんでした', 'UNKNOWN_ERROR', true);
+      }
+      if (!(await ensureBatchPanel())) {
+        return fail('勤務パターン自動登録後に一括入力パネルを開けませんでした', 'UNKNOWN_ERROR', true);
+      }
+      const repat = await readPatternList();
+      if (repat && repat.length) {
+        patterns = repat;
+        timedPatterns = patterns.filter((x) => x.start && x.end);
+        patternById = new Map(patterns.map((x) => [String(x.id), x]));
+      }
+      try { cells = await readCells(); } catch (_e) { /* 再読込失敗は既存 cells で続行 */ }
+      if (registeredCount > 0) {
+        warnings.push(`SBに無かった勤務パターン ${registeredCount}件を自動登録しました: ${neededPatterns.map((n) => n.name).join(', ')}`);
+      }
+    } else {
+      warnings.push(`SBに未登録の勤務パターン ${neededPatterns.length}件 (反映実行時に自動登録): ${neededPatterns.map((n) => n.name).join(', ')}`);
+    }
+  }
+  // DB保存用 (worker-process が salonboard_bulk_upsert_shift_patterns へ upsert する)。
+  // 自動登録後の最新パターン一覧で作る。
+  const patternsOut = patterns.map((x) => ({
+    external_id: x.id,
+    name: x.name,
+    start_time: x.start ?? '',
+    end_time: x.end ?? '',
+  }));
+
   // (4) 差分計画を立てる。
   //   - day.sb_pattern_id (KIREIDOTシフトパターン紐付けで解決済みのSBパターン) が
   //     あればそのパターンで一括入力 (パターンの自動代用はしない)。
@@ -3507,9 +3589,18 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       if (cur === undefined) continue; // セルが無い日 (月外)
 
       if (day.kind === 'work') {
-        const mapped = day.sb_pattern_id ? patternById.get(String(day.sb_pattern_id)) : null;
+        let mapped = day.sb_pattern_id ? patternById.get(String(day.sb_pattern_id)) : null;
+        // ★紐付け(sb_pattern_id)が無くても、KDシフト時刻と完全一致するSB勤務パターン
+        //   (上の自動登録分を含む)があれば、それで一括入力する。近似/予定方式を避け
+        //   SBシフト時刻をKDと完全一致させる (時刻ズレ・日付ズレの根絶)。
+        if (!mapped) {
+          const s0 = toMin(day.start); const e0 = toMin(day.end);
+          if (s0 != null && e0 != null) {
+            mapped = timedPatterns.find((x) => toMin(x.start) === s0 && toMin(x.end) === e0) || null;
+          }
+        }
         if (mapped) {
-          // 紐付け済みパターンで一括入力
+          // 紐付け済み/時刻一致パターンで一括入力
           if (cellMatchesPattern(cur, mapped)) { skipped++; continue; }
           const key = `work:${mapped.id}`;
           let plan = groups.get(key);
@@ -3601,7 +3692,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   if (!enablePush) {
     return {
       status: 'confirm_only',
-      summary: `反映予定 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件)`,
+      summary: `反映予定 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件${neededPatterns.length > 0 ? `, 要パターン登録${neededPatterns.length}件` : ''})`,
       changed: totalChanges,
       warnings,
       patterns: patternsOut,
@@ -3909,7 +4000,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   // ③最終的にどの時間になったか。
   const outCount = outOfPatternDetails.length;
   let summary =
-    `シフト反映 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件${nativeDialogAccepted ? ', confirm承認' : ''})`;
+    `シフト反映 ${totalChanges}件 (パターン一括${totalChanges - customPlans.length}/予定方式${customPlans.length}, スタッフ${staffChanged.size}名, スキップ${skipped}件${registeredCount > 0 ? `, パターン自動登録${registeredCount}件` : ''}${nativeDialogAccepted ? ', confirm承認' : ''})`;
   if (outCount > 0) {
     const lines = outOfPatternDetails
       .map((d) => `${d.staffName} ${d.date}: 希望 ${d.start}〜${d.end} → 「${d.baseName}」(${d.baseStart}〜${d.baseEnd})に合わせて設定`)
@@ -3922,6 +4013,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     status: 'ok',
     summary,
     changed: totalChanges,
+    registeredPatternCount: registeredCount,
     outOfPatternCount: outCount,
     outOfPatternDetails,
     warnings,
