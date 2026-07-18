@@ -52,6 +52,20 @@ const {
   resetLastErrorShot,
 } = require('./scrapers.cjs');
 
+// 一過性のインフラ由来失敗コード (SalonBoard/Akamai の一時的な書込ブロック)。
+// scraper は manualRequired=false で返し「良い窓口を引くまで粘る」設計 (scrapers.cjs 参照)。
+// 試行上限超過でも manual_required へ昇格させず retryable_failed を維持し、回復後の自動再投入に委ねる。
+// 実枠競合(SLOT_NOT_AVAILABLE)・要素未検出(UNKNOWN_ERROR)等の実データ/セレクタ起因は従来どおり manual に倒す。
+// worker.ts の INFRA_TRANSIENT_ERROR_CODES とミラー。
+const INFRA_TRANSIENT_ERROR_CODES = new Set(['SB_SERVER_ERROR', 'SB_REGISTER_INCOMPLETE']);
+function isInfraTransientError(code) {
+  return !!code && INFRA_TRANSIENT_ERROR_CODES.has(code);
+}
+// 上限超過(exhausted)でも一過性インフラ失敗は manual に昇格させない。
+function shouldPromoteToManual(manualRequired, exhausted, errorCode) {
+  return !!manualRequired || (exhausted && !isInfraTransientError(errorCode));
+}
+
 // =====================================================================
 // ブラウザ起動オプション。既定は Playwright 同梱 Chromium (Chrome for Testing)。
 // SALONBOARD_USE_SYSTEM_CHROME=1 のときは OS インストール済みの実 Google Chrome
@@ -3191,7 +3205,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 スタイル入力のみ (実登録OFF, Chrome拡張)`, at: new Date().toISOString() });
         } else {
-          const toManual = ext.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(ext.manualRequired, exhausted, ext.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_photo_gallery',
             status: ext.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3350,7 +3364,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 ブログ削除未実行 (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'delete_blog',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3377,7 +3391,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 ブログ入力のみ (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_blog',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3405,7 +3419,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 口コミ返信入力のみ (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_review_reply',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3434,7 +3448,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 フォトギャラリー入力のみ (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_photo_gallery',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3627,7 +3641,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 シフト反映は計画のみ (実登録OFF): ${result.summary ?? ''}`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_shifts',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3664,7 +3678,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 キャンセル未確定 (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3691,7 +3705,7 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 変更未確定 (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_booking',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
@@ -3731,7 +3745,7 @@ async function runPushJobs({ showBrowser } = {}) {
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 入力のみ (実登録OFF)`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: false, reason: 'push_disabled' });
         } else {
-          const toManual = result.manualRequired || exhausted;
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           const isCaptcha = result.errorCode === 'RECAPTCHA_REQUIRED';
           await postCallback({
             job_id: job.id, job_type: 'push_booking',

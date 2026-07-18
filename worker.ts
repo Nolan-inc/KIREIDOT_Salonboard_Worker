@@ -260,6 +260,30 @@ const ENABLE_PUSH = parseEnablePush(process.env.SALONBOARD_ENABLE_PUSH);
 const MAX_PUSH_ATTEMPTS = 3;
 
 /**
+ * 一過性のインフラ由来失敗コード。SalonBoard/Akamai の一時的な書込ブロックで、
+ * 時間経過(セッションが温まる・500 が解ける)でしか回復しない。scraper 側は
+ * これらを manualRequired=false で返し「良い窓口を引くまで粘る」設計になっている
+ * (electron/scrapers.cjs pushBookingViaForm の SB_SERVER_ERROR / SB_REGISTER_INCOMPLETE 参照)。
+ *
+ * にもかかわらず worker が試行上限超過(job.attempts >= max_attempts)で一律に
+ * manual_required へ昇格させると、20〜45分の Akamai クールダウン窓の中で 3 回消費し切った
+ * だけの一過性失敗が「手動登録が必要」に固定され、人手を要求してしまう(実際は回復後に
+ * 自動で通る)。そこで、これらのコードは上限超過でも manual に昇格させず retryable_failed
+ * を維持し、回復後の自動再投入に委ねる。
+ *
+ * ※ SLOT_NOT_AVAILABLE(実枠競合) / RESERVE_NOT_FOUND(対象特定不能) / *_MAPPING_NOT_FOUND /
+ *   CONFIRMATION_MISMATCH / UNKNOWN_ERROR 等の「実データ/セレクタ起因」は従来どおり
+ *   上限超過で manual_required に倒す(再試行しても無駄・人手が要るため)。
+ */
+const INFRA_TRANSIENT_ERROR_CODES = new Set<string>([
+  "SB_SERVER_ERROR",
+  "SB_REGISTER_INCOMPLETE",
+]);
+function isInfraTransientError(code?: string | null): boolean {
+  return !!code && INFRA_TRANSIENT_ERROR_CODES.has(code);
+}
+
+/**
  * ★ログインスロットル対策 (2026-07-05 郡山/10002 再発対応):
  *   「login did not complete」= doLogin まで到達したのに logged_in に遷移しない
  *   = Akamai が doLogin をホールド/チャレンジしている(そのIP/セッションが一時スロットル)状態。
@@ -785,7 +809,10 @@ async function reportScraperResult(
   // +1 すると1回分リトライを取りこぼす (max_attempts=3 が実質2回になる)。
   const exhausted = job.attempts >= cap;
   const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
-  const toManual = !!result.manualRequired || exhausted;
+  // 一過性インフラ失敗(500着地/doComplete未確定)は上限超過でも manual に昇格させず
+  // retryable のまま維持する(Akamai 回復後の自動再投入に委ねる)。実枠競合や要素未検出は従来どおり。
+  const infraTransient = isInfraTransientError(result.errorCode);
+  const toManual = !!result.manualRequired || (exhausted && !infraTransient);
   await report(
     {
       job_id: job.id,
@@ -1466,7 +1493,11 @@ async function handleJob(job: Job): Promise<void> {
         // 上限はジョブ側の max_attempts を正とし、未指定時のみ既定値を使う。
         const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
         const exhausted = job.attempts >= cap;
-        const toManual = result.manualRequired || exhausted;
+        // 一過性インフラ失敗(500着地/doComplete未確定)は上限超過でも manual に昇格させず
+        // retryable のまま維持する(Akamai 回復後の自動再投入に委ねる)。実枠競合(SLOT_NOT_AVAILABLE)
+        // や確認画面不一致等の「実データ/セレクタ起因」は従来どおり上限超過で manual に倒す。
+        const infraTransient = isInfraTransientError(result.errorCode);
+        const toManual = result.manualRequired || (exhausted && !infraTransient);
         const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
         await report(
           {
@@ -1476,7 +1507,8 @@ async function handleJob(job: Job): Promise<void> {
               ? "captcha_detected"
               : toManual
                 ? "manual_required"
-                : // 一時的失敗扱いにできるのは SLOT_NOT_AVAILABLE / UNKNOWN のみ。
+                : // 上限未満、または一過性インフラ失敗(SB_SERVER_ERROR/SB_REGISTER_INCOMPLETE)は
+                  // retryable_failed のまま維持し、Akamai/500 回復後の自動再投入に委ねる。
                   "retryable_failed",
             booking_id: payload.booking_id,
             error_code: result.errorCode,
