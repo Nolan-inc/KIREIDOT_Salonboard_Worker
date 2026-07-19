@@ -471,6 +471,7 @@ type JobType =
   | "push_menu"
   | "push_coupon"
   | "push_shift_patterns"
+  | "fetch_shifts"
   | "fetch_shift_patterns"
   // 設定系 fetch (クラウド完結/PC引退用に job 化)。worker は既存 scraper を呼び、
   // Admin callback が既存 RPC salonboard_bulk_upsert_* に取込む。
@@ -1591,6 +1592,38 @@ async function handleJob(job: Job): Promise<void> {
         relogin: makeRelogin(page, baseUrl, job.credentials),
       });
       await reportScraperResult(job, "push_shifts", result, {}, page);
+      return;
+    }
+
+    if (job.job_type === "fetch_shifts") {
+      // pushと同じhair/esthetic対応の月次シフト画面ナビゲーションをread-onlyで使う。
+      const result = await scrapers.pushShiftsViaForm(page, job.payload, {
+        baseUrl,
+        enablePush: false,
+        genre,
+        salonId,
+        shopName,
+        relogin: makeRelogin(page, baseUrl, job.credentials),
+      }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string };
+      if (result.status === "ok" && Array.isArray(result.shifts)) {
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shifts",
+          status: "succeeded",
+          shifts: result.shifts,
+          summary: `fetch_shifts: ${result.shifts.length}件取得`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (fetch_shifts ${result.shifts.length}件)`);
+      } else {
+        await report({
+          job_id: job.id,
+          job_type: "fetch_shifts",
+          status: "retryable_failed",
+          error_code: result.errorCode ?? "UNKNOWN_ERROR",
+          error: result.reason ?? "fetch_shifts failed",
+        } as unknown as CallbackBody, page);
+        console.log(`[job] done  ${tag} (fetch_shifts failed: ${result.reason ?? "unknown"})`);
+      }
       return;
     }
 

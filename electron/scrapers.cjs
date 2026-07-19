@@ -3225,6 +3225,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const p = payload || {};
+  const readOnly = p.read_only === true;
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
   const month = String(p.month || '');
@@ -3511,6 +3512,59 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     const n = String(pat?.name || '').trim();
     return !!n && (t === n || n.startsWith(t) || t.startsWith(n));
   };
+
+  // SB→KD実シフト取得。書込み計画へ進まず、現在セルを勤務パターンの
+  // 時刻へ解決して返す。空欄は「未設定」であり休みとはみなさない。
+  if (readOnly) {
+    const entryByExt = new Map(entries.map((entry) => [
+      String(entry.staff_external_id || '').toUpperCase(),
+      entry,
+    ]));
+    const shifts = [];
+    for (const [key, rawText] of Object.entries(cells)) {
+      const m = /^([^_]+)_(\d{4})(\d{2})(\d{2})$/.exec(key);
+      if (!m) continue;
+      const ext = m[1].toUpperCase();
+      const entry = entryByExt.get(ext);
+      if (!entry) continue;
+      const text = String(rawText || '').trim();
+      if (!text) continue;
+      const date = `${m[2]}-${m[3]}-${m[4]}`;
+      if (text === '休') {
+        shifts.push({
+          staff_external_id: ext,
+          staff_name: entry.staff_name ?? ext,
+          shift_date: date,
+          start_time: null,
+          end_time: null,
+          is_off: true,
+          note: '休',
+        });
+        continue;
+      }
+      const pat = patterns.find((candidate) => cellMatchesPattern(text, candidate));
+      if (!pat?.start || !pat?.end) {
+        warnings.push(`${entry.staff_name ?? ext} ${date}: 勤務パターン「${text}」の時刻を解決できずスキップ`);
+        continue;
+      }
+      shifts.push({
+        staff_external_id: ext,
+        staff_name: entry.staff_name ?? ext,
+        shift_date: date,
+        start_time: pat.start,
+        end_time: pat.end,
+        is_off: false,
+        note: text,
+      });
+    }
+    return {
+      status: 'ok',
+      summary: `SBシフト ${shifts.length}件取得`,
+      shifts,
+      warnings,
+      patterns: patternsOut,
+    };
+  }
   // 予定方式のベースパターン選択。
   //   ① シフト時間帯を「包含する」パターンがあれば最小スパンのもの (covers:true)。
   //   ② 包含が無い場合は「シフト時間帯に最も近い」パターンを選ぶ (covers:false)。
