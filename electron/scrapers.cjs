@@ -5994,6 +5994,14 @@ async function scrapePhotoGallery(page, opts = {}) {
  *   equipmentId が空の行 (display:none の追加枠) は捨てる。
  */
 async function scrapeEquipment(page, opts = {}) {
+  // 美容室(hair)の SalonBoard には設備設定 (/CNK/set/equipList/) が存在しない
+  // (スタイリストベース)。エステ用URLへ飛ぶとエラーになるためスキップする。
+  if (opts.genre === 'hair') {
+    return {
+      rows: [],
+      debug: { skipped: 'hair_genre_no_equipment', itemsFound: 0, parsed: 0 },
+    };
+  }
   await page.goto(EQUIP_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 

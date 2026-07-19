@@ -1445,6 +1445,10 @@ async function fetchTargets(shopIds) {
       blocked_until: s.blocked_until ?? null,
       // 店舗ジャンル (hair/nail/esthetic/eyelash/other)。未設定は esthetic 扱い。
       genre: s.genre ?? 'esthetic',
+      // 運営(Super Admin)が会社ごとに無効化した連携チャンネル
+      // (bookings/staff/shifts/menus/coupons/reviews/equipment)。
+      // runSync がこのチャンネルをスキップする。
+      disabled_channels: Array.isArray(s.disabled_channels) ? s.disabled_channels : [],
     }));
   }
 
@@ -2168,10 +2172,11 @@ async function processShop(target, channels, runId, opts = {}) {
       // 「SalonBoardから同期」ボタン = fetch_shift_patterns ジョブでのみ取得)。
     }
 
-    if (channelSet.has('equipment')) {
+    // 美容室(hair)は設備の概念がない(スタイリストベース)ため設備取得をスキップ
+    if (channelSet.has('equipment') && genre !== 'hair') {
       try {
         emit('shop:progress', { shopId, step: 'equipment', msg: '設備一覧を取得中…' });
-        const { rows, debug } = await scrapeEquipment(page, { salonId: creds.salonId ?? null, shopName });
+        const { rows, debug } = await scrapeEquipment(page, { genre, salonId: creds.salonId ?? null, shopName });
         const sent = await sendEquipment(shopId, rows);
         counts.equipment = sent;
         summary.push(`設備 ${sent} 件 (検出${rows.length})`);
@@ -3538,12 +3543,21 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🔴 ${staffLabel}取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
+      } else if (isFetchEquipment && jobGenre === 'hair') {
+        // 美容室(hair)の SalonBoard には設備設定が存在しない (スタイリストベース)。
+        // エステ用 /CNK/set/equipList/ へ飛ぶと失敗するためジョブは成功扱いでスキップ。
+        await postCallback({
+          job_id: job.id, job_type: 'fetch_equipment', status: 'succeeded',
+          summary: '美容室は設備(ベッド/席)の概念がないためスキップしました',
+        });
+        emit('log', { level: 'info', msg: `[${tag}] ✅ 設備取得スキップ (美容室)`, at: new Date().toISOString() });
       } else if (isFetchEquipment) {
         // ---- 設備(ベッド/席)一覧取得 (Admin の店舗管理「SalonBoardから取得」ボタン) ----
         // /CNK/set/equipList/ の設備設定を scrapeEquipment で読み取り、
         // salonboard_equipment_imports に保存する (scrapeStaff と同じ方式)。
         try {
           const { rows, debug } = await scrapeEquipment(page, {
+            genre: jobGenre,
             salonId: creds.salon_id ?? null,
             shopName: job.shop_name ?? null,
           });
@@ -3988,7 +4002,27 @@ async function runSync({ shopIds, channels, source, showBrowser, enablePush }) {
         emit('log', { level: 'warn', msg: 'ユーザー操作により中断' });
         break;
       }
-      const r = await processShop(t, channels, runId, { showBrowser: showBrowserEffective });
+      // 運営(Super Admin)が会社ごとに無効化した連携チャンネルを除外する。
+      // 全チャンネルが無効なら店舗ごとスキップ (ログイン等の無駄な巡回もしない)。
+      const disabledCh = new Set(Array.isArray(t.disabled_channels) ? t.disabled_channels : []);
+      const effChannels = (channels ?? []).filter((c) => !disabledCh.has(c));
+      if ((channels ?? []).length > 0 && effChannels.length === 0) {
+        emit('log', {
+          level: 'info',
+          msg: `[${String(t.shop_id).slice(0, 8)}] 運営設定によりこの同期の対象チャンネルが全て無効のためスキップ (${(channels ?? []).join(',')})`,
+          at: new Date().toISOString(),
+        });
+        okCount++;
+        continue;
+      }
+      if (effChannels.length < (channels ?? []).length) {
+        emit('log', {
+          level: 'info',
+          msg: `[${String(t.shop_id).slice(0, 8)}] 運営設定により無効のチャンネルを除外: ${(channels ?? []).filter((c) => disabledCh.has(c)).join(',')}`,
+          at: new Date().toISOString(),
+        });
+      }
+      const r = await processShop(t, effChannels, runId, { showBrowser: showBrowserEffective });
       if (r.ok) okCount++; else ngCount++;
     }
 
