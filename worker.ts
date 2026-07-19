@@ -283,30 +283,9 @@ function isInfraTransientError(code?: string | null): boolean {
   return !!code && INFRA_TRANSIENT_ERROR_CODES.has(code);
 }
 
-/**
- * ★ログインスロットル対策 (2026-07-05 郡山/10002 再発対応):
- *   「login did not complete」= doLogin まで到達したのに logged_in に遷移しない
- *   = Akamai が doLogin をホールド/チャレンジしている(そのIP/セッションが一時スロットル)状態。
- *   ここで短時間に doLogin を叩き直すと throttle を温存し回復を遅らせる(自滅ループ)。
- *   → shop 単位でログイン試行のクールダウンを持ち、期間中は doLogin を一切叩かず
- *     retryable で待つ(IP/セッションを静かにして Akamai の throttle を冷ます)。
- *   プロセス内メモリ保持で十分(restart でリセットされても実害小)。
- */
-const loginCooldownUntil = new Map<string, number>();
-const LOGIN_COOLDOWN_BASE_MS = 20 * 60_000; // 20分
-const LOGIN_COOLDOWN_MAX_MS = 45 * 60_000; // 45分(連続スロットルでこの上限まで伸ばす)
-function loginCooldownRemainingMs(shopId: string): number {
-  return Math.max(0, (loginCooldownUntil.get(shopId) ?? 0) - Date.now());
-}
-/** スロットル検知時にクールダウンを(伸ばして)セットし、設定後の残り時間(ms)を返す。 */
-function bumpLoginCooldown(shopId: string): number {
-  const next = Math.min(
-    LOGIN_COOLDOWN_MAX_MS,
-    loginCooldownRemainingMs(shopId) + LOGIN_COOLDOWN_BASE_MS,
-  );
-  loginCooldownUntil.set(shopId, Date.now() + next);
-  return next;
-}
+// Cloudで失敗したジョブはcallback側で即PCへ移すため、worker内で店舗を
+// 20〜45分停止するログインクールダウンは持たない。失敗はその場で報告し、
+// 別executorへ切り替えることで「待って回復」を予約処理から排除する。
 
 /**
  * ★店舗単位 自動フェイルオーバー (ISP → Residential, 2026-07-09):
@@ -1011,23 +990,6 @@ async function handleJob(job: Job): Promise<void> {
         console.log(`[job] done  ${tag} (session not ready, auto-login disabled -> retryable)`);
         return;
       }
-      // ★ログインスロットル・クールダウン中は doLogin を一切叩かず retryable で待つ。
-      //   直前のスロットル検知でこの shop に cooldown が設定されている間は、叩き直すと
-      //   Akamai の throttle を温存するだけなので、静かに回復を待つ。
-      const cdRemainMs = loginCooldownRemainingMs(job.shop_id);
-      if (cdRemainMs > 0) {
-        await report(
-          {
-            job_id: job.id,
-            job_type: job.job_type,
-            status: "retryable_failed",
-            error: `ログインスロットル・クールダウン中(残り約${Math.ceil(cdRemainMs / 60_000)}分)。doLoginを叩かず回復待ち。`,
-          },
-          page,
-        );
-        console.log(`[job] done  ${tag} (login cooldown ${Math.ceil(cdRemainMs / 60_000)}m -> retryable)`);
-        return;
-      }
       const loginUrl = new URL("/login/", baseUrl).toString();
       let loginResult = await tryLogin(page, loginUrl, {
         loginId: job.credentials.login_id,
@@ -1081,13 +1043,11 @@ async function handleJob(job: Job): Promise<void> {
           /still on login|invalid|incorrect|password|userId|loginId|認証/i.test(
             reason
           );
-        // ★スロットル検知: doLogin まで到達したのに完了しない(=Akamai ホールド)。
-        //   認証エラーでもネット瞬断でもないので、この shop のログイン試行を一定時間
-        //   止める(cooldown)。再試行しても throttle を温存するだけで回復しないため。
+        // スロットルらしい失敗も待機させずcallbackへ返す。CloudならAdminが
+        // 即PCへ移管し、同じCloud IPでの再試行は行わない。
         const isThrottle = !isAuthLike && /did not complete/i.test(reason);
         if (isThrottle) {
-          const cdMs = bumpLoginCooldown(job.shop_id);
-          console.log(`[job] ${tag} login throttled -> cooldown ${Math.ceil(cdMs / 60_000)}m for shop=${job.shop_id.slice(0, 8)}`);
+          console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
         }
@@ -1096,7 +1056,7 @@ async function handleJob(job: Job): Promise<void> {
             job_id: job.id,
             status: isAuthLike ? "login_required" : "retryable_failed",
             error: isThrottle
-              ? `${reason} (Akamaiログインスロットルの可能性。約${Math.ceil(loginCooldownRemainingMs(job.shop_id) / 60_000)}分クールダウン)`
+              ? `${reason} (Akamaiログインスロットルの可能性。待機せずexecutor切替)`
               : reason,
           },
           page,
