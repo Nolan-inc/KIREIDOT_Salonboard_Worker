@@ -4612,10 +4612,28 @@ const JOB_SAFETY_TIMEOUT_MS = Number(
 const FETCH_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
 );
+// cloud の予約書込は、顧客操作から長時間待たせない。90秒を超えた場合は当該
+// Chrome を停止して callback に専用マーカーを返し、Admin が executor を
+// playwright(店舗PC)へ切り替える。PC worker 自身にはこの上限を適用しない。
+const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
+  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 90_000,
+);
+
+function isCloudWorker(): boolean {
+  return WORKER_CAPABILITIES.split(",").map((v) => v.trim()).includes("playwright_cloud");
+}
+
+function isBookingWrite(job: Job): boolean {
+  return job.job_type === "push_booking" || job.job_type === "cancel_booking";
+}
 
 async function handleJobGuarded(job: Job): Promise<void> {
   const limitMs =
-    job.job_type === "fetch_bookings" ? FETCH_SAFETY_TIMEOUT_MS : JOB_SAFETY_TIMEOUT_MS;
+    isCloudWorker() && isBookingWrite(job)
+      ? CLOUD_BOOKING_FALLBACK_TIMEOUT_MS
+      : job.job_type === "fetch_bookings"
+        ? FETCH_SAFETY_TIMEOUT_MS
+        : JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), limitMs);
@@ -4637,11 +4655,14 @@ async function handleJobGuarded(job: Job): Promise<void> {
       } catch {
         /* 生きていなければ no-op */
       }
+      const fallbackToPc = isCloudWorker() && isBookingWrite(job);
       await report({
         job_id: job.id,
         job_type: job.job_type,
         status: "retryable_failed",
-        error: `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため打ち切りました(自動再試行)`,
+        error: fallbackToPc
+          ? `[CLOUD_PC_FALLBACK] cloud処理が${secs}秒以内に完了しなかったため停止し、PC workerへ移管します`
+          : `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため打ち切りました(自動再試行)`,
       }).catch(() => {});
     }
   } catch (e) {
