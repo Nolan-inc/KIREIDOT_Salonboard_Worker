@@ -75,7 +75,7 @@ jobs:
             ("test -s " + ($path + ".next"|@sh)),
             ("mv " + ($path + ".next"|@sh) + " " + ($path|@sh)),
             ("docker restart " + ($container|@sh)),
-            ("docker inspect " + ($container|@sh) + " --format=Status={{.State.Status}} Started={{.State.StartedAt}} RestartCount={{.RestartCount}}"),
+            ("docker inspect " + ($container|@sh) + " " + ("--format=Status={{.State.Status}} Started={{.State.StartedAt}} RestartCount={{.RestartCount}}"|@sh)),
             ("echo deployed_commit=" + $sha)
           ]}')
           COMMAND_ID=$(aws ssm send-command \
