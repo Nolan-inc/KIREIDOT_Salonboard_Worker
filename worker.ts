@@ -3840,13 +3840,16 @@ async function pushBooking(
   // ----------------------------------------------------------
   // 4) フォーム入力
   // ----------------------------------------------------------
+  // formReady確認後なので、ジャンル差で存在しない任意項目を長時間待たない。
+  // 旧実装は最大30秒/項目の直列待機となり、入力だけで90秒を消費していた。
+  const formFieldTimeoutMs = 750;
   // スタッフ (URL で初期選択されるが念のため value=external_id で明示)
   const staffSel = page.locator(REGISTER_FORM.staffSelect.selector).first();
   if ((await staffSel.count().catch(() => 0)) > 0) {
     await staffSel
-      .selectOption({ value: p.salonboard_staff_external_id }, { timeout: 2_000 })
+      .selectOption({ value: p.salonboard_staff_external_id }, { timeout: formFieldTimeoutMs })
       .catch(async () => {
-        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }, { timeout: 2_000 }).catch(() => {});
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }, { timeout: formFieldTimeoutMs }).catch(() => {});
       });
   }
 
@@ -3889,7 +3892,7 @@ async function pushBooking(
   const appliedStaffId = await page
     .locator(REGISTER_FORM.staffHiddenId.selector)
     .first()
-    .inputValue()
+    .inputValue({ timeout: formFieldTimeoutMs })
     .catch(() => null);
   if (appliedStaffId && appliedStaffId !== p.salonboard_staff_external_id) {
     await captureRegisterDebug(page, job, "staff_id_mismatch", {
@@ -3907,12 +3910,12 @@ async function pushBooking(
   await page
     .locator(REGISTER_FORM.startHour.selector)
     .first()
-    .selectOption({ value: String(when.hour) }, { timeout: 2_000 })
+    .selectOption({ value: String(when.hour) }, { timeout: formFieldTimeoutMs })
     .catch(() => {});
   await page
     .locator(REGISTER_FORM.startMinute.selector)
     .first()
-    .selectOption({ value: startMM }, { timeout: 2_000 })
+    .selectOption({ value: startMM }, { timeout: formFieldTimeoutMs })
     .catch(() => {});
 
   // 所要時間 → 終了時間。rsvTermHour の option value は「分換算」(60=1時間)。
@@ -3923,12 +3926,12 @@ async function pushBooking(
   await page
     .locator(REGISTER_FORM.termHour.selector)
     .first()
-    .selectOption({ value: termHourVal }, { timeout: 2_000 })
+    .selectOption({ value: termHourVal }, { timeout: formFieldTimeoutMs })
     .catch(() => {});
   await page
     .locator(REGISTER_FORM.termMinute.selector)
     .first()
-    .selectOption({ value: termMinVal }, { timeout: 2_000 })
+    .selectOption({ value: termMinVal }, { timeout: formFieldTimeoutMs })
     .catch(() => {});
 
   // メニュー = ネット予約クーポン。label 完全一致 → 部分一致の順で試す。
@@ -3936,7 +3939,7 @@ async function pushBooking(
   const menuSel = page.locator(REGISTER_FORM.menuSelect.selector).first();
   if ((await menuSel.count().catch(() => 0)) > 0) {
     await menuSel
-      .selectOption({ label: menuTarget }, { timeout: 2_000 })
+      .selectOption({ label: menuTarget }, { timeout: formFieldTimeoutMs })
       .then(() => { menuFilled = true; })
       .catch(() => {});
     if (!menuFilled) {
@@ -3951,7 +3954,7 @@ async function pushBooking(
         }, menuTarget)
         .catch(() => null);
       if (val) {
-        await menuSel.selectOption({ value: val }, { timeout: 2_000 }).then(() => { menuFilled = true; }).catch(() => {});
+        await menuSel.selectOption({ value: val }, { timeout: formFieldTimeoutMs }).then(() => { menuFilled = true; }).catch(() => {});
       }
     }
   }
@@ -3981,15 +3984,15 @@ async function pushBooking(
     const mei = parts.slice(1).join("") || "様";
     const seiKana = cleanKana(sei) || "ヨヤク";
     const meiKana = cleanKana(mei) || "キャクサマ";
-    await page.locator(REGISTER_FORM.customerSei.selector).first().fill(sei, { timeout: 6_000 }).catch(() => {});
-    await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: 6_000 }).catch(() => {});
-    await page.locator(REGISTER_FORM.customerSeiKana.selector).first().fill(seiKana, { timeout: 6_000 }).catch(() => {});
-    await page.locator(REGISTER_FORM.customerMeiKana.selector).first().fill(meiKana, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerSei.selector).first().fill(sei, { timeout: formFieldTimeoutMs }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMei.selector).first().fill(mei, { timeout: formFieldTimeoutMs }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerSeiKana.selector).first().fill(seiKana, { timeout: formFieldTimeoutMs }).catch(() => {});
+    await page.locator(REGISTER_FORM.customerMeiKana.selector).first().fill(meiKana, { timeout: formFieldTimeoutMs }).catch(() => {});
   }
   // 電話 (任意・ハイフン無し数字のみ)
   if (p.customer_phone) {
     const tel = String(p.customer_phone).replace(/[^\d]/g, "");
-    if (tel) await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(tel, { timeout: 6_000 }).catch(() => {});
+    if (tel) await page.locator(REGISTER_FORM.customerPhone.selector).first().fill(tel, { timeout: formFieldTimeoutMs }).catch(() => {});
   }
   // 備考 (KIREIDOT予約ID を必ず入れる → 二重登録チェックの照合キー)
   {
@@ -3997,7 +4000,7 @@ async function pushBooking(
       p.notes && p.notes.includes(kireidotRef)
         ? p.notes
         : `${p.notes ? p.notes + "\n" : ""}${kireidotRef}`;
-    await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: 6_000 }).catch(() => {});
+    await page.locator(REGISTER_FORM.memo.selector).first().fill(notesText, { timeout: formFieldTimeoutMs }).catch(() => {});
   }
 
   // 設備(席/ベッド)割当。⚠️ エステ等ベッドのある店舗では登録フォームの #equipArea で
@@ -4025,7 +4028,7 @@ async function pushBooking(
         if ((await addBtn.count().catch(() => 0)) > 0) {
           await addBtn.click().catch(() => {});
           await page
-            .waitForSelector(equipSelector, { timeout: 5_000 })
+            .waitForSelector(equipSelector, { timeout: 1_500 })
             .catch(() => {});
         }
       }
@@ -4058,7 +4061,7 @@ async function pushBooking(
           )
           .catch(() => null);
         if (pick) {
-          await sel.selectOption({ value: pick }).catch(() => {});
+          await sel.selectOption({ value: pick }, { timeout: formFieldTimeoutMs }).catch(() => {});
         } else {
           // payload 指定が無い/解決不可: 空行のみ「ベッド」を入れる。
           const needsSet = await sel
@@ -4080,7 +4083,7 @@ async function pushBooking(
                 return opt ? opt.value : null;
               })
               .catch(() => null);
-            if (bedVal) await sel.selectOption({ value: bedVal }).catch(() => {});
+            if (bedVal) await sel.selectOption({ value: bedVal }, { timeout: formFieldTimeoutMs }).catch(() => {});
           }
         }
         // SalonBoard 側の検証 (errorInput クリア) を起こすため input/change 発火。
