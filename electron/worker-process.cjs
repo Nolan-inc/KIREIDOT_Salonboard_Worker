@@ -3528,7 +3528,14 @@ async function runPushJobs({ showBrowser } = {}) {
       const isFetchEquipment = job.job_type === 'fetch_equipment';
       const isFetchReviews = job.job_type === 'fetch_reviews';
       const isCancel = job.job_type === 'cancel_booking';
-      const isUpdate = job.job_type === 'push_booking' && payload.action === 'update';
+      // create完了前に予約日時/担当が更新されると、旧DB trigger が action=update を
+      // 追加することがある。external_booking_id が無い予約はSB上の変更対象を一意に
+      // 指せないため、Cloud workerと同じく新規登録(preflight付き)として扱う。
+      // pushBookingViaForm は既存予約を先に検索するため、SBへ既に登録済みでも二重登録しない。
+      const isUpdate =
+        job.job_type === 'push_booking' &&
+        payload.action === 'update' &&
+        String(payload.external_booking_id || '').trim().length > 0;
 
       const cap = job.max_attempts || 3;
       const exhausted = (job.attempts || 0) + 1 >= cap;
