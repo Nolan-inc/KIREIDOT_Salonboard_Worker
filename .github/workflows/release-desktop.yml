@@ -43,7 +43,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Validate release version and signing secrets
+      - name: Validate release version and select signing mode
         shell: bash
         run: |
           set -euo pipefail
@@ -52,12 +52,19 @@ jobs:
             echo "Release tag $RELEASE_TAG does not match package.json v${package_version}" >&2
             exit 1
           fi
+          signing_ready=true
           for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [[ -z "${!name:-}" ]]; then
-              echo "Required GitHub Actions secret is missing: $name" >&2
-              exit 1
+              signing_ready=false
+              echo "Signing secret is missing: $name"
             fi
           done
+          if [[ "$signing_ready" == true ]]; then
+            echo "BUILD_MODE=signed" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_MODE=unsigned" >> "$GITHUB_ENV"
+            echo "Apple signing secrets are incomplete; publishing an unsigned fallback build."
+          fi
 
       - name: Install dependencies
         run: npm ci
@@ -69,7 +76,14 @@ jobs:
         run: npm run type-check
 
       - name: Build, notarize, and publish GitHub Release
-        run: npm run publish:mac:arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_MODE" == "signed" ]]; then
+            npm run publish:mac:arm64
+          else
+            npm run publish:mac:arm64:unsigned
+          fi
 
       - name: Verify published release assets
         shell: bash
@@ -79,3 +93,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --json isDraft,assets,url \
             --jq '{isDraft, url, assets: [.assets[].name]}'
+          asset_names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          grep -q 'salonboard-sync-mac-arm64.dmg' <<< "$asset_names"
+          grep -q 'salonboard-sync-mac-arm64.zip' <<< "$asset_names"

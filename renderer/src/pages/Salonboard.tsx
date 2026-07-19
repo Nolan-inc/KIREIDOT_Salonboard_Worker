@@ -875,9 +875,9 @@ function ShopCredentialCard({
 
 /**
  * 店舗ごとの Chrome プロファイル番号 + CDP ポート 入力欄。
- * 予約の書込/キャンセル/変更を、店舗ごとに「別プロファイル + 別ポート」の起動中
- * Chrome へ CDP 接続して実行する。空欄=Default/既定9222, 0=Default, N=Profile N。
- * 店舗ごとにポートを分けると完全並列に処理できる。RPC 経由で DB に書き戻す。
+ * 予約の書込/キャンセル/変更を、店舗専用の永続ChromeへCDP接続して実行する。
+ * ChromeはWorkerが自動起動・復旧する。Profile指定時は初回だけログインCookie等をseedする。
+ * 店舗ごとにポートを分けることでセッションを分離し、並列処理できる。
  */
 function ChromeProfileField({
   shopId,
@@ -933,15 +933,15 @@ function ChromeProfileField({
         type="number" min={0} inputMode="numeric"
         value={value} onChange={(e) => setValue(e.target.value)}
         placeholder="Default" disabled={!canEdit || busy}
-        title="Chrome の Profile 番号 (0=Default, 1=Profile 1…)。空欄=Default。"
+        title="初回seed元のChrome Profile番号 (0=Default, 1=Profile 1…)。空欄なら店舗専用の新規Profileを使用。"
         className="w-14 rounded border border-hairline px-1.5 py-0.5 text-[11px] disabled:opacity-40"
       />
       <span className="shrink-0">ポート:</span>
       <input
         type="number" min={1024} max={65535} inputMode="numeric"
         value={portValue} onChange={(e) => setPortValue(e.target.value)}
-        placeholder="9222" disabled={!canEdit || busy}
-        title="この店舗用 Chrome の --remote-debugging-port。店舗ごとに別ポート=並列処理。空欄=9222。"
+        placeholder="自動割当" disabled={!canEdit || busy}
+        title="店舗専用ChromeのCDPポート。WorkerがこのポートでChromeを自動起動・復旧します。"
         className="w-16 rounded border border-hairline px-1.5 py-0.5 text-[11px] disabled:opacity-40"
       />
       <button

@@ -141,12 +141,38 @@ async function launchPushBrowser(base = {}) {
 
 const CHROME_BIN_MAC = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CDP_HOST = '127.0.0.1';
+const MANAGED_CDP_ROOT = path.join(os.homedir(), '.kireidot', 'salonboard-cdp');
+// connectOverCDP の browser.close() は常駐Chrome本体を終了し得るため、
+// 接続をポート単位で保持し、後続ジョブから再利用する。
+const managedCdpBrowsers = new Map();
 
 /** chrome_profile_no を Chrome の --profile-directory 名に変換 (0/null=Default, N=Profile N)。 */
 function profileDirName(profileNo) {
   const n = Number(profileNo);
   if (!Number.isFinite(n) || n <= 0) return 'Default';
   return `Profile ${n}`;
+}
+
+/** DBでポート未設定でも全店舗が9222へ集中しないための安定した予備ポート。 */
+function defaultDebugPortForShop(shopId) {
+  const value = String(shopId || 'default');
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 12000 + ((hash >>> 0) % 20000);
+}
+
+function chromeBinaryPath() {
+  if (process.platform === 'darwin') return CHROME_BIN_MAC;
+  if (process.platform === 'win32') {
+    return path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe');
+  }
+  for (const candidate of ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium']) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 /** 指定ポートで CDP エンドポイントが応答するか (GET /json/version) を確認。 */
@@ -177,14 +203,86 @@ function isPortOpen(port, timeoutMs = 800) {
   });
 }
 
+function normalizeChromeExitState(userDataDir, profile) {
+  for (const preferencesPath of [
+    path.join(userDataDir, profile, 'Preferences'),
+    path.join(userDataDir, 'Default', 'Preferences'),
+  ]) {
+    try {
+      if (!fs.existsSync(preferencesPath)) continue;
+      const preferences = JSON.parse(fs.readFileSync(preferencesPath, 'utf8'));
+      preferences.profile = { ...(preferences.profile || {}), exit_type: 'Normal', exited_cleanly: true };
+      fs.writeFileSync(preferencesPath, JSON.stringify(preferences));
+    } catch (_e) { /* Chrome自身の復旧に任せる */ }
+  }
+}
+
+async function waitForCdp(port, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await probeCdp(port, 1200)).ok) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+/**
+ * 店舗専用の永続user-data-dirでChromeを起動する。
+ * 初回のみ指定ProfileからログインCookie等をseedし、以後は専用dirを再利用する。
+ */
+async function ensureManagedChrome({ shopId, profileNo, port }) {
+  if ((await probeCdp(port)).ok) return { started: false };
+  if (await isPortOpen(port)) {
+    throw new Error(`CDPポート ${port} は別プロセスが使用中ですが、Chrome DevToolsとして応答しません`);
+  }
+
+  const chromeBin = chromeBinaryPath();
+  if (!chromeBin || !fs.existsSync(chromeBin)) {
+    throw new Error(`Google Chromeが見つからないため店舗用Chromeを起動できません (${chromeBin || 'path未解決'})`);
+  }
+
+  const userDataDir = path.join(MANAGED_CDP_ROOT, String(shopId || `port-${port}`));
+  fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+  const profile = profileDirName(profileNo);
+  // Profile未設定の店舗へ普段使いDefaultのセッションを複製すると、全店舗が同じ
+  // SalonBoardアカウントで始まりセッション混線する。明示設定時だけseedする。
+  const hasExplicitProfile = profileNo != null && Number.isFinite(Number(profileNo)) && Number(profileNo) >= 0;
+  const seedInfo = hasExplicitProfile
+    ? seedUserChromeProfile(userDataDir, { srcProfile: profile })
+    : { seeded: false, reason: 'profile_not_configured' };
+  normalizeChromeExitState(userDataDir, profile);
+
+  const child = spawn(chromeBin, [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    `--profile-directory=${profile}`,
+    '--remote-allow-origins=*',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
+    '--new-window',
+    'about:blank',
+  ], { detached: true, stdio: 'ignore' });
+  child.unref();
+  emit('log', {
+    level: 'info',
+    msg: `[cdp] 店舗用Chromeを自動起動 shop=${String(shopId).slice(0, 8)} port=${port} profile="${profile}" seed=${seedInfo.reason || (seedInfo.seeded ? 'done' : 'skip')}`,
+    at: new Date().toISOString(),
+  });
+
+  if (!(await waitForCdp(port))) {
+    throw new Error(`店舗用Chromeを起動しましたが、CDPポート ${port} が30秒以内に応答しませんでした`);
+  }
+  return { started: true, userDataDir, profile };
+}
+
 /**
  * 普段使いの Chrome を「指定プロファイル + remote-debugging-port」で起動 or 再利用し、
  * CDP で接続する。返り値の context/browser は既存 Chrome を指す。
  *
- * 運用: 店舗ごとに「別プロファイル + 別ポート」の Chrome を、ユーザーが手動で
- *   --remote-debugging-port=<port> --profile-directory=<profile> 付きで起動しておく。
- *   worker はそのポートに connectOverCDP するだけ (自動起動はしない)。これにより
- *   店舗ごとに独立した Chrome/セッションで完全並列に処理できる。
+ * 店舗別Chromeが未起動/クラッシュ済みならWorkerが専用user-data-dirで自動復旧する。
+ * ログイン状態は店舗専用dirに永続化され、ジョブ間・Mac再起動後も再利用される。
  *
  * 引数:
  *   profileNo : chrome_profile_no (0/null=Default, N=Profile N) — ログ/エラー表示用
@@ -192,29 +290,29 @@ function isPortOpen(port, timeoutMs = 800) {
  *
  * 返り値: { browser, context, usedChrome:true, viaCdp:true, profile, port }
  */
-async function connectToUserChrome({ profileNo, debugPort } = {}) {
-  const port = Number(debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
-  const profile = process.env.SALONBOARD_CHROME_PROFILE || profileDirName(profileNo);
+async function connectToUserChrome({ shopId, profileNo, debugPort } = {}) {
+  const port = Number(debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || defaultDebugPortForShop(shopId));
+  const profile = profileDirName(profileNo);
   const endpoint = `http://${CDP_HOST}:${port}`;
 
-  // 指定ポートで CDP が応答するか確認。手動起動運用なので自動 spawn はしない。
-  const cdp = await probeCdp(port);
-  if (!cdp.ok) {
-    throw new Error(
-      `CDP ポート ${port} (profile="${profile}") に接続できません。` +
-      `この店舗用の Chrome を手動で起動してください:\n` +
-      `  /Applications/Google Chrome.app/Contents/MacOS/Google Chrome ` +
-      `--remote-debugging-port=${port} --profile-directory="${profile}"\n` +
-      `(店舗ごとに別プロファイル・別ポートで起動すると並列処理できます)`
-    );
+  const cached = managedCdpBrowsers.get(port);
+  if (cached?.browser?.isConnected?.()) {
+    return { ...cached, reused: true };
   }
+  managedCdpBrowsers.delete(port);
 
-  // CDP で既存 Chrome へ接続。context/browser は起動中の Chrome を指す。
+  await ensureManagedChrome({ shopId, profileNo, port });
+
   const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
   const contexts = browser.contexts();
   const context = contexts.length > 0 ? contexts[0] : await browser.newContext();
+  const connected = { browser, context, usedChrome: true, viaCdp: true, profile, port };
+  managedCdpBrowsers.set(port, connected);
+  browser.on('disconnected', () => {
+    if (managedCdpBrowsers.get(port)?.browser === browser) managedCdpBrowsers.delete(port);
+  });
   emit('log', { level: 'info', msg: `[cdp] 接続成功 port=${port} profile="${profile}" contexts=${contexts.length}`, at: new Date().toISOString() });
-  return { browser, context, usedChrome: true, viaCdp: true, profile, port };
+  return connected;
 }
 
 /**
@@ -1354,17 +1452,16 @@ function isWithinKeepAliveHours() {
 async function keepAliveShop(target) {
   const shopId = target.shop_id;
   const genre = target.genre || 'esthetic';
-  const ssPath = storageStatePathFor(shopId);
-  const initialStorage = readStorageStatePath(ssPath);
-  // 一度もログインしていない店舗は対象外 (初回ログインは取得時に行う)。
-  if (!initialStorage) return { shopId, skipped: 'no_session' };
 
   // 取得/書込と相互排他。ロックが取れない (処理中) ならスキップ。
   const label = `${deviceAuth?.workerId ?? 'electron-worker'}:keepalive`;
   const lock = tryAcquireShopLock(shopId, label);
   if (!lock.ok) return { shopId, skipped: 'locked' };
 
-  let browser = null;
+  let portLocked = false;
+  let port = null;
+  let createdNewTab = false;
+  let page = null;
   try {
     let creds;
     try {
@@ -1373,56 +1470,42 @@ async function keepAliveShop(target) {
       return { shopId, skipped: 'no_credentials' };
     }
 
-    const launchBase = {
-      headless: true, // キープアライブは常に裏で (画面を出さない)
-      slowMo: 0,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--no-sandbox',
-        '--disable-features=IsolateOrigins,site-per-process',
-      ],
-    };
-    try {
-      browser = await chromium.launch(browserLaunchOptions(launchBase));
-    } catch (_e) {
-      browser = await chromium.launch(launchBase);
-    }
-    const ctx = await browser.newContext({
-      storageState: initialStorage,
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-      locale: 'ja-JP',
-      timezoneId: 'Asia/Tokyo',
-      viewport: { width: 1366, height: 900 },
+    const profile = await fetchChromeProfile(shopId);
+    port = Number(profile.debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || defaultDebugPortForShop(shopId));
+    const portLock = tryAcquireChromePortLock(port, label);
+    if (!portLock.ok) return { shopId, skipped: 'port_locked' };
+    portLocked = true;
+
+    // 予約書込と同じ店舗専用Chromeを起動/再利用する。別ブラウザでログインすると
+    // SalonBoardの1ログインID=1セッション制約で本番ジョブをログアウトさせるため禁止。
+    const managed = await connectToUserChrome({
+      shopId,
+      profileNo: profile.profileNo,
+      debugPort: profile.debugPort,
     });
-    await ctx.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
-    const page = await ctx.newPage();
+    const acquired = await acquireSalonboardPage(managed.context);
+    page = acquired.page;
+    createdNewTab = acquired.createdNewTab;
 
     const state = await isLoggedIn(page, creds.baseUrl, genre);
     if (state === 'logged_in') {
-      // セッション有効: TOP を開いたこと自体でアイドルタイマーがリセットされる。
-      // Cookie ローテーションに追従して storageState を保存し直す。
-      await saveStorageState(ctx, ssPath).catch(() => {});
       return { shopId, result: 'alive' };
     }
     if (state === 'captcha') {
       // captcha はここでは触らない (再ログイン連打しない)。取得側の処理に委ねる。
       return { shopId, result: 'captcha' };
     }
-    // needs_login / unknown: セッション切れ → 1 回だけ再ログイン。
-    clearStorageState(ssPath);
+    // needs_login / unknown: 専用Chrome内で1回だけ再ログイン。
     const r = await tryLogin(page, { ...creds, slow: true });
     if (r.status === 'ok') {
-      await saveStorageState(ctx, ssPath).catch(() => {});
       return { shopId, result: 'relogin' };
     }
     return { shopId, result: `relogin_failed:${r.status}` };
   } catch (e) {
     return { shopId, error: e?.message ?? String(e) };
   } finally {
-    await browser?.close().catch(() => {});
+    if (createdNewTab && page) await page.close().catch(() => {});
+    if (portLocked && port) releaseChromePortLock(port);
     releaseShopLock(shopId);
   }
 }
@@ -1468,6 +1551,10 @@ function startKeepAlive() {
     void keepSessionsAlive();
   }, KEEPALIVE_INTERVAL_MS);
   if (typeof keepAliveTimer.unref === 'function') keepAliveTimer.unref();
+  // 起動直後にも全店舗の専用Chromeを準備し、最初のフォールバックジョブが
+  // Chrome起動/ログイン待ちを負担しないようにする。
+  const initial = setTimeout(() => { void keepSessionsAlive(); }, 15_000);
+  if (typeof initial.unref === 'function') initial.unref();
 }
 
 // ---- 未反映予約スイープ (v0.2.183) ----
@@ -2926,9 +3013,38 @@ async function tryLogin(page, c) {
         // 次の候補を試す
       }
     }
+    // SalonBoard側のオーバーレイやアニメーションでPlaywrightのactionability判定が
+    // 通らない場合でも、公式画面上にあるログイン要素をDOMから直接クリックする。
+    if (!clicked) {
+      clicked = await page.evaluate(() => {
+        const candidates = Array.from(document.querySelectorAll('a, button, input[type="submit"]'));
+        const target = candidates.find((el) => {
+          const text = String(el.textContent || el.getAttribute('value') || '').trim();
+          return el.matches('a.common-CNCcommon__primaryBtn, a.loginBtnSize') || text === 'ログイン';
+        });
+        if (!target) return false;
+        target.click();
+        return true;
+      }).catch(() => false);
+    }
+    // 直接クリックと同時にnavigationしてevaluateのcontextが破棄された場合は、
+    // クリック自体は成功している。URL遷移/パスワード欄消失を成功として扱う。
+    if (!clicked) {
+      await wait(500);
+      const leftLogin = !/\/login\/?/i.test(page.url()) || (await pwInput.count().catch(() => 0)) === 0;
+      if (leftLogin) clicked = true;
+    }
     if (!clicked) {
       // 最終フォールバック: password 欄で Enter (onkeypress="enterActionLogin")
-      await pwInput.press('Enter', { timeout: 5_000, noWaitAfter: true });
+      if (await pwInput.isVisible().catch(() => false)) {
+        await pwInput.press('Enter', { timeout: 5_000, noWaitAfter: true });
+        clicked = true;
+      } else {
+        return {
+          status: 'failed',
+          reason: `login submit control disappeared before submit (url=${page.url()})`,
+        };
+      }
     }
     // networkidle はSalonBoardの常時通信で返らないことがある。URL遷移または
     // password欄消失のどちらかを最大25秒だけ待ち、以降は明示的に失敗させる。
@@ -3443,9 +3559,7 @@ async function runPushJobs({ showBrowser } = {}) {
     }
 
     let browser = null;
-    // CDP 接続方式のクリーンアップ制御。
-    //   cdpConnected=true のときは browser.close() は「CDP 接続を切るだけ」で、
-    //   普段使い Chrome 本体は閉じない。開いたタブ(createdNewTab)だけを閉じる。
+    // CDP接続はジョブ間で再利用する。ジョブが新規作成したタブだけを閉じる。
     let cdpConnected = false;
     let createdNewTab = false;
     let cdpPage = null; // acquireSalonboardPage で得た page を finally 側で閉じるため保持
@@ -3454,7 +3568,7 @@ async function runPushJobs({ showBrowser } = {}) {
       try {
         if (cdpConnected) {
           if (createdNewTab && cdpPage) { try { await cdpPage.close(); } catch (_e) {} }
-          if (browser) { try { await browser.close(); } catch (_e) {} } // CDP: 接続切断のみ (Chrome は残る)
+          // browser.close() は常駐Chrome本体を終了し得るため呼ばない。
         } else if (browser) {
           await browser.close().catch(() => {});
         }
@@ -3473,7 +3587,7 @@ async function runPushJobs({ showBrowser } = {}) {
       //   店舗ごとに Chrome が独立するため、店舗間で完全並列に処理できる。処理後も
       //   Chrome 本体は閉じない (タブだけ閉じる)。
       const { profileNo, debugPort } = await fetchChromeProfile(job.shop_id);
-      const launched = await connectToUserChrome({ profileNo, debugPort });
+      const launched = await connectToUserChrome({ shopId: job.shop_id, profileNo, debugPort });
       browser = launched.browser;
       const ctx = launched.context;
       cdpConnected = true; // finally で「接続を切るだけ (Chrome は閉じない)」判定に使う
@@ -4053,8 +4167,8 @@ async function runPushJobs({ showBrowser } = {}) {
     let lockedPort = null;
     try {
       const prof = await fetchChromeProfile(shopId);
-      lockedPort = Number(prof.debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
-    } catch (_e) { lockedPort = 9222; }
+      lockedPort = Number(prof.debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || defaultDebugPortForShop(shopId));
+    } catch (_e) { lockedPort = defaultDebugPortForShop(shopId); }
     if (lockedPort) {
       const startedWait = Date.now();
       let announced = false;

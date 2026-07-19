@@ -1,6 +1,6 @@
 {
   "name": "kireidot-salondesk",
-  "version": "0.2.203",
+  "version": "0.2.204",
   "private": true,
   "description": "KIREIDOT サロンデスク — サロン業務 (予約・スタッフ・シフト・ブログ) を一元管理する Electron デスクトップアプリ",
   "type": "module",
@@ -27,6 +27,7 @@
     "dist:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish never",
     "dist:mac:nosign": "SKIP_NOTARIZE=1 npm run dist:mac:arm64",
     "publish:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish always",
+    "publish:mac:arm64:unsigned": "npm run prebuild:dist && npm run build && cross-env SKIP_NOTARIZE=1 CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --publish always -c.mac.identity=null",
     "verify:mac": "bash build-resources/verify-mac.sh"
   },
   "dependencies": {
