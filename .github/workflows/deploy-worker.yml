@@ -1,37 +1,59 @@
-name: Deploy SalonBoard Worker (ECS)
+name: Deploy SalonBoard Cloud Worker (EC2)
 
-# NOTE: AWS_DEPLOY_ROLE_ARN secret (terraform output github_deploy_role_arn) を
-# リポジトリに設定するまでは手動トリガーのみ。設定後に push トリガーを有効化する:
-#   push: { branches: [main], paths: ["worker.ts", "salonboard-selectors.ts",
-#           "salonboard-rescan.ts", "docker/**", ".github/workflows/deploy-worker.yml"] }
 on:
+  push:
+    branches: [main]
+    paths:
+      - worker.ts
+      - salonboard-selectors.ts
+      - salonboard-rescan.ts
+      - canary.ts
+      - package.json
+      - package-lock.json
+      - .github/workflows/deploy-worker.yml
   workflow_dispatch:
 
+concurrency:
+  group: salonboard-cloud-worker-production
+  cancel-in-progress: false
+
 permissions:
-  id-token: write # OIDC (長期アクセスキー不使用)
+  id-token: write
   contents: read
 
 env:
   AWS_REGION: ap-northeast-1
-  ECR_REPOSITORY: kireidot-sb/salonboard-worker
-  ECS_CLUSTER: kireidot-sb-cluster
-  ECS_SERVICE: kireidot-sb-worker
-  TASK_FAMILY: kireidot-sb-worker
+  EC2_INSTANCE_ID: i-0f1cc0aff1ac8dd2e
+  DEPLOY_BUCKET: kireidot-sb-worker-debug-972293797066
+  CONTAINER_NAME: sb-worker-cloud
+  REMOTE_WORKER_PATH: /opt/kireidot/worker.cjs
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      # docker/package.json の playwright と Dockerfile のベースイメージタグの
-      # 厳密一致を機械チェック (乖離するとブラウザ起動に失敗するため)
-      - name: Verify playwright version match
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      # EC2 container has Playwright in its runtime image. Keep it external so
+      # Desktop and Cloud execute the exact same worker source from this commit.
+      - name: Build Cloud worker bundle
         run: |
-          PKG_VER=$(jq -r '.dependencies.playwright' docker/package.json)
-          IMG_VER=$(grep -oP 'ARG PLAYWRIGHT_VERSION=\K[0-9.]+' docker/Dockerfile)
-          echo "package.json=$PKG_VER Dockerfile=$IMG_VER"
-          test "$PKG_VER" = "$IMG_VER"
+          npx esbuild worker.ts \
+            --bundle --platform=node --format=cjs --target=node22 \
+            --external:playwright --outfile=worker.cjs
+          sha256sum worker.cjs
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -39,55 +61,43 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Upload immutable bundle
+        run: aws s3 cp worker.cjs "s3://$DEPLOY_BUCKET/deploy/$GITHUB_SHA/worker.cjs"
 
-      - name: Build image
+      - name: Deploy to EC2 through SSM
+        shell: bash
         run: |
-          APP_VERSION=$(jq -r '.version' package.json)
-          docker build \
-            -f docker/Dockerfile \
-            --build-arg APP_VERSION="$APP_VERSION" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
-            .
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          set -euo pipefail
+          URL=$(aws s3 presign "s3://$DEPLOY_BUCKET/deploy/$GITHUB_SHA/worker.cjs" --expires-in 900)
+          PARAMS=$(jq -nc --arg url "$URL" --arg path "$REMOTE_WORKER_PATH" --arg container "$CONTAINER_NAME" --arg sha "$GITHUB_SHA" '{commands:[
+            "set -e",
+            ("curl -fL --retry 3 --connect-timeout 10 " + ($url|@sh) + " -o " + ($path + ".next"|@sh)),
+            ("test -s " + ($path + ".next"|@sh)),
+            ("mv " + ($path + ".next"|@sh) + " " + ($path|@sh)),
+            ("docker restart " + ($container|@sh)),
+            ("docker inspect " + ($container|@sh) + " --format=Status={{.State.Status}} Started={{.State.StartedAt}} RestartCount={{.RestartCount}}"),
+            ("echo deployed_commit=" + $sha)
+          ]}')
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy-salonboard-worker-$GITHUB_SHA" \
+            --parameters "$PARAMS" \
+            --query Command.CommandId --output text)
+          aws ssm wait command-executed \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$EC2_INSTANCE_ID"
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}'
 
-      # イメージ内で Chromium が実際に起動できることのスモークテスト
-      - name: Smoke test (chromium launch)
+      - name: Deployment summary
         run: |
-          docker run --rm --entrypoint node \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" \
-            -e "import('playwright').then(async (m) => { const b = await m.chromium.launch(); const p = await b.newPage(); await p.goto('about:blank'); await b.close(); console.log('chromium ok'); })"
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-
-      - name: Push image
-        run: |
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-
-      # 現行タスク定義のイメージだけ差し替えて新リビジョン登録 → サービス更新。
-      # ECS rolling update は新タスク起動後に旧タスクへ SIGTERM (stopTimeout=120s drain)
-      # するため、実行中ジョブを落とさずデプロイできる
-      - name: Register task definition & update service
-        run: |
-          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
-            --query taskDefinition --output json \
-          | jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA" '
-              .containerDefinitions[0].image = $IMAGE
-              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
-                    .compatibilities, .registeredAt, .registeredBy)' \
-          > taskdef.json
-          NEW_ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "registered: $NEW_ARN"
-          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
-            --task-definition "$NEW_ARN" >/dev/null
-          echo "service updated"
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          echo "### SalonBoard Cloud Worker" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- instance: \`$EC2_INSTANCE_ID\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- container: \`$CONTAINER_NAME\`" >> "$GITHUB_STEP_SUMMARY"
