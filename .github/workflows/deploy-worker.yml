@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - worker.ts
+      - electron/scrapers.cjs
       - salonboard-selectors.ts
       - salonboard-rescan.ts
       - canary.ts
