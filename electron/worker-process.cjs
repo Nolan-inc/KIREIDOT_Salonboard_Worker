@@ -970,6 +970,7 @@ const ERROR_CODE_CATEGORY = {
   SESSION_EXPIRED: '⌛ SalonBoard のセッションが切れていました。再ログインが必要です。',
   STORE_SELECT_REQUIRED: '🏬 グループ店舗のサロン選択に失敗しました。店舗設定のサロンID(H...)を確認してください。',
   STAFF_MAPPING_NOT_FOUND: '👤 SalonBoard スタッフの紐付けが見つかりません。スタッフ設定を確認してください。',
+  BOOKING_ID_NOT_FOUND: '🆔 SalonBoard予約IDが未採番です。新規登録として再処理します。',
   PUSH_DISABLED: '🔒 実書き込み(実登録)がOFFのため確定していません。設定で有効化が必要です。',
   UNKNOWN_ERROR: '❓ 想定外のエラー(ポップアップ/画面崩れ/タイムアウト等)。添付スクショで画面を確認してください。',
 };

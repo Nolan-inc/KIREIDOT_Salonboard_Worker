@@ -5417,7 +5417,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   };
   const reserveId = (p.external_booking_id || '').trim();
 
-  if (!reserveId) return fail('external_booking_id (SalonBoard 予約ID) が無いため変更対象を特定できません', 'STAFF_MAPPING_NOT_FOUND', true);
+  if (!reserveId) return fail('external_booking_id (SalonBoard 予約ID) が無いため変更対象を特定できません', 'BOOKING_ID_NOT_FOUND', true);
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMM = String(when.minute).padStart(2, '0');
