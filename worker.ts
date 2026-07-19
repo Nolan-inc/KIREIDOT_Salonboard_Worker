@@ -940,9 +940,13 @@ async function handleJob(job: Job): Promise<void> {
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
       );
     }
-    // ★反映動画 (2026-07-11): write ジョブは画面遷移を録画する(失敗時のみ後で Storage へ)。
-    //   env SB_RECORD_WRITE_VIDEO=0 で無効化可。ディスクは finally で必ず掃除する。
-    if (isWriteJob && process.env.SB_RECORD_WRITE_VIDEO !== "0") {
+    // 動画録画は Chromium のエンコード負荷と一時ディスク消費が大きいため既定 OFF。
+    // 一時調査で明示的に SB_RECORD_WRITE_VIDEO=1 を設定した場合だけ有効化する。
+    // 通常の失敗診断には report() の軽量な静止画キャプチャを使用する。
+    if (
+      isWriteJob &&
+      /^(1|true|yes)$/i.test(process.env.SB_RECORD_WRITE_VIDEO ?? "")
+    ) {
       try {
         videoDir = join(homedir(), ".kireidot", "sbvideo", `${job.id}`);
         mkdirSync(videoDir, { recursive: true, mode: 0o700 });

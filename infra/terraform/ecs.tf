@@ -56,6 +56,8 @@ resource "aws_ecs_task_definition" "worker" {
       { name = "WORKER_CAPABILITIES", value = "real_chrome" },
       { name = "SALONBOARD_ENABLE_PUSH", value = var.enable_push ? "1" : "false" },
       { name = "SALONBOARD_DEBUG_CAPTURE", value = "1" },
+      # 動画録画はCPU・ディスク負荷が大きいため無効。失敗時は軽量な静止画を保存する。
+      { name = "SB_RECORD_WRITE_VIDEO", value = "0" },
       # headful 実 Chrome (headless は Akamai に弾かれる実測あり)。entrypoint が Xvfb を用意。
       { name = "SB_BROWSER_CHANNEL", value = "chrome" },
       { name = "SB_HEADLESS", value = "0" },
