@@ -657,6 +657,10 @@ async function fetchJobs(limit = 1): Promise<Job[]> {
 // 反映(書込)フローの失敗を page 単位で記録する。finally で「この page(=このジョブ)が
 // 失敗したか」を判定し、失敗時のみ録画動画を Admin へ上げるために使う。
 const _pageWriteFailed = new WeakMap<object, boolean>();
+// Guard timeout closes the browser while the original async handler is still
+// unwinding. Suppress its later "page has been closed" callback so one Cloud
+// attempt produces exactly one terminal callback / one history transition.
+const _guardTimedOutJobs = new Map<string, number>();
 
 // 失敗時に反映フローの録画(webm)を Admin 経由で Storage に上げる。worker は Supabase 直アクセスを
 // 持たないため、既存の callback と同じ認証で /api/salonboard/job-video に base64 送信する。
@@ -684,6 +688,16 @@ async function uploadJobVideo(jobId: string, videoPath: string): Promise<void> {
 }
 
 async function report(body: CallbackBody, capturePage?: unknown): Promise<void> {
+  const reportJobId = String((body as { job_id?: string }).job_id ?? "");
+  const reportError = String((body as { error?: string }).error ?? "");
+  const guardTimedOutAt = _guardTimedOutJobs.get(reportJobId);
+  const isGuardTimeoutReport = reportError.includes("[CLOUD_PC_FALLBACK] cloud処理が");
+  if (guardTimedOutAt && !isGuardTimeoutReport) {
+    console.warn(
+      `[callback] suppress late callback after guard timeout job=${reportJobId.slice(0, 8)} error=${reportError.slice(0, 120)}`,
+    );
+    return;
+  }
   // 失敗系コールバックには失敗地点のスクショ(メモリbuffer)を base64 で同梱する。
   // Admin が Storage に保存し、Slack 通知に画像として添付できるようにする(best-effort)。
   try {
@@ -4571,11 +4585,11 @@ const JOB_SAFETY_TIMEOUT_MS = Number(
 const FETCH_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
 );
-// cloud の予約書込は、顧客操作から長時間待たせない。60秒を超えた場合は当該
+// cloud の予約書込は、顧客操作から長時間待たせない。90秒を超えた場合は当該
 // Chrome を停止して callback に専用マーカーを返し、Admin が executor を
 // playwright(店舗PC)へ切り替える。PC worker 自身にはこの上限を適用しない。
 const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
-  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 60_000,
+  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 90_000,
 );
 
 function isCloudWorker(): boolean {
@@ -4600,6 +4614,8 @@ async function handleJobGuarded(job: Job): Promise<void> {
   try {
     const r = await Promise.race([handleJob(job).then(() => "done" as const), timeout]);
     if (r === "timeout") {
+      _guardTimedOutJobs.set(job.id, Date.now());
+      setTimeout(() => _guardTimedOutJobs.delete(job.id), 30 * 60_000);
       const secs = Math.round(limitMs / 1000);
       console.error(
         `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — running を解除して再キューします`,
