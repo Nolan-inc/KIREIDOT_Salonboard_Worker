@@ -137,3 +137,31 @@ resource "aws_iam_role_policy" "github_deploy" {
     ]
   })
 }
+
+# GitHub Actions deploys the bundled worker to the production EC2 host through
+# S3 + SSM. Kept separate from the ECS policy so the permissions and rollback
+# path are explicit while the production worker runs on EC2.
+resource "aws_iam_role_policy" "github_ec2_deploy" {
+  count = var.github_repo == "" ? 0 : 1
+  name  = "ec2-deploy"
+  role  = aws_iam_role.github_deploy[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject"]
+        Resource = "${aws_s3_bucket.debug.arn}/deploy/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:SendCommand",
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommandInvocations"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}

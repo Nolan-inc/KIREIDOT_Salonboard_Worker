@@ -1071,7 +1071,6 @@ async function handleJob(job: Job): Promise<void> {
 
       // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
-      loginCooldownUntil.delete(job.shop_id);
       noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
       auth = "logged_in";
     }
