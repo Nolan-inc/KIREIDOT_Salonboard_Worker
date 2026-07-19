@@ -1091,7 +1091,7 @@ async function handleJob(job: Job): Promise<void> {
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
           // PCは最終手段。Cloudの固定ISPがdoLoginでホールドされた場合は、同じCloud attemptの
-          // 90秒枠内で住宅sticky IPへ1回だけ切り替えて最初から再実行する。同じISPでの
+          // Cloud制限時間内で住宅sticky IPへ1回だけ切り替えて最初から再実行する。同じISPでの
           // doLogin連打はAkamaiフラグを延命するため行わない。
           if (
             isCloudWorker() &&
@@ -4639,11 +4639,12 @@ const JOB_SAFETY_TIMEOUT_MS = Number(
 const FETCH_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
 );
-// cloud の予約書込は、顧客操作から長時間待たせない。90秒を超えた場合は当該
+// cloud の予約書込は、顧客操作から長時間待たせない。直近の正常完了実績
+// (中央値 約152秒)とフォーム待機短縮後の余裕を踏まえ、150秒を超えた場合は当該
 // Chrome を停止して callback に専用マーカーを返し、Admin が executor を
 // playwright(店舗PC)へ切り替える。PC worker 自身にはこの上限を適用しない。
 const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
-  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 90_000,
+  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 150_000,
 );
 
 function isCloudWorker(): boolean {
