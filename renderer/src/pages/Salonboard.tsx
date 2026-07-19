@@ -710,6 +710,7 @@ function ShopCredentialCard({
             <ChromeProfileField
               shopId={row.shop_id}
               current={row.chrome_profile_no}
+              currentPort={row.chrome_debug_port}
               canEdit={canEdit}
               onSaved={onReload}
             />
@@ -873,29 +874,31 @@ function ShopCredentialCard({
 }
 
 /**
- * 店舗ごとの Chrome プロファイル番号 入力欄。
- * 予約の書込/キャンセル/変更を実行する Chrome プロファイル (普段使い Chrome の
- * Profile 番号) を店舗単位で分ける。空欄=自動(店舗別), 0=Default, N=Profile N。
- * DB (salonboard_credentials.chrome_profile_no) に RPC 経由で書き戻す。
+ * 店舗ごとの Chrome プロファイル番号 + CDP ポート 入力欄。
+ * 予約の書込/キャンセル/変更を、店舗ごとに「別プロファイル + 別ポート」の起動中
+ * Chrome へ CDP 接続して実行する。空欄=Default/既定9222, 0=Default, N=Profile N。
+ * 店舗ごとにポートを分けると完全並列に処理できる。RPC 経由で DB に書き戻す。
  */
 function ChromeProfileField({
   shopId,
   current,
+  currentPort,
   canEdit,
   onSaved,
 }: {
   shopId: string;
   current: number | null;
+  currentPort: number | null;
   canEdit: boolean;
   onSaved: () => Promise<void>;
 }) {
   const [value, setValue] = useState<string>(current == null ? '' : String(current));
+  const [portValue, setPortValue] = useState<string>(currentPort == null ? '' : String(currentPort));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const dirty = (current == null ? '' : String(current)) !== value.trim();
-
-  const label =
-    value.trim() === '' ? '自動(店舗別)' : Number(value) === 0 ? 'Default' : `Profile ${Number(value)}`;
+  const dirty =
+    (current == null ? '' : String(current)) !== value.trim() ||
+    (currentPort == null ? '' : String(currentPort)) !== portValue.trim();
 
   async function save() {
     if (!canEdit) return;
@@ -904,33 +907,42 @@ function ChromeProfileField({
     if (t === '') no = null;
     else {
       const n = Number(t);
-      if (!Number.isInteger(n) || n < 0) {
-        setErr('0 以上の整数を入力してください');
-        return;
-      }
+      if (!Number.isInteger(n) || n < 0) { setErr('プロファイルは0以上の整数'); return; }
       no = n;
+    }
+    const pt = portValue.trim();
+    let port: number | null;
+    if (pt === '') port = null;
+    else {
+      const p = Number(pt);
+      if (!Number.isInteger(p) || p < 1024 || p > 65535) { setErr('ポートは1024〜65535'); return; }
+      port = p;
     }
     setBusy(true);
     setErr(null);
-    const r = await setSalonboardChromeProfile(shopId, no);
+    const r = await setSalonboardChromeProfile(shopId, no, port);
     setBusy(false);
     if (!r.ok) setErr(r.error ?? '保存に失敗しました');
     else await onSaved();
   }
 
   return (
-    <div className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-soft">
+    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-soft">
       <span className="shrink-0">Chromeプロファイル:</span>
       <input
-        type="number"
-        min={0}
-        inputMode="numeric"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="自動"
-        disabled={!canEdit || busy}
-        title="普段使い Chrome の Profile 番号 (0=Default, 1=Profile 1…)。空欄=店舗ごとに自動分離。"
+        type="number" min={0} inputMode="numeric"
+        value={value} onChange={(e) => setValue(e.target.value)}
+        placeholder="Default" disabled={!canEdit || busy}
+        title="Chrome の Profile 番号 (0=Default, 1=Profile 1…)。空欄=Default。"
         className="w-14 rounded border border-hairline px-1.5 py-0.5 text-[11px] disabled:opacity-40"
+      />
+      <span className="shrink-0">ポート:</span>
+      <input
+        type="number" min={1024} max={65535} inputMode="numeric"
+        value={portValue} onChange={(e) => setPortValue(e.target.value)}
+        placeholder="9222" disabled={!canEdit || busy}
+        title="この店舗用 Chrome の --remote-debugging-port。店舗ごとに別ポート=並列処理。空欄=9222。"
+        className="w-16 rounded border border-hairline px-1.5 py-0.5 text-[11px] disabled:opacity-40"
       />
       <button
         onClick={save}
@@ -939,7 +951,6 @@ function ChromeProfileField({
       >
         保存
       </button>
-      <span className="text-[10px] text-slate-400">{label}</span>
       {err && <span className="text-[10px] text-red-600">{err}</span>}
     </div>
   );

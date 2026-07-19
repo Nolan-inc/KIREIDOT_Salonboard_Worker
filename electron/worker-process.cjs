@@ -181,77 +181,40 @@ function isPortOpen(port, timeoutMs = 800) {
  * 普段使いの Chrome を「指定プロファイル + remote-debugging-port」で起動 or 再利用し、
  * CDP で接続する。返り値の context/browser は既存 Chrome を指す。
  *
- * - 既に同ポートで CDP が応答していれば、それに接続 (再利用)。
- * - 応答が無ければ Chrome を --remote-debugging-port + --profile-directory 付きで
- *   spawn する。既に同プロファイルの Chrome が起動中でも、process singleton が
- *   その既存 Chrome に debugging port を有効化して委譲する (新ウィンドウは作らない)。
- * - CDP が立ち上がるまでポーリング待ち。
+ * 運用: 店舗ごとに「別プロファイル + 別ポート」の Chrome を、ユーザーが手動で
+ *   --remote-debugging-port=<port> --profile-directory=<profile> 付きで起動しておく。
+ *   worker はそのポートに connectOverCDP するだけ (自動起動はしない)。これにより
+ *   店舗ごとに独立した Chrome/セッションで完全並列に処理できる。
  *
- * 返り値: { browser, context, usedChrome:true, viaCdp:true, spawned }
+ * 引数:
+ *   profileNo : chrome_profile_no (0/null=Default, N=Profile N) — ログ/エラー表示用
+ *   debugPort : chrome_debug_port (null=既定 9222) — 接続先ポート
+ *
+ * 返り値: { browser, context, usedChrome:true, viaCdp:true, profile, port }
  */
-async function connectToUserChrome({ profileNo } = {}) {
-  const port = Number(process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
+async function connectToUserChrome({ profileNo, debugPort } = {}) {
+  const port = Number(debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
   const profile = process.env.SALONBOARD_CHROME_PROFILE || profileDirName(profileNo);
   const endpoint = `http://${CDP_HOST}:${port}`;
 
-  // 1) 既に CDP が応答していれば、その「起動中の普段使い Chrome」に接続 (最優先)。
-  //    運用: Mac Studio の Chrome を --remote-debugging-port=<port> 付きで起動しておく。
-  let cdp = await probeCdp(port);
-  let spawned = false;
-
-  // 2) 応答が無い場合のみ、指定プロファイルの Chrome を debug port 付きで起動を試みる。
-  //    ★重要な制約: 同じプロファイルの Chrome が「port 無しで」既に起動していると、
-  //      Chrome の process singleton が新プロセスを既存へ委譲するだけで、debug port は
-  //      開かない。この場合は下の待機ループがタイムアウトし、明確なエラーで返す
-  //      (長時間ハングさせない)。
+  // 指定ポートで CDP が応答するか確認。手動起動運用なので自動 spawn はしない。
+  const cdp = await probeCdp(port);
   if (!cdp.ok) {
-    // port 無し Chrome が既に起動中か (= spawn しても委譲されて失敗するケース) を検知。
-    let portlessChromeRunning = false;
-    try {
-      const running = execSync(`pgrep -f "Google Chrome" | head -1`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-      portlessChromeRunning = !!running;
-    } catch (_e) { /* pgrep 該当なし */ }
-
-    if (process.platform === 'darwin' && fs.existsSync(CHROME_BIN_MAC)) {
-      const args = [`--remote-debugging-port=${port}`, `--profile-directory=${profile}`, '--restore-last-session'];
-      emit('log', { level: 'info', msg: `[cdp] port ${port} に応答なし → Chrome 起動を試行: profile="${profile}"${portlessChromeRunning ? ' (⚠️ port無しChromeが起動中の可能性)' : ''}`, at: new Date().toISOString() });
-      try {
-        const child = spawn(CHROME_BIN_MAC, args, { detached: true, stdio: 'ignore' });
-        child.on('error', (err) => emit('log', { level: 'warn', msg: `[cdp] Chrome spawn error: ${String(err?.message ?? err)}`, at: new Date().toISOString() }));
-        child.unref();
-        spawned = true;
-      } catch (e) {
-        emit('log', { level: 'warn', msg: `[cdp] Chrome spawn 失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
-      }
-    } else {
-      emit('log', { level: 'warn', msg: `[cdp] このOS/環境では Chrome 実行ファイルが見つかりません (${process.platform})`, at: new Date().toISOString() });
-    }
-
-    // 3) CDP が応答するまで待つ (最大 ~15 秒)。
-    for (let i = 0; i < 30 && !cdp.ok; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      if (await isPortOpen(port)) cdp = await probeCdp(port);
-    }
-
-    if (!cdp.ok && portlessChromeRunning) {
-      throw new Error(
-        `CDP ポート ${port} に接続できません。既に Chrome が「デバッグポート無し」で起動中のため、` +
-        `後から有効化できません (Chrome の仕様)。一度 Chrome を完全終了し、` +
-        `「/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=${port} --profile-directory=${profile}」で起動し直してください。`
-      );
-    }
+    throw new Error(
+      `CDP ポート ${port} (profile="${profile}") に接続できません。` +
+      `この店舗用の Chrome を手動で起動してください:\n` +
+      `  /Applications/Google Chrome.app/Contents/MacOS/Google Chrome ` +
+      `--remote-debugging-port=${port} --profile-directory="${profile}"\n` +
+      `(店舗ごとに別プロファイル・別ポートで起動すると並列処理できます)`
+    );
   }
 
-  if (!cdp.ok) {
-    throw new Error(`CDP 接続先が起動しませんでした (port=${port}, profile="${profile}")。普段使い Chrome を --remote-debugging-port=${port} で起動してください。`);
-  }
-
-  // 4) CDP で既存 Chrome へ接続。context/browser は既存 Chrome を指す。
+  // CDP で既存 Chrome へ接続。context/browser は起動中の Chrome を指す。
   const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
   const contexts = browser.contexts();
   const context = contexts.length > 0 ? contexts[0] : await browser.newContext();
-  emit('log', { level: 'info', msg: `[cdp] 接続成功 port=${port} contexts=${contexts.length} (${spawned ? 'Chrome起動' : '起動中Chromeを再利用'})`, at: new Date().toISOString() });
-  return { browser, context, usedChrome: true, viaCdp: true, spawned, profile, port };
+  emit('log', { level: 'info', msg: `[cdp] 接続成功 port=${port} profile="${profile}" contexts=${contexts.length}`, at: new Date().toISOString() });
+  return { browser, context, usedChrome: true, viaCdp: true, profile, port };
 }
 
 /**
@@ -272,18 +235,26 @@ async function acquireSalonboardPage(context) {
   return { page, createdNewTab: true };
 }
 
-/** shop_id の Chrome プロファイル番号を取得する (未設定/失敗は null)。 */
-async function fetchChromeProfileNo(shopId) {
+/**
+ * shop_id の Chrome プロファイル番号 + CDP デバッグポートを取得する。
+ * 未設定/失敗時は { profileNo: null, debugPort: null } (呼び出し側で既定にフォールバック)。
+ */
+async function fetchChromeProfile(shopId) {
   try {
     const { data, error } = await supabase.rpc('salonboard_get_chrome_profile', { p_shop_id: shopId });
     if (error) {
-      emit('log', { level: 'warn', msg: `[profile] 取得失敗 (shop別分離で続行): ${error.message}`, at: new Date().toISOString() });
-      return null;
+      emit('log', { level: 'warn', msg: `[profile] 取得失敗 (既定で続行): ${error.message}`, at: new Date().toISOString() });
+      return { profileNo: null, debugPort: null };
     }
-    return data == null ? null : Number(data);
+    // RPC は table を返すため配列。1 行目を読む。
+    const row = Array.isArray(data) ? data[0] : data;
+    return {
+      profileNo: row?.chrome_profile_no == null ? null : Number(row.chrome_profile_no),
+      debugPort: row?.chrome_debug_port == null ? null : Number(row.chrome_debug_port),
+    };
   } catch (e) {
-    emit('log', { level: 'warn', msg: `[profile] 取得例外 (shop別分離で続行): ${e?.message ?? e}`, at: new Date().toISOString() });
-    return null;
+    emit('log', { level: 'warn', msg: `[profile] 取得例外 (既定で続行): ${e?.message ?? e}`, at: new Date().toISOString() });
+    return { profileNo: null, debugPort: null };
   }
 }
 
@@ -688,6 +659,29 @@ function tryAcquireShopLock(shopId, workerLabel) {
 }
 function releaseShopLock(shopId) {
   inProgressShops.delete(shopId);
+}
+
+// ─────────────────────────────────────────────
+// Chrome ポート(=1つの Chrome インスタンス)単位のロック。
+//
+// CDP 接続方式では「同じ chrome_debug_port を使う店舗」は同一 Chrome を共有する。
+// 店舗ごとに別ポートを割り当てれば店舗間は完全並列になるが、ポート未設定(既定9222共有)
+// や設定漏れで複数店舗が同じポートを指すと、同一 Chrome 上で並列にタブ操作/ログインが
+// 走って SalonBoard セッションが混線する。これを防ぐため、ポート単位でも直列化する。
+// (店舗ロックは shop_id 単位なので、別店舗×同一ポートは保護できない。)
+// ─────────────────────────────────────────────
+const inProgressChromePorts = new Map();
+function tryAcquireChromePortLock(port, workerLabel) {
+  const now = Date.now();
+  const cur = inProgressChromePorts.get(port);
+  if (cur && now - cur.startedAt < SHOP_LOCK_TTL_MS) {
+    return { ok: false, since: cur.startedAt, workerLabel: cur.workerLabel };
+  }
+  inProgressChromePorts.set(port, { startedAt: now, workerLabel });
+  return { ok: true };
+}
+function releaseChromePortLock(port) {
+  inProgressChromePorts.delete(port);
 }
 
 /**
@@ -3472,17 +3466,18 @@ async function runPushJobs({ showBrowser } = {}) {
         '--no-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
       ];
-      // ★CDP 接続方式 (2026-07-19): 普段使いの起動中 Chrome へ接続して操作する。
-      //   Super Admin / 予約同期くん で設定した chrome_profile_no のプロファイルの
-      //   Chrome を --remote-debugging-port 付きで起動 or 再利用し、connectOverCDP で
-      //   接続。既存のログイン済みタブ・Cookie・セッションをそのまま使う。新しい
-      //   プロファイル/別ウィンドウは起動せず、処理後も Chrome 本体は閉じない。
-      const profileNo = await fetchChromeProfileNo(job.shop_id);
-      const launched = await connectToUserChrome({ profileNo });
+      // ★CDP 接続方式 (2026-07-20): 店舗ごとに「別プロファイル + 別ポート」の
+      //   起動中 Chrome へ接続して操作する。Super Admin / 予約同期くん で設定した
+      //   chrome_profile_no / chrome_debug_port を使い、その店舗専用の Chrome へ
+      //   connectOverCDP。既存のログイン済みタブ・Cookie・セッションをそのまま使う。
+      //   店舗ごとに Chrome が独立するため、店舗間で完全並列に処理できる。処理後も
+      //   Chrome 本体は閉じない (タブだけ閉じる)。
+      const { profileNo, debugPort } = await fetchChromeProfile(job.shop_id);
+      const launched = await connectToUserChrome({ profileNo, debugPort });
       browser = launched.browser;
       const ctx = launched.context;
       cdpConnected = true; // finally で「接続を切るだけ (Chrome は閉じない)」判定に使う
-      emit('log', { level: 'info', msg: `[${tag}] 既存Chrome(CDP)に接続: profile="${launched.profile}" port=${launched.port}${launched.spawned ? ' (起動)' : ' (再利用)'}`, at: new Date().toISOString() });
+      emit('log', { level: 'info', msg: `[${tag}] 既存Chrome(CDP)に接続: profile="${launched.profile}" port=${launched.port}`, at: new Date().toISOString() });
       const ssPath = storageStatePathFor(job.shop_id);
       // 既存 Chrome を使うため Cookie/ログインは Chrome 自身が保持している。
       // storageState 注入は不要 (むしろ既存セッションを壊すのでしない)。
@@ -4051,9 +4046,37 @@ async function runPushJobs({ showBrowser } = {}) {
         await new Promise((r) => setTimeout(r, 5000));
       }
     }
+
+    // Chrome ポート単位のロック: 同じ chrome_debug_port を使う店舗同士は
+    // 同一 Chrome を共有するため直列化する (別ポートなら並列のまま通る)。
+    let portLocked = false;
+    let lockedPort = null;
+    try {
+      const prof = await fetchChromeProfile(shopId);
+      lockedPort = Number(prof.debugPort || process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
+    } catch (_e) { lockedPort = 9222; }
+    if (lockedPort) {
+      const startedWait = Date.now();
+      let announced = false;
+      for (;;) {
+        const lock = tryAcquireChromePortLock(lockedPort, label);
+        if (lock.ok) { portLocked = true; break; }
+        if (Date.now() - startedWait > 10 * 60_000) {
+          emit('log', { level: 'warn', msg: `[push ${String(job.id).slice(0, 8)}] Chromeポート(${lockedPort})ロック待ちが10分超のため、そのまま実行します`, at: new Date().toISOString() });
+          break;
+        }
+        if (!announced) {
+          announced = true;
+          emit('log', { level: 'info', msg: `[push ${String(job.id).slice(0, 8)}] 同じChrome(port ${lockedPort})を使う別店舗の処理中のため、完了を待ちます…`, at: new Date().toISOString() });
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+
     try {
       await runOneInner(job);
     } finally {
+      if (portLocked && lockedPort) releaseChromePortLock(lockedPort);
       if (locked && shopId) releaseShopLock(shopId);
       // 次のジョブに古い page が残らないようクリア (close 済みの page を
       // 後続のエラー報告が触らないように)。

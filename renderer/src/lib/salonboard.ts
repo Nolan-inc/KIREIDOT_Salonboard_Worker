@@ -61,6 +61,8 @@ export type CredentialOverviewRow = {
   credential_updated_at: string | null;
   /** 予約書込を実行する Chrome プロファイル番号 (null=自動/店舗別, 0=Default, N=Profile N)。 */
   chrome_profile_no: number | null;
+  /** 予約書込に使う Chrome CDP ポート (null=既定9222)。店舗ごとに別ポート=並列。 */
+  chrome_debug_port: number | null;
 };
 
 /**
@@ -414,22 +416,29 @@ export async function setSalonboardSyncDirection(
 }
 
 /**
- * 店舗ごとの Chrome プロファイル番号を設定する。
- * 予約の書込/キャンセル/変更を実行する Chrome プロファイル (普段使い Chrome の
- * Profile 番号) を店舗単位で分ける。null=自動(店舗別), 0=Default, N=Profile N。
+ * 店舗ごとの Chrome プロファイル番号 + CDP デバッグポートを設定する。
+ * 予約の書込/キャンセル/変更を、店舗ごとに「別プロファイル + 別ポート」の
+ * 起動中 Chrome へ CDP 接続して実行する。profileNo: null=Default, 0=Default, N=Profile N。
+ * debugPort: null=既定9222。店舗ごとにポートを分けると完全並列に処理できる。
  * salonboard_credentials は UPDATE の RLS が無いため SECURITY DEFINER RPC 経由。
  */
 export async function setSalonboardChromeProfile(
   shopId: string,
   profileNo: number | null,
+  debugPort: number | null,
 ): Promise<{ ok: boolean; error?: string }> {
   const value =
     profileNo == null || Number.isNaN(profileNo)
       ? null
       : Math.max(0, Math.trunc(profileNo));
+  const port =
+    debugPort == null || Number.isNaN(debugPort)
+      ? null
+      : Math.min(65535, Math.max(1024, Math.trunc(debugPort)));
   const { error } = await supabase.rpc('salonboard_set_chrome_profile', {
     p_shop_id: shopId,
     p_profile_no: value,
+    p_debug_port: port,
   });
   if (error) return { ok: false, error: error.message };
   return { ok: true };
