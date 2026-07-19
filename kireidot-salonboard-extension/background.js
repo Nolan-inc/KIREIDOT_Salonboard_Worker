@@ -134,7 +134,16 @@ async function runJob(job) {
   };
 
   try {
-    const res = await sendToTabWithInjection(sbTab.id, message);
+    // doLogin がAkamai側で応答を返さないと、content scriptへのsendMessage自体が
+    // 解決せずジョブが8分間pickedのまま残る。35秒で監視を打ち切り、ログイン画面を
+    // fresh navigationして次の試行へ返す（content側のlogin上限3回も併用）。
+    let messageTimer;
+    const res = await Promise.race([
+      sendToTabWithInjection(sbTab.id, message),
+      new Promise((_, reject) => {
+        messageTimer = setTimeout(() => reject(Object.assign(new Error('LOGIN_STEP_TIMEOUT: SalonBoardの画面遷移が35秒以内に完了しませんでした'), { code: 'LOGIN_STEP_TIMEOUT' })), 35_000);
+      }),
+    ]).finally(() => clearTimeout(messageTimer));
     if (res?.ok) {
       await complete(job.jobId, {
         status: "success",
@@ -156,6 +165,13 @@ async function runJob(job) {
       });
     }
   } catch (e) {
+    if (e?.code === 'LOGIN_STEP_TIMEOUT' || /LOGIN_STEP_TIMEOUT/.test(String(e?.message || ''))) {
+      console.warn('[KireiDot/bg] login step timeout; reset login page', e?.message);
+      try { await chrome.tabs.update(sbTab.id, { url: 'https://salonboard.com/login/' }); } catch (_e) {}
+      await complete(job.jobId, { status: 'retry', error: e?.message || 'ログイン画面遷移タイムアウト' });
+      await sleep(2500);
+      return;
+    }
     // content script 未注入(ページ読み込み中/遷移直後)。失敗扱いにせず retry に戻して
     // 次のポーリングで content.js が居る状態で拾わせる。
     console.warn("[KireiDot/bg] send failed, retry", e?.message);

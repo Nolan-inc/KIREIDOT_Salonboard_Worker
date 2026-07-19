@@ -488,11 +488,31 @@ async function launchStealthPersistentContext(opts = {}) {
     seedInfo = seedUserChromeProfile(userDataDir);
     emit('log', { level: 'info', msg: `Chromeプロファイルseed: ${JSON.stringify(seedInfo)}`, at: new Date().toISOString() });
   }
+  // 前回 worker が強制終了された場合、Chrome は Preferences に crash 状態を残し、
+  // 次回起動時に「ページを復元しますか？」を表示する。このバブルがログイン画面に
+  // 被さって人間には停止して見えるため、専用プロファイルだけ正常終了状態へ戻す。
+  for (const preferencesPath of [
+    path.join(userDataDir, 'Default', 'Preferences'),
+    path.join(userDataDir, 'Preferences'),
+  ]) {
+    try {
+      if (!fs.existsSync(preferencesPath)) continue;
+      const preferences = JSON.parse(fs.readFileSync(preferencesPath, 'utf8'));
+      preferences.profile = { ...(preferences.profile || {}), exit_type: 'Normal', exited_cleanly: true };
+      fs.writeFileSync(preferencesPath, JSON.stringify(preferences));
+    } catch (_e) { /* 壊れたPreferencesはChrome自身の復旧に任せる */ }
+  }
   // 自動化検知につながる既定フラグを除去。
   // ★--no-sandbox は付けない: Chromeが「サポートされていないフラグ」警告を出し、
   //   Akamai に自動化ブラウザと検知される手がかりになる。実Chromeはsandboxありで起動できる。
   const ignoreDefaultArgs = ['--enable-automation', '--disable-blink-features=AutomationControlled', '--no-sandbox'];
-  const args = ['--disable-features=IsolateOrigins,site-per-process'];
+  const args = [
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
   const contextOpts = {
     headless,
     slowMo,
@@ -2755,21 +2775,23 @@ async function ensureStoreSelected(page, opts = {}) {
 }
 
 async function tryLogin(page, c) {
-  // SalonBoard はトラッキングスクリプトが多く 'load' まで永遠に来ないため、
-  // 「入力欄の出現」を主軸 + 失敗時に最大3回リトライする戦略。
-  const MAX_ATTEMPTS = 3;
+  // フォーム出現を主軸にする。従来は 60+45+45 秒待ち、nav 自体が成功して
+  // selector だけ出ない場合は失敗判定も漏れていたため「無限ロード」に見えた。
+  // 1回20秒・最大2回で明示的に打ち切り、ジョブ側のリトライへ返す。
+  const MAX_ATTEMPTS = 2;
+  let formVisible = false;
   let lastNavError = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     let navError = null;
     const navPromise = page
-      .goto(c.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      .goto(c.baseUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
       .catch((e) => {
         navError = e;
       });
     try {
-      // 入力欄の出現を待つ。1回目は 60秒、リトライ時は 45秒。
       await page.waitForSelector('input[type="password"], input[name="password"]', {
-        timeout: attempt === 1 ? 60_000 : 45_000,
+        state: 'visible',
+        timeout: 20_000,
       });
       // 入力欄が見えた → 成功
       await Promise.race([
@@ -2777,22 +2799,24 @@ async function tryLogin(page, c) {
         new Promise((r) => setTimeout(r, 3_000)),
       ]);
       lastNavError = null;
+      formVisible = true;
       break;
     } catch (_e) {
       lastNavError = navError;
       await navPromise.catch(() => {});
       if (attempt < MAX_ATTEMPTS) {
         // 少し待ってからリトライ (バックオフ)
-        await new Promise((r) => setTimeout(r, attempt * 3_000));
+        await page.goto('about:blank', { waitUntil: 'commit', timeout: 5_000 }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 1_500));
       }
     }
   }
-  if (lastNavError) {
+  if (!formVisible) {
     return {
       status: 'failed',
-      reason: `login form not visible after ${MAX_ATTEMPTS} attempts: ${
-        lastNavError instanceof Error ? lastNavError.message : lastNavError
-      }`,
+      reason: `login form not visible within 40s after ${MAX_ATTEMPTS} attempts (url=${page.url()}${
+        lastNavError ? `, navigation=${lastNavError instanceof Error ? lastNavError.message : lastNavError}` : ''
+      })`,
     };
   }
 
@@ -2863,10 +2887,7 @@ async function tryLogin(page, c) {
       const loc = page.locator(sel).first();
       if ((await loc.count()) === 0) continue;
       try {
-        await Promise.all([
-          page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
-          loc.click({ timeout: 5_000 }),
-        ]);
+        await loc.click({ timeout: 5_000, noWaitAfter: true });
         clicked = true;
         break;
       } catch (_e) {
@@ -2875,13 +2896,14 @@ async function tryLogin(page, c) {
     }
     if (!clicked) {
       // 最終フォールバック: password 欄で Enter (onkeypress="enterActionLogin")
-      await Promise.all([
-        page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {}),
-        pwInput.press('Enter', { timeout: 5_000 }),
-      ]);
+      await pwInput.press('Enter', { timeout: 5_000, noWaitAfter: true });
     }
-    // クリック後にナビゲーションを少し待つ (XHR ベースの遷移にも対応)
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+    // networkidle はSalonBoardの常時通信で返らないことがある。URL遷移または
+    // password欄消失のどちらかを最大25秒だけ待ち、以降は明示的に失敗させる。
+    await Promise.race([
+      page.waitForURL((u) => !/\/login\/?/i.test(u.toString()) && !/doLogin/i.test(u.toString()), { timeout: 25_000 }),
+      pwInput.waitFor({ state: 'detached', timeout: 25_000 }),
+    ]).catch(() => {});
   } catch (e) {
     return { status: 'failed', reason: `submit: ${e instanceof Error ? e.message : e}` };
   }
@@ -2893,7 +2915,7 @@ async function tryLogin(page, c) {
   const stillOnLogin =
     (await pwInput.count()) > 0 || /login/i.test(page.url());
   if (stillOnLogin) {
-    return { status: 'failed', reason: 'still on login page' };
+    return { status: 'failed', reason: `login submit did not complete within 25s (url=${page.url()})` };
   }
   // ログイン直後にセッション切れ/エラー画面に居ないか確認 (誤って成功扱いしない)。
   try {

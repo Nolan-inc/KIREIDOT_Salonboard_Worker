@@ -146,7 +146,14 @@ function openChromeWithUrl(url) {
     if (process.platform === 'darwin') {
       if (fs.existsSync(CHROME_BIN)) {
         const { spawn } = require('node:child_process');
-        const child = spawn(CHROME_BIN, [`--profile-directory=${CHROME_PROFILE}`, url], {
+        const child = spawn(CHROME_BIN, [
+          `--profile-directory=${CHROME_PROFILE}`,
+          '--disable-session-crashed-bubble',
+          '--hide-crash-restore-bubble',
+          '--no-first-run',
+          '--no-default-browser-check',
+          url,
+        ], {
           detached: true,
           stdio: 'ignore',
         });
