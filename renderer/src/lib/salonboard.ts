@@ -59,6 +59,8 @@ export type CredentialOverviewRow = {
   has_credential: boolean;
   credential_created_at: string | null;
   credential_updated_at: string | null;
+  /** 予約書込を実行する Chrome プロファイル番号 (null=自動/店舗別, 0=Default, N=Profile N)。 */
+  chrome_profile_no: number | null;
 };
 
 /**
@@ -406,6 +408,28 @@ export async function setSalonboardSyncDirection(
     p_shop_id: shopId,
     p_direction: direction,
     p_enabled: enabled,
+  });
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
+}
+
+/**
+ * 店舗ごとの Chrome プロファイル番号を設定する。
+ * 予約の書込/キャンセル/変更を実行する Chrome プロファイル (普段使い Chrome の
+ * Profile 番号) を店舗単位で分ける。null=自動(店舗別), 0=Default, N=Profile N。
+ * salonboard_credentials は UPDATE の RLS が無いため SECURITY DEFINER RPC 経由。
+ */
+export async function setSalonboardChromeProfile(
+  shopId: string,
+  profileNo: number | null,
+): Promise<{ ok: boolean; error?: string }> {
+  const value =
+    profileNo == null || Number.isNaN(profileNo)
+      ? null
+      : Math.max(0, Math.trunc(profileNo));
+  const { error } = await supabase.rpc('salonboard_set_chrome_profile', {
+    p_shop_id: shopId,
+    p_profile_no: value,
   });
   if (error) return { ok: false, error: error.message };
   return { ok: true };

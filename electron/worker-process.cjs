@@ -20,6 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
+const { execSync } = require('node:child_process');
 // Electron utilityProcess は Node 20 で動作するが、組み込み WebSocket が無いため
 // Supabase の createClient が RealtimeClient を生成する際に
 // "Node.js 20 detected without native WebSocket support" 例外を投げる。
@@ -105,6 +106,147 @@ async function launchPushBrowser(base = {}) {
   } catch (_e) {
     const b = await chromium.launch({ headless: true, args });
     return { browser: b, usedChrome: false };
+  }
+}
+
+// =====================================================================
+// 店舗ごとの Chrome プロファイル (userDataDir)
+//
+// 予約の書込/キャンセル/変更を「店舗ごとに別プロファイル」で実行するための解決。
+// Super Admin / 予約同期くん で設定した chrome_profile_no (普段使い Chrome の
+// Profile 番号) を、OS の実プロファイルパスに変換する。店舗ごとにプロファイルを
+// 分けることで、Akamai のセンサー cookie / 信頼状態が店舗単位で独立し、
+// Bot 判定・500 ブロックの相互干渉を避ける。
+//
+//   profile_no = null/0 → 普段使い Chrome の "Default"
+//   profile_no = N (>=1) → "Profile N"
+//
+// 未設定 (取得失敗含む) 時は shopId ごとの専用ディレクトリにフォールバックし、
+// 少なくとも店舗間は分離する (~/.kireidot/salonboard-chrome-profile/{shopId})。
+// =====================================================================
+
+/** macOS の Google Chrome ユーザーデータのルート。 */
+function chromeUserDataRoot() {
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'User Data');
+  }
+  // linux
+  return path.join(os.homedir(), '.config', 'google-chrome');
+}
+
+/**
+ * chrome_profile_no を、launchPersistentContext に渡す「専用 userDataDir」に変換する。
+ *
+ * ★設計 (2026-07-19 修正): 稼働中の普段使い Chrome (Default / Profile N) の
+ *   userDataDir を Playwright と共有すると、Chrome は「1 ユーザーデータ dir = 1 プロセス」
+ *   しか許さないため SingletonLock 衝突で必ず起動失敗する (= 「指定した Chrome が
+ *   立ち上がらない」の原因)。よって実プロファイルを直接使うのをやめ、
+ *   **指定プロファイルから cookie/ログイン状態を専用 dir に seed してそこで実行**する。
+ *
+ *   - profileNo = 0    → 普段使い Chrome の "Default" から seed
+ *   - profileNo = N>=1 → "Profile N" から seed
+ *   - profileNo = null → seed せず、店舗ごとの空プロファイルで実行 (初回は SB ログイン)
+ *
+ *   seed 先は必ず shopId ごとの専用 dir なので、稼働中の Chrome とは絶対に衝突しない。
+ *   一方で指定プロファイルの SB ログイン済み cookie / Akamai 信頼は引き継がれる。
+ *
+ * 返り値:
+ *   userDataDir      : launchPersistentContext に渡すルート (常に専用 dir)
+ *   profileDirectory : 起動時 --profile-directory に渡すサブ profile 名 (seed 時のみ)
+ *   seeded           : このプロファイルから cookie を seed したか
+ */
+function resolveChromeProfile(shopId, profileNo) {
+  // 実行は常に「店舗ごとの専用 dir」。稼働中の Chrome と共有しないのが肝。
+  const userDataDir = path.join(os.homedir(), '.kireidot', 'salonboard-chrome-profile', String(shopId));
+  try { fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 }); } catch (_e) { /* noop */ }
+
+  const n = Number(profileNo);
+  if (!Number.isFinite(n) || n < 0) {
+    // 番号未指定 → seed せず店舗別専用プロファイルで実行 (初回は SB ログインから)。
+    return { userDataDir, profileDirectory: null, seeded: false };
+  }
+
+  // 指定プロファイルから cookie/ログイン状態を seed (初回 or プロファイル変更時のみ実コピー)。
+  const srcProfile = n === 0 ? 'Default' : `Profile ${n}`;
+  const seedInfo = seedUserChromeProfile(userDataDir, { srcProfile });
+  if (seedInfo.reason === 'source_not_found') {
+    emit('log', { level: 'warn', msg: `[profile] Chrome プロファイル "${srcProfile}" が見つかりません。店舗別プロファイルで実行します`, at: new Date().toISOString() });
+    return { userDataDir, profileDirectory: null, seeded: false };
+  }
+  // seed 済みの cookie はサブディレクトリ srcProfile 配下にある → 起動時にそれを指す。
+  return { userDataDir, profileDirectory: srcProfile, seeded: seedInfo.seeded, seedReason: seedInfo.reason };
+}
+
+/**
+ * 店舗別 userDataDir で永続コンテキストを起動する (push/cancel/変更用)。
+ * launchPushBrowser と同じく実 Chrome 優先 → 同梱 Chromium フォールバック。
+ * 孤児 Chrome の SingletonLock 掴みっぱなしを 1 回だけ kill して再試行する。
+ */
+async function launchPushPersistentContext({ shopId, profileNo, headless = true, slowMo = 0, args, recordVideoDir } = {}) {
+  const launchArgs = args || ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
+  const prof = resolveChromeProfile(shopId, profileNo);
+  const baseArgs = prof.profileDirectory
+    ? [...launchArgs, `--profile-directory=${prof.profileDirectory}`]
+    : launchArgs;
+  emit('log', {
+    level: 'info',
+    msg: `[profile] shop=${String(shopId).slice(0, 8)} 専用dir=${String(shopId).slice(0, 8)}${prof.profileDirectory ? ` (${prof.profileDirectory} から seed${prof.seeded ? '実施' : '済み'})` : ' (店舗別・seedなし)'}`,
+    at: new Date().toISOString(),
+  });
+
+  const forceBundled = /^(1|true|yes)$/i.test(process.env.SALONBOARD_FORCE_BUNDLED_CHROMIUM ?? '');
+  const contextOpts = {
+    headless,
+    slowMo,
+    ignoreDefaultArgs: ['--enable-automation', '--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    args: baseArgs,
+    viewport: { width: 1366, height: 900 },
+    locale: 'ja-JP',
+    timezoneId: 'Asia/Tokyo',
+    ...(recordVideoDir ? { recordVideo: { dir: recordVideoDir, size: { width: 900, height: 600 } } } : {}),
+  };
+
+  const tryLaunch = async (opts) => {
+    try {
+      const ctx = await chromium.launchPersistentContext(prof.userDataDir, opts);
+      return ctx;
+    } catch (e) {
+      // 孤児 Chrome が SingletonLock を握っていると「browser has been closed」で即死する。
+      if (!/has been closed|SingletonLock|ProcessSingleton/i.test(String(e?.message ?? e))) throw e;
+      emit('log', { level: 'warn', msg: `[profile] 孤児 Chrome を kill して再試行 shop=${String(shopId).slice(0, 8)}`, at: new Date().toISOString() });
+      try { execSync(`pkill -f -- "--user-data-dir=${prof.userDataDir}"`, { stdio: 'ignore' }); } catch (_e) { /* 対象なしでも可 */ }
+      await new Promise((r) => setTimeout(r, 800));
+      return await chromium.launchPersistentContext(prof.userDataDir, opts);
+    }
+  };
+
+  if (!forceBundled) {
+    try {
+      const ctx = await tryLaunch({ ...contextOpts, channel: 'chrome' });
+      return { context: ctx, browser: ctx.browser(), usedChrome: true, userDataDir: prof.userDataDir, seeded: !!prof.profileDirectory };
+    } catch (e) {
+      emit('log', { level: 'warn', msg: `実Chrome(persistent)起動不可→同梱Chromiumで続行: ${String(e?.message ?? e).split('\n')[0]}`, at: new Date().toISOString() });
+    }
+  }
+  const ctx = await tryLaunch(contextOpts);
+  return { context: ctx, browser: ctx.browser(), usedChrome: false, userDataDir: prof.userDataDir, seeded: !!prof.profileDirectory };
+}
+
+/** shop_id の Chrome プロファイル番号を取得する (未設定/失敗は null)。 */
+async function fetchChromeProfileNo(shopId) {
+  try {
+    const { data, error } = await supabase.rpc('salonboard_get_chrome_profile', { p_shop_id: shopId });
+    if (error) {
+      emit('log', { level: 'warn', msg: `[profile] 取得失敗 (shop別分離で続行): ${error.message}`, at: new Date().toISOString() });
+      return null;
+    }
+    return data == null ? null : Number(data);
+  } catch (e) {
+    emit('log', { level: 'warn', msg: `[profile] 取得例外 (shop別分離で続行): ${e?.message ?? e}`, at: new Date().toISOString() });
+    return null;
   }
 }
 
@@ -292,14 +434,22 @@ async function runStyleJobViaExtension({ payload, creds, shopName, enablePost, t
 // 予約同期くん専用の user-data-dir に **コピーしてシード** する。同一Mac・同一ユーザーなら
 // Keychain の "Chrome Safe Storage" 鍵で cookie を復号できるため、手動と同じ信頼状態で起動できる。
 // 既に専用dirがあれば(=育っているので)再シードしない。
-function seedUserChromeProfile(userDataDir) {
+function seedUserChromeProfile(userDataDir, opts = {}) {
   // 既にシード済みなら何もしない(.seeded マーカーで判定)。
-  const markerExists = (() => { try { return fs.existsSync(path.join(userDataDir, '.seeded')); } catch (_e) { return false; } })();
-  if (markerExists) return { seeded: false, reason: 'already' };
-
-  const srcRoot = process.env.SALONBOARD_CHROME_SOURCE_DIR
+  // ★店舗ごとに「どのプロファイルから seed したか」を .seeded に記録し、
+  //   別プロファイル番号に変更されたら再 seed する (マーカー内容で判定)。
+  const markerPath = path.join(userDataDir, '.seeded');
+  const srcRoot = opts.srcRoot
+    || process.env.SALONBOARD_CHROME_SOURCE_DIR
     || path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
-  const srcProfile = process.env.SALONBOARD_CHROME_SOURCE_PROFILE || 'Default';
+  // opts.srcProfile があれば最優先 (店舗ごとの chrome_profile_no 由来)。
+  const srcProfile = opts.srcProfile || process.env.SALONBOARD_CHROME_SOURCE_PROFILE || 'Default';
+
+  const prevMarker = (() => { try { return fs.readFileSync(markerPath, 'utf8'); } catch (_e) { return null; } })();
+  // マーカーに記録された srcProfile が現在の指定と一致していれば再 seed 不要。
+  if (prevMarker && prevMarker.includes(`profile=${srcProfile}`)) {
+    return { seeded: false, reason: 'already', srcProfile };
+  }
   if (!fs.existsSync(path.join(srcRoot, srcProfile))) return { seeded: false, reason: 'source_not_found', srcRoot, srcProfile };
 
   try {
@@ -319,7 +469,7 @@ function seedUserChromeProfile(userDataDir) {
         else fs.copyFileSync(s, d);
       } catch (_e) { /* 個別失敗は無視 */ }
     }
-    try { fs.writeFileSync(path.join(userDataDir, '.seeded'), new Date().toISOString()); } catch (_e) {}
+    try { fs.writeFileSync(markerPath, `${new Date().toISOString()} profile=${srcProfile}`); } catch (_e) {}
     return { seeded: true, srcRoot, srcProfile };
   } catch (e) {
     return { seeded: false, reason: `copy_error: ${e?.message ?? e}` };
@@ -3245,20 +3395,32 @@ async function runPushJobs({ showBrowser } = {}) {
         '--no-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
       ];
-      // 投稿(書き込み)は実Chrome優先で起動 (スタイル画像アップロードが
-      // Chrome for Testing だと失敗するため)。
-      const launched = await launchPushBrowser({ headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs });
-      browser = launched.browser;
-      emit('log', { level: 'info', msg: `[${tag}] ブラウザ: ${launched.usedChrome ? '実Google Chrome' : '同梱Chromium'}`, at: new Date().toISOString() });
-      const ssPath = storageStatePathFor(job.shop_id);
-      const ctx = await browser.newContext({
-        ...(readStorageStatePath(ssPath) ? { storageState: readStorageStatePath(ssPath) } : {}),
-        userAgent:
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-        locale: 'ja-JP',
-        timezoneId: 'Asia/Tokyo',
-        viewport: { width: 1366, height: 900 },
+      // ★店舗ごとの Chrome プロファイルで書込を実行する (Akamai 干渉分離)。
+      //   Super Admin / 予約同期くん で設定した chrome_profile_no を解決し、
+      //   指定プロファイル(Default/Profile N)の cookie を店舗専用 dir へ seed して
+      //   そこで launchPersistentContext する。稼働中の普段使い Chrome とは userDataDir を
+      //   共有しないため SingletonLock 衝突は起きない。seed していない(番号未指定)時のみ
+      //   従来の店舗別 storageState を注入して初回ログインを省く。
+      const profileNo = await fetchChromeProfileNo(job.shop_id);
+      const launched = await launchPushPersistentContext({
+        shopId: job.shop_id, profileNo,
+        headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs,
       });
+      browser = launched.browser;
+      const ctx = launched.context;
+      emit('log', { level: 'info', msg: `[${tag}] ブラウザ: ${launched.usedChrome ? '実Google Chrome' : '同梱Chromium'} (profile=${profileNo == null ? 'auto/shop' : profileNo}${launched.seeded ? ', seed済' : ''})`, at: new Date().toISOString() });
+      const ssPath = storageStatePathFor(job.shop_id);
+      // 指定プロファイルを seed したときは、そのプロファイルの cookie が既にあるため
+      // storageState 注入は不要。番号未指定(空プロファイル)のときのみ、従来の店舗別
+      // storageState を cookie として流し込んで初回ログインを省く。
+      if (!launched.seeded && readStorageStatePath(ssPath)) {
+        try {
+          const st = JSON.parse(fs.readFileSync(ssPath, 'utf8'));
+          if (Array.isArray(st.cookies) && st.cookies.length) await ctx.addCookies(st.cookies);
+        } catch (e) {
+          emit('log', { level: 'warn', msg: `[${tag}] storageState 注入失敗(続行): ${e?.message ?? e}`, at: new Date().toISOString() });
+        }
+      }
       const page = await ctx.newPage();
       // 失敗時のエラー画面スクショ取得用に現在の page を保持 (postCallback が使う)。
       _errorCapturePage = page;

@@ -39,6 +39,7 @@ import {
   fetchRecentSyncRuns,
   revealSalonboardCredentials,
   setSalonboardCredentialEnabled,
+  setSalonboardChromeProfile,
   shopGenreLabel,
   upsertSalonboardCredentials,
   type CredentialOverviewRow,
@@ -705,6 +706,14 @@ function ShopCredentialCard({
               ログイン ID: <code className="font-mono">{row.login_id ?? '—'}</code>
             </div>
           )}
+          {linked && (
+            <ChromeProfileField
+              shopId={row.shop_id}
+              current={row.chrome_profile_no}
+              canEdit={canEdit}
+              onSaved={onReload}
+            />
+          )}
           {linked && row.last_success_at && (
             <div className="mt-0.5 text-[10px] text-emerald-700">
               <CheckCircle2 className="mr-0.5 inline h-2.5 w-2.5" /> 最終成功:{' '}
@@ -859,6 +868,79 @@ function ShopCredentialCard({
         </div>
       )}
       {actionErr && <p className="mt-2 text-[11px] text-red-700">{actionErr}</p>}
+    </div>
+  );
+}
+
+/**
+ * 店舗ごとの Chrome プロファイル番号 入力欄。
+ * 予約の書込/キャンセル/変更を実行する Chrome プロファイル (普段使い Chrome の
+ * Profile 番号) を店舗単位で分ける。空欄=自動(店舗別), 0=Default, N=Profile N。
+ * DB (salonboard_credentials.chrome_profile_no) に RPC 経由で書き戻す。
+ */
+function ChromeProfileField({
+  shopId,
+  current,
+  canEdit,
+  onSaved,
+}: {
+  shopId: string;
+  current: number | null;
+  canEdit: boolean;
+  onSaved: () => Promise<void>;
+}) {
+  const [value, setValue] = useState<string>(current == null ? '' : String(current));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const dirty = (current == null ? '' : String(current)) !== value.trim();
+
+  const label =
+    value.trim() === '' ? '自動(店舗別)' : Number(value) === 0 ? 'Default' : `Profile ${Number(value)}`;
+
+  async function save() {
+    if (!canEdit) return;
+    const t = value.trim();
+    let no: number | null;
+    if (t === '') no = null;
+    else {
+      const n = Number(t);
+      if (!Number.isInteger(n) || n < 0) {
+        setErr('0 以上の整数を入力してください');
+        return;
+      }
+      no = n;
+    }
+    setBusy(true);
+    setErr(null);
+    const r = await setSalonboardChromeProfile(shopId, no);
+    setBusy(false);
+    if (!r.ok) setErr(r.error ?? '保存に失敗しました');
+    else await onSaved();
+  }
+
+  return (
+    <div className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-soft">
+      <span className="shrink-0">Chromeプロファイル:</span>
+      <input
+        type="number"
+        min={0}
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="自動"
+        disabled={!canEdit || busy}
+        title="普段使い Chrome の Profile 番号 (0=Default, 1=Profile 1…)。空欄=店舗ごとに自動分離。"
+        className="w-14 rounded border border-hairline px-1.5 py-0.5 text-[11px] disabled:opacity-40"
+      />
+      <button
+        onClick={save}
+        disabled={!canEdit || busy || !dirty}
+        className="rounded border border-brand-200 px-1.5 py-0.5 text-[10px] text-brand-700 hover:bg-brand-light/40 disabled:opacity-40"
+      >
+        保存
+      </button>
+      <span className="text-[10px] text-slate-400">{label}</span>
+      {err && <span className="text-[10px] text-red-600">{err}</span>}
     </div>
   );
 }
