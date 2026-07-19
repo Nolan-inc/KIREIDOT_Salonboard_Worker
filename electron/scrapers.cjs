@@ -4353,8 +4353,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // スタッフ指定 (表示 select#salonStaffList + hidden staffId + staffIdList を揃える)。
     const staffSel = page.locator('select#salonStaffList').first();
     if ((await staffSel.count().catch(() => 0)) > 0) {
-      await staffSel.selectOption({ value: staffExt }).catch(async () => {
-        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+      await staffSel.selectOption({ value: staffExt }, { timeout: 3_000 }).catch(async () => {
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }, { timeout: 3_000 }).catch(() => {});
       });
     }
     await page.evaluate((ext) => {
@@ -4372,8 +4372,6 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       }
     }, staffExt).catch(() => {});
     // 開始 時/分 + 所要 (jsiRsvTermHour/Minute は分換算: "60"=1時間)。
-    await page.locator('select#jsiRsvHour').first().selectOption({ value: String(when.hour) }).catch(() => {});
-    await page.locator('select#jsiRsvMinute').first().selectOption({ value: startMM }).catch(() => {});
     const termHourVal = String(Math.floor(durMin / 60) * 60);
     const termMinVal = String(durMin % 60).padStart(2, '0');
     // ★SalonBoard は time/term の change で終了時間を自動再計算する。全 select を JS で直接
@@ -4402,8 +4400,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       return !!h && !!m && h.value === th && m.value === tm;
     }, { th: termHourVal, tm: termMinVal }).catch(() => false);
     if (!termOk) {
-      await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }).catch(() => {});
-      await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }).catch(() => {});
+      await page.locator('select#jsiRsvTermHour').first().selectOption({ value: termHourVal }, { timeout: 2_000 }).catch(() => {});
+      await page.locator('select#jsiRsvTermMinute').first().selectOption({ value: termMinVal }, { timeout: 2_000 }).catch(() => {});
     }
   }
 
@@ -4413,13 +4411,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const menuSel = page.locator("select[name='netCouponId']").first();
     if ((await menuSel.count().catch(() => 0)) > 0) {
       let menuFilled = false;
-      await menuSel.selectOption({ label: menuTarget }).then(() => { menuFilled = true; }).catch(() => {});
+      await menuSel.selectOption({ label: menuTarget }, { timeout: 3_000 }).then(() => { menuFilled = true; }).catch(() => {});
       if (!menuFilled) {
         const val = await menuSel.evaluate((el, target) => {
           const opt = Array.from(el.options).find((o) => (o.textContent || '').includes(target));
           return opt ? opt.value : null;
         }, menuTarget).catch(() => null);
-        if (val) await menuSel.selectOption({ value: val }).catch(() => {});
+        if (val) await menuSel.selectOption({ value: val }, { timeout: 3_000 }).catch(() => {});
       }
       // 見つからなくてもエラーにせず続行 (メニュー無し予約)
     }
@@ -4577,7 +4575,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         ).catch(() => null);
 
         if (pick && pick.value) {
-          await sel.selectOption({ value: pick.value }).catch(() => {});
+          await sel.selectOption({ value: pick.value }, { timeout: 3_000 }).catch(() => {});
           await sel.evaluate((el) => {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -4608,7 +4606,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
           return opt ? opt.value : null;
         }).catch(() => null);
         if (bedVal) {
-          await sel.selectOption({ value: bedVal }).catch(() => {});
+          await sel.selectOption({ value: bedVal }, { timeout: 3_000 }).catch(() => {});
           await sel.evaluate((el) => {
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
