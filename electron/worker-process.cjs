@@ -20,7 +20,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
-const { execSync } = require('node:child_process');
+const net = require('node:net');
+const { execSync, spawn } = require('node:child_process');
 // Electron utilityProcess は Node 20 で動作するが、組み込み WebSocket が無いため
 // Supabase の createClient が RealtimeClient を生成する際に
 // "Node.js 20 detected without native WebSocket support" 例外を投げる。
@@ -125,114 +126,150 @@ async function launchPushBrowser(base = {}) {
 // 少なくとも店舗間は分離する (~/.kireidot/salonboard-chrome-profile/{shopId})。
 // =====================================================================
 
-/** macOS の Google Chrome ユーザーデータのルート。 */
-function chromeUserDataRoot() {
-  if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
-  }
-  if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google', 'Chrome', 'User Data');
-  }
-  // linux
-  return path.join(os.homedir(), '.config', 'google-chrome');
-}
+// =====================================================================
+// CDP 接続方式 (2026-07-19): 普段使いの起動中 Chrome へ接続して操作する。
+//
+// ★背景: launchPersistentContext + seed 方式は「別の新しい Chrome」を起動する
+//   ため、既存のログイン済みセッションを使えず SB ログインからやり直しになり、
+//   Akamai に弾かれてログインリロードループになっていた。
+//   → 指定プロファイルの Chrome を --remote-debugging-port 付きで起動 (既に同
+//     プロファイルの Chrome が起動中なら process singleton でそこにアタッチ) し、
+//     chromium.connectOverCDP でその「普段使い Chrome」へ接続する。既存タブ・
+//     Cookie・ログイン状態をそのまま使う。新プロファイル/別ウィンドウは作らない。
+//     処理後は開いたタブだけ閉じ、Chrome 本体は閉じない。
+// =====================================================================
 
-/**
- * chrome_profile_no を、launchPersistentContext に渡す「専用 userDataDir」に変換する。
- *
- * ★設計 (2026-07-19 修正): 稼働中の普段使い Chrome (Default / Profile N) の
- *   userDataDir を Playwright と共有すると、Chrome は「1 ユーザーデータ dir = 1 プロセス」
- *   しか許さないため SingletonLock 衝突で必ず起動失敗する (= 「指定した Chrome が
- *   立ち上がらない」の原因)。よって実プロファイルを直接使うのをやめ、
- *   **指定プロファイルから cookie/ログイン状態を専用 dir に seed してそこで実行**する。
- *
- *   - profileNo = 0    → 普段使い Chrome の "Default" から seed
- *   - profileNo = N>=1 → "Profile N" から seed
- *   - profileNo = null → seed せず、店舗ごとの空プロファイルで実行 (初回は SB ログイン)
- *
- *   seed 先は必ず shopId ごとの専用 dir なので、稼働中の Chrome とは絶対に衝突しない。
- *   一方で指定プロファイルの SB ログイン済み cookie / Akamai 信頼は引き継がれる。
- *
- * 返り値:
- *   userDataDir      : launchPersistentContext に渡すルート (常に専用 dir)
- *   profileDirectory : 起動時 --profile-directory に渡すサブ profile 名 (seed 時のみ)
- *   seeded           : このプロファイルから cookie を seed したか
- */
-function resolveChromeProfile(shopId, profileNo) {
-  // 実行は常に「店舗ごとの専用 dir」。稼働中の Chrome と共有しないのが肝。
-  const userDataDir = path.join(os.homedir(), '.kireidot', 'salonboard-chrome-profile', String(shopId));
-  try { fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 }); } catch (_e) { /* noop */ }
+const CHROME_BIN_MAC = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const CDP_HOST = '127.0.0.1';
 
+/** chrome_profile_no を Chrome の --profile-directory 名に変換 (0/null=Default, N=Profile N)。 */
+function profileDirName(profileNo) {
   const n = Number(profileNo);
-  if (!Number.isFinite(n) || n < 0) {
-    // 番号未指定 → seed せず店舗別専用プロファイルで実行 (初回は SB ログインから)。
-    return { userDataDir, profileDirectory: null, seeded: false };
-  }
+  if (!Number.isFinite(n) || n <= 0) return 'Default';
+  return `Profile ${n}`;
+}
 
-  // 指定プロファイルから cookie/ログイン状態を seed (初回 or プロファイル変更時のみ実コピー)。
-  const srcProfile = n === 0 ? 'Default' : `Profile ${n}`;
-  const seedInfo = seedUserChromeProfile(userDataDir, { srcProfile });
-  if (seedInfo.reason === 'source_not_found') {
-    emit('log', { level: 'warn', msg: `[profile] Chrome プロファイル "${srcProfile}" が見つかりません。店舗別プロファイルで実行します`, at: new Date().toISOString() });
-    return { userDataDir, profileDirectory: null, seeded: false };
-  }
-  // seed 済みの cookie はサブディレクトリ srcProfile 配下にある → 起動時にそれを指す。
-  return { userDataDir, profileDirectory: srcProfile, seeded: seedInfo.seeded, seedReason: seedInfo.reason };
+/** 指定ポートで CDP エンドポイントが応答するか (GET /json/version) を確認。 */
+function probeCdp(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: CDP_HOST, port, path: '/json/version', timeout: timeoutMs }, (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(buf).webSocketDebuggerUrl ? { ok: true } : { ok: false }); }
+        catch { resolve({ ok: false }); }
+      });
+    });
+    req.on('error', () => resolve({ ok: false }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
+  });
+}
+
+/** TCP でポートが空いているか (LISTEN 中か) を軽く確認。 */
+function isPortOpen(port, timeoutMs = 800) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: CDP_HOST, port });
+    const done = (v) => { try { sock.destroy(); } catch (_e) {} resolve(v); };
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => done(true));
+    sock.on('error', () => done(false));
+    sock.on('timeout', () => done(false));
+  });
 }
 
 /**
- * 店舗別 userDataDir で永続コンテキストを起動する (push/cancel/変更用)。
- * launchPushBrowser と同じく実 Chrome 優先 → 同梱 Chromium フォールバック。
- * 孤児 Chrome の SingletonLock 掴みっぱなしを 1 回だけ kill して再試行する。
+ * 普段使いの Chrome を「指定プロファイル + remote-debugging-port」で起動 or 再利用し、
+ * CDP で接続する。返り値の context/browser は既存 Chrome を指す。
+ *
+ * - 既に同ポートで CDP が応答していれば、それに接続 (再利用)。
+ * - 応答が無ければ Chrome を --remote-debugging-port + --profile-directory 付きで
+ *   spawn する。既に同プロファイルの Chrome が起動中でも、process singleton が
+ *   その既存 Chrome に debugging port を有効化して委譲する (新ウィンドウは作らない)。
+ * - CDP が立ち上がるまでポーリング待ち。
+ *
+ * 返り値: { browser, context, usedChrome:true, viaCdp:true, spawned }
  */
-async function launchPushPersistentContext({ shopId, profileNo, headless = true, slowMo = 0, args, recordVideoDir } = {}) {
-  const launchArgs = args || ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-features=IsolateOrigins,site-per-process'];
-  const prof = resolveChromeProfile(shopId, profileNo);
-  const baseArgs = prof.profileDirectory
-    ? [...launchArgs, `--profile-directory=${prof.profileDirectory}`]
-    : launchArgs;
-  emit('log', {
-    level: 'info',
-    msg: `[profile] shop=${String(shopId).slice(0, 8)} 専用dir=${String(shopId).slice(0, 8)}${prof.profileDirectory ? ` (${prof.profileDirectory} から seed${prof.seeded ? '実施' : '済み'})` : ' (店舗別・seedなし)'}`,
-    at: new Date().toISOString(),
-  });
+async function connectToUserChrome({ profileNo } = {}) {
+  const port = Number(process.env.SALONBOARD_CHROME_DEBUG_PORT || 9222);
+  const profile = process.env.SALONBOARD_CHROME_PROFILE || profileDirName(profileNo);
+  const endpoint = `http://${CDP_HOST}:${port}`;
 
-  const forceBundled = /^(1|true|yes)$/i.test(process.env.SALONBOARD_FORCE_BUNDLED_CHROMIUM ?? '');
-  const contextOpts = {
-    headless,
-    slowMo,
-    ignoreDefaultArgs: ['--enable-automation', '--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    args: baseArgs,
-    viewport: { width: 1366, height: 900 },
-    locale: 'ja-JP',
-    timezoneId: 'Asia/Tokyo',
-    ...(recordVideoDir ? { recordVideo: { dir: recordVideoDir, size: { width: 900, height: 600 } } } : {}),
-  };
+  // 1) 既に CDP が応答していれば、その「起動中の普段使い Chrome」に接続 (最優先)。
+  //    運用: Mac Studio の Chrome を --remote-debugging-port=<port> 付きで起動しておく。
+  let cdp = await probeCdp(port);
+  let spawned = false;
 
-  const tryLaunch = async (opts) => {
+  // 2) 応答が無い場合のみ、指定プロファイルの Chrome を debug port 付きで起動を試みる。
+  //    ★重要な制約: 同じプロファイルの Chrome が「port 無しで」既に起動していると、
+  //      Chrome の process singleton が新プロセスを既存へ委譲するだけで、debug port は
+  //      開かない。この場合は下の待機ループがタイムアウトし、明確なエラーで返す
+  //      (長時間ハングさせない)。
+  if (!cdp.ok) {
+    // port 無し Chrome が既に起動中か (= spawn しても委譲されて失敗するケース) を検知。
+    let portlessChromeRunning = false;
     try {
-      const ctx = await chromium.launchPersistentContext(prof.userDataDir, opts);
-      return ctx;
-    } catch (e) {
-      // 孤児 Chrome が SingletonLock を握っていると「browser has been closed」で即死する。
-      if (!/has been closed|SingletonLock|ProcessSingleton/i.test(String(e?.message ?? e))) throw e;
-      emit('log', { level: 'warn', msg: `[profile] 孤児 Chrome を kill して再試行 shop=${String(shopId).slice(0, 8)}`, at: new Date().toISOString() });
-      try { execSync(`pkill -f -- "--user-data-dir=${prof.userDataDir}"`, { stdio: 'ignore' }); } catch (_e) { /* 対象なしでも可 */ }
-      await new Promise((r) => setTimeout(r, 800));
-      return await chromium.launchPersistentContext(prof.userDataDir, opts);
+      const running = execSync(`pgrep -f "Google Chrome" | head -1`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      portlessChromeRunning = !!running;
+    } catch (_e) { /* pgrep 該当なし */ }
+
+    if (process.platform === 'darwin' && fs.existsSync(CHROME_BIN_MAC)) {
+      const args = [`--remote-debugging-port=${port}`, `--profile-directory=${profile}`, '--restore-last-session'];
+      emit('log', { level: 'info', msg: `[cdp] port ${port} に応答なし → Chrome 起動を試行: profile="${profile}"${portlessChromeRunning ? ' (⚠️ port無しChromeが起動中の可能性)' : ''}`, at: new Date().toISOString() });
+      try {
+        const child = spawn(CHROME_BIN_MAC, args, { detached: true, stdio: 'ignore' });
+        child.on('error', (err) => emit('log', { level: 'warn', msg: `[cdp] Chrome spawn error: ${String(err?.message ?? err)}`, at: new Date().toISOString() }));
+        child.unref();
+        spawned = true;
+      } catch (e) {
+        emit('log', { level: 'warn', msg: `[cdp] Chrome spawn 失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
+      }
+    } else {
+      emit('log', { level: 'warn', msg: `[cdp] このOS/環境では Chrome 実行ファイルが見つかりません (${process.platform})`, at: new Date().toISOString() });
     }
-  };
 
-  if (!forceBundled) {
-    try {
-      const ctx = await tryLaunch({ ...contextOpts, channel: 'chrome' });
-      return { context: ctx, browser: ctx.browser(), usedChrome: true, userDataDir: prof.userDataDir, seeded: !!prof.profileDirectory };
-    } catch (e) {
-      emit('log', { level: 'warn', msg: `実Chrome(persistent)起動不可→同梱Chromiumで続行: ${String(e?.message ?? e).split('\n')[0]}`, at: new Date().toISOString() });
+    // 3) CDP が応答するまで待つ (最大 ~15 秒)。
+    for (let i = 0; i < 30 && !cdp.ok; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (await isPortOpen(port)) cdp = await probeCdp(port);
+    }
+
+    if (!cdp.ok && portlessChromeRunning) {
+      throw new Error(
+        `CDP ポート ${port} に接続できません。既に Chrome が「デバッグポート無し」で起動中のため、` +
+        `後から有効化できません (Chrome の仕様)。一度 Chrome を完全終了し、` +
+        `「/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=${port} --profile-directory=${profile}」で起動し直してください。`
+      );
     }
   }
-  const ctx = await tryLaunch(contextOpts);
-  return { context: ctx, browser: ctx.browser(), usedChrome: false, userDataDir: prof.userDataDir, seeded: !!prof.profileDirectory };
+
+  if (!cdp.ok) {
+    throw new Error(`CDP 接続先が起動しませんでした (port=${port}, profile="${profile}")。普段使い Chrome を --remote-debugging-port=${port} で起動してください。`);
+  }
+
+  // 4) CDP で既存 Chrome へ接続。context/browser は既存 Chrome を指す。
+  const browser = await chromium.connectOverCDP(endpoint, { timeout: 15_000 });
+  const contexts = browser.contexts();
+  const context = contexts.length > 0 ? contexts[0] : await browser.newContext();
+  emit('log', { level: 'info', msg: `[cdp] 接続成功 port=${port} contexts=${contexts.length} (${spawned ? 'Chrome起動' : '起動中Chromeを再利用'})`, at: new Date().toISOString() });
+  return { browser, context, usedChrome: true, viaCdp: true, spawned, profile, port };
+}
+
+/**
+ * 既存 Chrome の中で、SalonBoard 操作に使う page を用意する。
+ * - 既に SalonBoard を開いているタブがあれば再利用。
+ * - 無ければ既存ウィンドウ内に新規タブを開く。
+ * 返り値: { page, createdNewTab } — 呼び出し側は createdNewTab の時だけ閉じる。
+ */
+async function acquireSalonboardPage(context) {
+  const existing = context.pages();
+  const sbTab = existing.find((p) => {
+    try { return /salonboard\.com/i.test(p.url()); } catch (_e) { return false; }
+  });
+  if (sbTab) {
+    return { page: sbTab, createdNewTab: false };
+  }
+  const page = await context.newPage();
+  return { page, createdNewTab: true };
 }
 
 /** shop_id の Chrome プロファイル番号を取得する (未設定/失敗は null)。 */
@@ -3411,39 +3448,48 @@ async function runPushJobs({ showBrowser } = {}) {
     }
 
     let browser = null;
+    // CDP 接続方式のクリーンアップ制御。
+    //   cdpConnected=true のときは browser.close() は「CDP 接続を切るだけ」で、
+    //   普段使い Chrome 本体は閉じない。開いたタブ(createdNewTab)だけを閉じる。
+    let cdpConnected = false;
+    let createdNewTab = false;
+    let cdpPage = null; // acquireSalonboardPage で得た page を finally 側で閉じるため保持
+    // CDP 接続時は「タブを閉じて接続を切る」、非CDP時は従来どおり browser を閉じる共通処理。
+    const cleanupBrowser = async () => {
+      try {
+        if (cdpConnected) {
+          if (createdNewTab && cdpPage) { try { await cdpPage.close(); } catch (_e) {} }
+          if (browser) { try { await browser.close(); } catch (_e) {} } // CDP: 接続切断のみ (Chrome は残る)
+        } else if (browser) {
+          await browser.close().catch(() => {});
+        }
+      } catch (_e) { /* noop */ }
+    };
     try {
       const pushArgs = [
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
       ];
-      // ★店舗ごとの Chrome プロファイルで書込を実行する (Akamai 干渉分離)。
-      //   Super Admin / 予約同期くん で設定した chrome_profile_no を解決し、
-      //   指定プロファイル(Default/Profile N)の cookie を店舗専用 dir へ seed して
-      //   そこで launchPersistentContext する。稼働中の普段使い Chrome とは userDataDir を
-      //   共有しないため SingletonLock 衝突は起きない。seed していない(番号未指定)時のみ
-      //   従来の店舗別 storageState を注入して初回ログインを省く。
+      // ★CDP 接続方式 (2026-07-19): 普段使いの起動中 Chrome へ接続して操作する。
+      //   Super Admin / 予約同期くん で設定した chrome_profile_no のプロファイルの
+      //   Chrome を --remote-debugging-port 付きで起動 or 再利用し、connectOverCDP で
+      //   接続。既存のログイン済みタブ・Cookie・セッションをそのまま使う。新しい
+      //   プロファイル/別ウィンドウは起動せず、処理後も Chrome 本体は閉じない。
       const profileNo = await fetchChromeProfileNo(job.shop_id);
-      const launched = await launchPushPersistentContext({
-        shopId: job.shop_id, profileNo,
-        headless: !showBrowser, slowMo: showBrowser ? 250 : 0, args: pushArgs,
-      });
+      const launched = await connectToUserChrome({ profileNo });
       browser = launched.browser;
       const ctx = launched.context;
-      emit('log', { level: 'info', msg: `[${tag}] ブラウザ: ${launched.usedChrome ? '実Google Chrome' : '同梱Chromium'} (profile=${profileNo == null ? 'auto/shop' : profileNo}${launched.seeded ? ', seed済' : ''})`, at: new Date().toISOString() });
+      cdpConnected = true; // finally で「接続を切るだけ (Chrome は閉じない)」判定に使う
+      emit('log', { level: 'info', msg: `[${tag}] 既存Chrome(CDP)に接続: profile="${launched.profile}" port=${launched.port}${launched.spawned ? ' (起動)' : ' (再利用)'}`, at: new Date().toISOString() });
       const ssPath = storageStatePathFor(job.shop_id);
-      // 指定プロファイルを seed したときは、そのプロファイルの cookie が既にあるため
-      // storageState 注入は不要。番号未指定(空プロファイル)のときのみ、従来の店舗別
-      // storageState を cookie として流し込んで初回ログインを省く。
-      if (!launched.seeded && readStorageStatePath(ssPath)) {
-        try {
-          const st = JSON.parse(fs.readFileSync(ssPath, 'utf8'));
-          if (Array.isArray(st.cookies) && st.cookies.length) await ctx.addCookies(st.cookies);
-        } catch (e) {
-          emit('log', { level: 'warn', msg: `[${tag}] storageState 注入失敗(続行): ${e?.message ?? e}`, at: new Date().toISOString() });
-        }
-      }
-      const page = await ctx.newPage();
+      // 既存 Chrome を使うため Cookie/ログインは Chrome 自身が保持している。
+      // storageState 注入は不要 (むしろ既存セッションを壊すのでしない)。
+      // 既存の SalonBoard タブがあれば再利用、無ければ既存ウィンドウ内に新規タブ。
+      const acquired = await acquireSalonboardPage(ctx);
+      const page = acquired.page;
+      createdNewTab = acquired.createdNewTab;
+      cdpPage = page;
       // 失敗時のエラー画面スクショ取得用に現在の page を保持 (postCallback が使う)。
       _errorCapturePage = page;
       // 前ジョブの失敗スクショが残っていると誤って送ってしまうのでクリア。
@@ -3470,7 +3516,7 @@ async function runPushJobs({ showBrowser } = {}) {
           job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id,
           error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at landing', manual_required: true,
         });
-        await browser.close().catch(() => {});
+        await cleanupBrowser();
         return;
       }
       if (auth !== 'logged_in') {
@@ -3478,15 +3524,16 @@ async function runPushJobs({ showBrowser } = {}) {
         const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password, slow: true });
         if (lr.status === 'captcha') {
           await postCallback({ job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id, error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at login', manual_required: true });
-          await browser.close().catch(() => {});
+          await cleanupBrowser();
           return;
         }
         if (lr.status === 'failed') {
           await postCallback({ job_id: job.id, status: 'login_required', booking_id: payload.booking_id, error_code: 'LOGIN_FAILED', error: lr.reason || 'login failed', manual_required: true });
-          await browser.close().catch(() => {});
+          await cleanupBrowser();
           return;
         }
-        await saveStorageState(ctx, ssPath);
+        // CDP 接続 (既存 Chrome) では Cookie/セッションは Chrome 自身が保持するため、
+        // storageState を別ファイルに保存/注入しない (既存セッションを壊さない)。
       }
 
       // グループ店舗(1ログイン複数サロン): /(CNC|KLP)/groupTop/ に着地したら対象サロンを選択。
@@ -3505,7 +3552,7 @@ async function runPushJobs({ showBrowser } = {}) {
             manual_required: true,
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 サロン選択失敗: ${sel.reason}`, at: new Date().toISOString() });
-          await browser.close().catch(() => {});
+          await cleanupBrowser();
           return;
         }
         if (sel.selected) {
@@ -3962,7 +4009,7 @@ async function runPushJobs({ showBrowser } = {}) {
           emit('push:done', { bookingId: payload.booking_id, ok: false, reason: result.reason, errorCode: result.errorCode });
         }
       }
-      await browser.close().catch(() => {});
+      await cleanupBrowser();
       processed++;
     } catch (e) {
       log(`push: job ${String(job.id).slice(0, 8)} 例外: ${e?.message ?? e}`, 'error');
@@ -3973,7 +4020,7 @@ async function runPushJobs({ showBrowser } = {}) {
           error: `worker exception: ${e?.message ?? e}`, manual_required: false,
         });
       } catch (_e) { /* ignore */ }
-      await browser?.close().catch(() => {});
+      await cleanupBrowser();
     }
   };
 
