@@ -299,11 +299,14 @@ function isInfraTransientError(code?: string | null): boolean {
  *   (GB暴走防止)。プロセス内メモリ保持(restart で streak はリセットされるが、
  *   失敗が続けば即再退避するため実害小)。
  */
-const AUTO_RES_THRESHOLD = 2; // 連続 throttle 2回で退避
+const AUTO_RES_THRESHOLD = 1; // Cloud書込は1回の throttle で即退避し、同一attempt内で再試行
 const AUTO_RES_TTL_MS = 6 * 60 * 60_000; // 6時間 住宅に留める(満了で ISP 再試験)
 const AUTO_RES_MAX_SHOPS = 3; // 同時に住宅へ載せる上限(GB暴走防止)
 const shopThrottleStreak = new Map<string, number>();
 const shopAutoResidentialUntil = new Map<string, number>();
+// 1ジョブにつきCloud内の経路切替は1回だけ。住宅側まで失敗した場合に再帰ループせず、
+// その時点で初めてPC fallbackへ渡す。
+const cloudLoginFailoverAttempted = new Set<string>();
 
 /** この店舗が現在 自動フェイルオーバーで住宅退避中か。 */
 function autoResidentialActive(shopId?: string): boolean {
@@ -733,19 +736,37 @@ async function report(body: CallbackBody, capturePage?: unknown): Promise<void> 
   } catch (_e) {
     /* スクショ添付は best-effort: 失敗してもコールバックは送る */
   }
-  const res = await fetch(`${API}/api/salonboard/callback`, {
-    method: "POST",
-    headers: {
-      ...buildAuthHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    console.error(
-      `[warn] callback non-2xx: ${res.status} ${await safeText(res)}`
+  // callback が一時的なネットワーク切断で失われると、SalonBoard側の処理が終わっていても
+  // DBは running のまま残る。各試行を15秒で打ち切り、同一payloadを最大3回再送する。
+  // callbackはjob_id単位の更新なので再送は冪等。
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${API}/api/salonboard/callback`, {
+        method: "POST",
+        headers: {
+          ...buildAuthHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok) {
+        if (attempt > 1) {
+          console.log(`[callback] retry succeeded job=${reportJobId.slice(0, 8)} attempt=${attempt}`);
+        }
+        return;
+      }
+      lastError = `${res.status} ${await safeText(res)}`;
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    console.warn(
+      `[callback] attempt ${attempt}/3 failed job=${reportJobId.slice(0, 8)}: ${lastError.slice(0, 180)}`,
     );
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
   }
+  throw new Error(`callback failed after 3 attempts: ${lastError}`);
 }
 
 async function safeText(res: Response): Promise<string> {
@@ -1019,7 +1040,7 @@ async function handleJob(job: Job): Promise<void> {
         loginResult.status === "failed" &&
         // did not complete(スロットル)は lt<2 の1回のみ。ネット系は lt<3 の2回まで。
         (/chrome-error|ERR_|navigation|net::/i.test(loginResult.reason ?? "") ||
-          (/did not complete|submit/i.test(loginResult.reason ?? "") && lt < 2));
+          (/submit/i.test(loginResult.reason ?? "") && lt < 2));
         lt++
       ) {
         console.log(
@@ -1064,6 +1085,31 @@ async function handleJob(job: Job): Promise<void> {
           console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
+          // PCは最終手段。Cloudの固定ISPがdoLoginでホールドされた場合は、同じCloud attemptの
+          // 90秒枠内で住宅sticky IPへ1回だけ切り替えて最初から再実行する。同じISPでの
+          // doLogin連打はAkamaiフラグを延命するため行わない。
+          if (
+            isCloudWorker() &&
+            fallbackConfigured() &&
+            !cloudLoginFailoverAttempted.has(job.id)
+          ) {
+            cloudLoginFailoverAttempted.add(job.id);
+            setTimeout(() => cloudLoginFailoverAttempted.delete(job.id), 30 * 60_000);
+            console.log(
+              `[proxy] ${tag} Cloud内failover: ISP login throttle → residentialで再試行`,
+            );
+            await ctx?.close().catch(() => {});
+            await browser?.close().catch(() => {});
+            ctx = null;
+            browser = null;
+            videoPage = null;
+            if (videoDir) {
+              try { rmSync(videoDir, { recursive: true, force: true }); } catch { /* noop */ }
+              videoDir = null;
+            }
+            await handleJob(job);
+            return;
+          }
         }
         await report(
           {
@@ -2408,11 +2454,11 @@ function resolveLaunchOptions(
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
-  // forceResidential(書込 via residential 明示ON時) は credProxy/静的IPより residential を最優先。
-  // avoidResidential(書込・既定) は auto-FO 中でも住宅を使わず ISP 固定。
+  // forceResidential / 店舗pin / login throttle後のauto-FO は residential を最優先。
+  // avoidResidential(書込・既定)は「全ISP不健全時の無条件住宅fallback」だけを抑止し、
+  // 明示pin/auto-FOまで無効化しない。
   // それ以外(読み)は「auto-FO/pin なら住宅、無ければ credProxy → pickProxy(静的→住宅fallback)」。
   const useResidential =
-    !avoidResidential &&
     (forceResidential || shopPrefersResidential(shopId)) &&
     fallbackConfigured();
   const picked = useResidential
@@ -3798,9 +3844,9 @@ async function pushBooking(
   const staffSel = page.locator(REGISTER_FORM.staffSelect.selector).first();
   if ((await staffSel.count().catch(() => 0)) > 0) {
     await staffSel
-      .selectOption({ value: p.salonboard_staff_external_id })
+      .selectOption({ value: p.salonboard_staff_external_id }, { timeout: 2_000 })
       .catch(async () => {
-        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }).catch(() => {});
+        if (p.staff_name) await staffSel.selectOption({ label: p.staff_name }, { timeout: 2_000 }).catch(() => {});
       });
   }
 
@@ -3861,12 +3907,12 @@ async function pushBooking(
   await page
     .locator(REGISTER_FORM.startHour.selector)
     .first()
-    .selectOption({ value: String(when.hour) })
+    .selectOption({ value: String(when.hour) }, { timeout: 2_000 })
     .catch(() => {});
   await page
     .locator(REGISTER_FORM.startMinute.selector)
     .first()
-    .selectOption({ value: startMM })
+    .selectOption({ value: startMM }, { timeout: 2_000 })
     .catch(() => {});
 
   // 所要時間 → 終了時間。rsvTermHour の option value は「分換算」(60=1時間)。
@@ -3877,12 +3923,12 @@ async function pushBooking(
   await page
     .locator(REGISTER_FORM.termHour.selector)
     .first()
-    .selectOption({ value: termHourVal })
+    .selectOption({ value: termHourVal }, { timeout: 2_000 })
     .catch(() => {});
   await page
     .locator(REGISTER_FORM.termMinute.selector)
     .first()
-    .selectOption({ value: termMinVal })
+    .selectOption({ value: termMinVal }, { timeout: 2_000 })
     .catch(() => {});
 
   // メニュー = ネット予約クーポン。label 完全一致 → 部分一致の順で試す。
@@ -3890,7 +3936,7 @@ async function pushBooking(
   const menuSel = page.locator(REGISTER_FORM.menuSelect.selector).first();
   if ((await menuSel.count().catch(() => 0)) > 0) {
     await menuSel
-      .selectOption({ label: menuTarget })
+      .selectOption({ label: menuTarget }, { timeout: 2_000 })
       .then(() => { menuFilled = true; })
       .catch(() => {});
     if (!menuFilled) {
@@ -3905,7 +3951,7 @@ async function pushBooking(
         }, menuTarget)
         .catch(() => null);
       if (val) {
-        await menuSel.selectOption({ value: val }).then(() => { menuFilled = true; }).catch(() => {});
+        await menuSel.selectOption({ value: val }, { timeout: 2_000 }).then(() => { menuFilled = true; }).catch(() => {});
       }
     }
   }
