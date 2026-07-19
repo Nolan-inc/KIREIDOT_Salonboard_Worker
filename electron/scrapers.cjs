@@ -3197,6 +3197,7 @@ async function scrapeShiftPatterns(page, baseUrl) {
     return {
       external_id: r.id,
       name: r.name || r.shortName || r.id,
+      short_name: r.shortName || '',
       start_time: tr?.start ?? '',
       end_time: tr?.end ?? '',
     };
@@ -3371,6 +3372,26 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return fail(`シフト表の読み取りに失敗: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
   }
 
+  // シフト表のセルには勤務パターンの「短縮名」だけが表示される
+  // (例: 登録名=土日祝早 / 短縮名=休早)。一括入力 select から取れるのは
+  // 登録名だけなので、勤務パターン登録画面から external_id→短縮名を取得して
+  // 後段で結合する。取得後は月次シフト画面へ戻す。
+  let registeredPatternById = new Map();
+  try {
+    const registered = await scrapeShiftPatterns(page, baseUrl);
+    registeredPatternById = new Map(
+      (registered?.patterns || []).map((pat) => [String(pat.external_id), pat]),
+    );
+    if (!(await openSetup())) {
+      return fail('勤務パターン短縮名の取得後にシフト設定画面へ戻れませんでした', 'UNKNOWN_ERROR', true);
+    }
+  } catch (e) {
+    // 店舗種別や権限により勤務パターン登録画面へ到達できない場合も、従来の
+    // 正式名照合と後述の一般的な略称変換で継続する。
+    console.warn(`[SHIFT] short-name catalog unavailable: ${e?.message ?? e}`);
+    await openSetup().catch(() => false);
+  }
+
   // (3) 一括入力パネルを開いて勤務パターン一覧 (id/name/時間帯) を取得
   //   ★hair(/CLP/bt/schedule/shiftSetup)は DOM は同じ(#batchSetPanel/#batchSetLabel/#shiftIdBatch)だが、
   //   パネルが Playwright の isVisible 判定に乗らないことがある。パネルの可視性ではなく
@@ -3416,6 +3437,8 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }).catch(() => null);
     if (!list) return null;
     for (const pat of list) {
+      const registered = registeredPatternById.get(String(pat.id));
+      pat.shortName = String(registered?.short_name || '').trim();
       await page.evaluate((id) => {
         const sel = document.querySelector('#shiftIdBatch');
         if (!sel) return;
@@ -3507,10 +3530,23 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     end_time: x.end ?? '',
   }));
   const cellMatchesPattern = (text, pat) => {
-    const t = String(text || '').trim();
+    const normalize = (value) => String(value || '').replace(/[\s　]+/g, '').trim();
+    const t = normalize(text);
     if (!t || t === '休') return false;
-    const n = String(pat?.name || '').trim();
-    return !!n && (t === n || n.startsWith(t) || t.startsWith(n));
+    const names = [pat?.name, pat?.shortName, pat?.short_name]
+      .map(normalize)
+      .filter(Boolean);
+    if (names.some((name) => t === name || name.startsWith(t) || t.startsWith(name))) {
+      return true;
+    }
+    // 短縮名カタログを取得できない店舗向けの安全な既知変換。
+    // SB標準運用の「土日祝早→休早」「平日遅→平遅」等を補完する。
+    return names.some((name) => {
+      const abbreviated = name
+        .replace(/土日祝|土日|祝日/g, '休')
+        .replace(/平日/g, '平');
+      return abbreviated === t;
+    });
   };
 
   // SB→KD実シフト取得。書込み計画へ進まず、現在セルを勤務パターンの
