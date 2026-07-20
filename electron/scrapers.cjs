@@ -5614,23 +5614,29 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return { status: 'confirm_only' };
   }
 
-  // 3.5) ★電話番号のハイフン除去。変更フォームは既存の電話番号を保持しているが、SB の
-  //   変更バリデーションはハイフン付きを「※ハイフンなしで入力してください」で弾く。
-  //   電話予約(YG)は手入力でハイフンが入りがちで、こちらは電話を変更しないのに
-  //   既存値のまま送信 → 弾かれて失敗していた(実障害: YG88774889 で4連敗)。
-  //   送信前に電話らしきフィールド(ハイフン有り+数字10桁以上)のみ数字のみへ正規化する。
-  await page.evaluate(() => {
-    const looksPhone = (v) => typeof v === 'string' && /-/.test(v) && v.replace(/[^\d]/g, '').length >= 10;
-    document
-      .querySelectorAll('input#tel, input[name="tel"], input[type="tel"], input[name*="Tel"], input[name*="phone" i]')
-      .forEach((el) => {
-        if (el && looksPhone(el.value)) {
-          el.value = el.value.replace(/[^\d]/g, '');
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      });
-  }).catch(() => {});
+  // 3.5) 既存顧客情報に残った電話番号/郵便番号のハイフンを除去する。
+  // SalonBoard は変更対象でない既存フィールドも再検証し、電話だけでなく郵便番号等でも
+  // 「※ハイフンなしで入力してください」を返す。値そのものはログへ出さず、補正した
+  // field名だけを後段の診断情報へ残す。
+  const normalizedHyphenFields = await page.evaluate(() => {
+    const changed = [];
+    const contactHint = /(tel|phone|mobile|zip|post|postal|郵便|電話)/i;
+    const dateHint = /(date|time|year|month|day|日時|年月日)/i;
+    document.querySelectorAll('input').forEach((el) => {
+      const value = String(el.value || '');
+      const digits = value.replace(/[^\d]/g, '');
+      const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''}`;
+      const type = String(el.type || 'text').toLowerCase();
+      if (!/[-‐‑‒–—―ー−]/.test(value) || digits.length < 7 || digits.length > 15) return;
+      if (type === 'date' || type === 'datetime-local' || dateHint.test(key)) return;
+      if (!contactHint.test(key) && type !== 'tel') return;
+      el.value = digits;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      changed.push({ field: el.name || el.id || '(unnamed)', digitCount: digits.length });
+    });
+    return changed;
+  }).catch(() => []);
 
   // 4) 確定: 実DOMでは画面下部の <a id="change" class="mod_btn_50">確定する</a> が
   //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
@@ -5700,8 +5706,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     page.off('dialog', onDialog);
   }
 
-  const cap2 = await captureScrapeDebug(page, 'change', `after_${reserveId}`, {
-    diagnostics: { reserveId, confirmClicked, nativeDialogAccepted, url: page.url() },
+  let cap2 = await captureScrapeDebug(page, 'change', `after_${reserveId}`, {
+    diagnostics: { reserveId, confirmClicked, nativeDialogAccepted, normalizedHyphenFields, url: page.url() },
   });
 
   // 5) 検証
@@ -5709,7 +5715,24 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const looksDone = /変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyText);
   const looksError = /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(bodyText) && !looksDone;
   if (looksError) {
-    return fail(`変更時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+    // 通知画像が画面上部だけにならないよう、実際のvalidation文言へスクロールして撮り直す。
+    const errorLocator = page.getByText(/ハイフンなし|エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
+    await errorLocator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => {});
+    const hyphenFields = await page.evaluate(() => Array.from(document.querySelectorAll('input'))
+      .filter((el) => /[-‐‑‒–—―ー−]/.test(String(el.value || '')))
+      .map((el) => ({
+        field: el.name || el.id || '(unnamed)',
+        type: el.type || 'text',
+        digitCount: String(el.value || '').replace(/[^\d]/g, '').length,
+      })).slice(0, 20)).catch(() => []);
+    const validationCap = await captureScrapeDebug(page, 'change', `validation_error_${reserveId}`, {
+      diagnostics: { reserveId, normalizedHyphenFields, remainingHyphenFields: hyphenFields, url: page.url() },
+    });
+    if (validationCap) cap2 = validationCap;
+    const fieldHint = hyphenFields.length
+      ? `, ハイフン残存field=${hyphenFields.map((x) => `${x.field}(${x.digitCount}桁)`).join(',')}`
+      : '';
+    return fail(`変更時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
   }
   if (!looksDone && !confirmClicked && !nativeDialogAccepted) {
     return fail(`変更の完了を確認できませんでした (confirmClicked=${confirmClicked}${cap1 ? `, form=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
