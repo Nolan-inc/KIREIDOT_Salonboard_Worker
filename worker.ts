@@ -1484,7 +1484,10 @@ async function handleJob(job: Job): Promise<void> {
         if (cr.status === "ok") {
           cr.externalId = payload.external_booking_id ?? null;
           const chRoot = chGenre === "hair" ? "/CLP/bt" : "/KLP";
-          cr.detailUrl = `${new URL(baseUrl).origin}${chRoot}/reserve/ext/extReserveDetail/?reserveId=${payload.external_booking_id}`;
+          const detailKind = /^(BF|BE)/i.test(String(payload.external_booking_id ?? ""))
+            ? "net/reserveDetail"
+            : "ext/extReserveDetail";
+          cr.detailUrl = `${new URL(baseUrl).origin}${chRoot}/reserve/${detailKind}/?reserveId=${payload.external_booking_id}`;
           cr.alreadyExists = false;
         }
         result = cr;

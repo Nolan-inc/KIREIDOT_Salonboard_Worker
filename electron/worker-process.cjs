@@ -4052,7 +4052,27 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isUpdate) {
         // ---- 変更 (時間/所要/担当) ----
-        const result = await changeBookingViaForm(page, payload, { baseUrl, enableChange: enablePush });
+        const result = await changeBookingViaForm(page, payload, {
+          baseUrl,
+          enableChange: enablePush,
+          genre: jobGenre,
+          salonId: creds.salon_id ?? null,
+          shopName: job.shop_name ?? null,
+          relogin: async () => {
+            const lr = await tryLogin(page, {
+              baseUrl: new URL('/login/', baseUrl).toString(),
+              loginId: creds.login_id,
+              password: creds.password,
+              slow: true,
+            });
+            if (lr.status !== 'ok') return false;
+            const selected = await ensureStoreSelected(page, {
+              salonId: creds.salon_id ?? null,
+              shopName: job.shop_name ?? null,
+            });
+            return selected.ok;
+          },
+        });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_booking', status: 'succeeded',

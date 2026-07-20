@@ -5464,18 +5464,25 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   await ensureReserveSalonContext(page, baseUrl, opts);
 
   // 1) 変更画面を開く (ext → net)。失効ページに着地したら relogin→サロン再選択で1回やり直す。
-  const candidates = [
-    `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
-    `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`,
-  ];
-  // ★到達判定は「実際に編集できるフォーム本体」で行う (2026-07-20 修正)。
-  //   以前は a#change / a#regist (確定ボタン) を判定に含めていたが、SalonBoard は
-  //   変更不可の予約でも a#change / a#change_disable を **非表示のまま DOM に置く**。
-  //   そのため「到達した」と誤判定 → 後段の a#change:visible が無く
-  //   「変更の確定ボタンが見つかりませんでした」という分かりにくい失敗になっていた
-  //   (実障害: BF29397843。列挙されたのはグローバルナビと空の hidden アンカーのみ)。
-  //   → フォーム本体の要素 + **可視の**確定ボタンだけで判定する。
-  const formSel = 'select#jsiRsvHour, select#rsvTime, select[name="rsvTerm"], #rlastupdate, a#change:visible, a#regist:visible';
+  // BF/BE はネット予約、YG 等は電話/外部予約。誤った側のURLでも詳細画面へ
+  // リダイレクトされることがあり、そこにある a#change を変更フォームと誤認すると
+  // 確定ボタンの無い画面で停止する。ID種別に応じた正しいURLを先に試す。
+  const isNetReserve = /^(BF|BE)/i.test(reserveId);
+  const extChangePath = `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`;
+  const netChangePath = `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`;
+  const candidates = isNetReserve
+    ? [netChangePath, extChangePath]
+    : [extChangePath, netChangePath];
+  // 詳細画面にも存在する #rlastupdate / a#change / a#regist は到達判定に使わない。
+  // 実際に編集できる時刻・所要フィールドがある場合だけ変更フォームとみなす。
+  const formSel = [
+    'select#jsiRsvHour',
+    'select#jsiRsvMinute',
+    'select#rsvTime',
+    'select[name="time"]',
+    'select#rsvTermId',
+    'select[name="rsvTerm"]',
+  ].join(', ');
   let onForm = false;
   for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
     for (const path of candidates) {
@@ -5628,7 +5635,17 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // 4) 確定: 実DOMでは画面下部の <a id="change" class="mod_btn_50">確定する</a> が
   //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
   const submitBtn = page
-    .locator('a#change:visible, a.mod_btn_50:has-text("確定する"), a#regist, a:has-text("登録する")')
+    .locator([
+      'a#change:visible',
+      'a#regist:visible',
+      'a.mod_btn_50:has-text("確定する"):visible',
+      'a:has-text("登録する"):visible',
+      'button:has-text("確定する"):visible',
+      'button:has-text("登録する"):visible',
+      'input[type="submit"][value*="確定"]:visible',
+      'input[type="submit"][value*="登録"]:visible',
+      'input[type="button"][value*="確定"]:visible',
+    ].join(', '))
     .first();
   if ((await submitBtn.count().catch(() => 0)) === 0) {
     // ★診断強化: 確定ボタンが見つからない原因を特定できるよう、ページ上の
