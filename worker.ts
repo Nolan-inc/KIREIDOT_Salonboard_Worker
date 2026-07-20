@@ -4439,6 +4439,27 @@ async function pushBooking(
     }
   }
 
+  // 顧客予約は reserveId(YG/BF/BE...) を回収できて初めて「SBへ反映済み」と
+  // 断定できる。完了らしい画面だけで ok を返すと、callback が KD を synced に
+  // 更新する一方で external_booking_id は NULL のまま残り、後続の変更/取消が
+  // 対象を特定できない。さらに再試行時の重複防止照合も弱くなる。
+  //
+  // ここでは成功を捏造せず manual_required に倒す。再試行時は preflight が
+  // 予約一覧から既存予約を探すため、実登録済みなら reserveId を回収して安全に
+  // 成功へ治癒し、未登録なら初めて新規登録する。
+  if (!externalId) {
+    await captureRegisterDebug(page, job, "reserve_id_not_recovered", {
+      dialogAccepted,
+      afterUrl,
+      looksDone,
+    });
+    return fail(
+      "登録の完了サインは確認しましたが SalonBoard 予約IDを回収できませんでした。予約一覧での照合が必要です。",
+      "CONFIRMATION_MISMATCH",
+      true,
+    );
+  }
+
   return { status: "ok", externalId, detailUrl, alreadyExists: false, confirmed };
 }
 
