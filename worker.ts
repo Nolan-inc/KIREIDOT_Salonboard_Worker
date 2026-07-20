@@ -58,6 +58,7 @@ type ScraperFn = (
 ) => Promise<ScraperResult>;
 type ScrapersModule = {
   cancelBookingViaForm: ScraperFn;
+  pushScheduleViaForm: ScraperFn;
   deleteScheduleViaForm: ScraperFn;
   pushShiftsViaForm: ScraperFn;
   postPhotoGalleryViaForm: ScraperFn;
@@ -614,6 +615,11 @@ type PushBookingPayload = {
   amount?: number | null;
   notes?: string | null;
   kireidot_ref?: string;
+  booking_type?: "customer" | "block" | null;
+  block_reason?: string | null;
+  resource_id?: string | null;
+  salonboard_equipment_external_id?: string | null;
+  salonboard_equipment_name?: string | null;
 };
 
 /** pushBooking() の内部結果。 */
@@ -1427,6 +1433,11 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
+      // KIREIDOT の休憩・業務枠は SalonBoard の「予約」ではなく「予定」。
+      // 通常予約フォームへ送ると設備行が自動追加され、設備を使わない予定でも
+      // 「× フリー設備」等を選択して誤って EQUIPMENT_FULL になる。
+      // PC worker と同じ proven 予定登録フローへ Cloud でも分岐する。
+      const isBlockSchedule = payload.booking_type === "block";
       // action=update かつ reserveId 有り → 予約変更フロー(changeBookingViaForm)を使う。
       // これが無いと update でも新規登録フォームを叩き "新規予約の登録" として扱われ、
       // 重複/容量超過で失敗する (実機検証 2026-06-28: YG81931151 の 16:00→15:00 が失敗)。
@@ -1435,7 +1446,12 @@ async function handleJob(job: Job): Promise<void> {
         (payload as { action?: string }).action === "update" &&
         String(payload.external_booking_id ?? "").trim().length > 0;
       let result: PushBookingResult;
-      if (isBookingUpdate) {
+      if (isBlockSchedule) {
+        result = await scrapers.pushScheduleViaForm(page, payload, {
+          baseUrl,
+          enablePush: ENABLE_PUSH,
+        }) as PushBookingResult;
+      } else if (isBookingUpdate) {
         // ジャンル/グループ対応 (登録と同じ): hair=/CLP/bt 配下 + サロン選択 + 失効時relogin。
         const chGenre =
           (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
@@ -1488,6 +1504,8 @@ async function handleJob(job: Job): Promise<void> {
           result_payload: result.confirmed,
           summary: result.alreadyExists
             ? "push_booking: 既存予約を検出 (already_exists)"
+            : isBlockSchedule
+              ? "push_booking: 予定登録完了"
             : `push_booking 登録完了 (external_id=${result.externalId ?? "?"})`,
         });
         console.log(
