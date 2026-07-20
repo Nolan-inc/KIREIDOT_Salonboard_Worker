@@ -4762,6 +4762,26 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   };
   page.on('dialog', onDialog);
 
+  // ★HTML警告モーダルの自動OK (2026-07-20 ユーザ指示):
+  //   スタッフの受付可能数超過/予定重複があると、SalonBoard は「警告」モーダル
+  //   (<a class="... accept">OK</a> / <a class="... deny">キャンセル</a>) を出して
+  //   登録を止める。運用上「被っていても登録してよい」ため、登録フロー中に
+  //   このモーダルが出たら一律で OK (a.accept) を押して続行する。
+  //   (キャンセル/変更フローは既存実装が .accept を押している。ここは登録フロー用)
+  let warningModalAccepted = false;
+  const acceptWarningModal = async () => {
+    try {
+      const ok = page.locator('.buttons a.accept:visible, a.accept:visible').first();
+      if ((await ok.count().catch(() => 0)) > 0) {
+        await ok.click({ timeout: 3_000 }).catch(() => {});
+        warningModalAccepted = true;
+        console.log(`[pushstep] ${(p.booking_id || '').slice(0, 8)} 警告モーダルを自動OK (受付可能数超過/予定重複でも登録続行)`);
+        return true;
+      }
+    } catch (_e) { /* noop */ }
+    return false;
+  };
+
   // クラウド対策 (SALONBOARD_FORCE_REGIST=1): 登録ボタンの decoy onclick
   // "errorInput=true;return false" は、クリック時に errorInput=true をセットして
   // SalonBoard の実 submit ハンドラを阻害する。クラウドでは(フォームが valid でも)
@@ -4817,6 +4837,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       await page.waitForTimeout(400);
+      await acceptWarningModal(); // 警告モーダル(受付可能数超過/予定重複)が出たら一律OKで続行
       if (/doComplete/i.test(page.url())) break;          // 2段階確認ページに到達
       if (!/extReserveRegist/i.test(page.url())) break;   // 一覧/詳細へ遷移 = 即完了
       const done = await page
@@ -4837,6 +4858,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       let needsFinal = false;
       const ndl = Date.now() + 6_000;
       while (Date.now() < ndl) {
+        await acceptWarningModal(); // 警告モーダルが残っていれば OK で閉じて進める
         needsFinal = await page.evaluate(() => {
           const t = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
           return /まだ登録されていません|問題なければ.{0,6}登録/.test(t);
@@ -4879,6 +4901,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       const dl2 = Date.now() + 12_000;
       while (Date.now() < dl2) {
         await page.waitForTimeout(400);
+        // 最終「登録」押下後に警告モーダル(受付可能数超過/予定重複)が出るケース。
+        // ユーザ運用上「被っていても登録してよい」ため一律 OK で確定する。
+        await acceptWarningModal();
         const stillConfirm = await page
           .evaluate(() => /まだ登録されていません/.test(((document.body && document.body.innerText) || '')))
           .catch(() => false);
@@ -4889,7 +4914,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     page.off('dialog', onDialog);
   }
 
-  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} submit loop done, url=${page.url()} dialog=${dialogAccepted} finalClicked=${finalConfirmClicked}`);
+  console.log(`[pushstep] ${(p.booking_id||'').slice(0,8)} submit loop done, url=${page.url()} dialog=${dialogAccepted} finalClicked=${finalConfirmClicked} warnOK=${warningModalAccepted}`);
   // 送信後に SalonBoard の 500/エラーページに着地 = サーバ/Akamai が POST を拒否(一時ブロックの可能性)。
   // 予約は作られていないので manual ではなく「リトライ可能(manualRequired=false)」で返し、
   // バックオフ後に再試行させる(叩き続けてIPフラグを悪化させない)。
@@ -4941,10 +4966,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       });
     } catch (_e) { /* noop */ }
     // このページ(=受付可能数/予定重複の警告画面)のスクショを撮り、通知の文言と画像を一致させる。
+    // ★2026-07-20 以降、この警告は自動OK (acceptWarningModal) で乗り越えて登録を確定する運用。
+    //   ここに到達するのは「OKを押しても(または OK ボタンが出ないまま)確定できなかった」場合のみ。
     captureErrorShot(page, capacityExceeded ? 'capacity_exceeded' : 'schedule_conflict');
+    const okNote = warningModalAccepted
+      ? '警告モーダルの自動OKは押しましたが、登録を確定できませんでした。'
+      : '警告モーダルのOKボタンが検出できず、登録を確定できませんでした。';
     const reason = capacityExceeded
-      ? `SalonBoard側で担当スタッフの受付可能数を超過${capVal != null ? `(受付可能数=${capVal})` : ''}しているため登録できません。該当日時のシフト/受付枠が不足しています(シフト未設定なら0枠、既存予約で満杯なら上限到達)。担当スタッフのシフト・受付可能数をご確認ください。`
-      : 'SalonBoard側で同時刻に担当スタッフの予定(既存予約/ブロック)が入っているため登録できません。予約日時・担当スタッフをご確認ください。';
+      ? `SalonBoard側で担当スタッフの受付可能数超過${capVal != null ? `(受付可能数=${capVal})` : ''}の警告が出ています。${okNote}SalonBoard で直接ご確認ください。`
+      : `SalonBoard側で同時刻に担当スタッフの予定(既存予約/ブロック)が入っている警告が出ています。${okNote}SalonBoard で直接ご確認ください。`;
     return fail(reason, 'SLOT_NOT_AVAILABLE', true);
   }
 

@@ -992,6 +992,21 @@ function anthropicApiKey() {
   return null;
 }
 
+/**
+ * OpenAI API キーを env → ~/.kireidot/openai_api_key の順で解決する。
+ * Dock 起動の Electron アプリには環境変数が渡らないため、Anthropic と同じく
+ * Mac 上のキーファイルでも設定できるようにする (2026-07-20)。
+ */
+function openaiApiKey() {
+  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
+  try {
+    const p = path.join(os.homedir(), '.kireidot', 'openai_api_key');
+    const v = fs.readFileSync(p, 'utf8').trim();
+    if (v) return v;
+  } catch (_e) { /* ファイル無しは正常 (未設定) */ }
+  return null;
+}
+
 // エラー解析結果の JSON スキーマ (structured outputs で形を保証する)。
 const ERROR_ANALYSIS_SCHEMA = {
   type: 'object',
@@ -1056,7 +1071,7 @@ async function analyzeSalonboardError(args) {
 // OpenAI Vision でエラー画面を解析し「なぜ起きたか」の推測を返す。
 //   OPENAI_API_KEY 未設定なら null。画像(base64 data URL)+本文テキストを渡す。
 async function analyzeSalonboardErrorWithOpenAI({ buffer, errorText, jobType, errorCode }) {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = openaiApiKey(); // env → ~/.kireidot/openai_api_key
   if (!apiKey) return null;
   try {
     const label = JOB_LABEL[jobType] || jobType || '操作';
