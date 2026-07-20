@@ -2480,12 +2480,14 @@ function resolveLaunchOptions(
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
-  // forceResidential / 店舗pin / login throttle後のauto-FO は residential を最優先。
-  // avoidResidential(書込・既定)は「全ISP不健全時の無条件住宅fallback」だけを抑止し、
-  // 明示pin/auto-FOまで無効化しない。
+  // forceResidential / 店舗pin / login throttle後のauto-FO は residential を優先する。
+  // ただし avoidResidential(書込・既定)では、店舗pin/auto-FOも含め住宅IPを使わない。
+  // 書込を住宅IPへ通すのは SB_WRITE_VIA_RESIDENTIAL=1 (forceResidential) の場合だけ。
+  // SalonBoard は住宅IPの /login/ を HTTP 応答段階で拒否することがあり、auto-FO が
+  // 残った店舗の書込を住宅IPへ送ると全件 ERR_HTTP_RESPONSE_CODE_FAILURE になるため。
   // それ以外(読み)は「auto-FO/pin なら住宅、無ければ credProxy → pickProxy(静的→住宅fallback)」。
   const useResidential =
-    (forceResidential || shopPrefersResidential(shopId)) &&
+    (forceResidential || (!avoidResidential && shopPrefersResidential(shopId))) &&
     fallbackConfigured();
   const picked = useResidential
     ? pickProxy(forceResidential, shopId)
