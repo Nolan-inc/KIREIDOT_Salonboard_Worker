@@ -16,6 +16,8 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { chromium } = require('playwright');
+// エラー画面のAI解析 (Claude vision)。キー未設定なら未使用のまま (analyzeSalonboardError 参照)。
+const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -967,9 +969,93 @@ async function captureErrorPageArtifacts(page) {
   return { buffer, text, url };
 }
 
+// ---------------------------------------------------------------------------
+// エラー画面のAI解析 (2026-07-20: Anthropic Claude を優先に変更)
+//
+// スクレイピング失敗時のスクショ + エラーテキストを Claude (vision) に渡し、
+// 「(1)画面のエラーメッセージ要約 (2)原因の推測 (3)対処の提案」を JSON で受け取って
+// Slack 通知に載せる。APIキーは以下の順で解決 (コードには絶対に埋め込まない):
+//   1. 環境変数 ANTHROPIC_API_KEY
+//   2. ~/.kireidot/anthropic_api_key ファイル (Mac Studio で一度置けば以後有効)
+// どちらも無ければ従来の OpenAI (OPENAI_API_KEY) にフォールバック。
+// それも無ければ AI 解析をスキップ (スクショ+エラーテキストのみ通知 = 従来互換)。
+// ---------------------------------------------------------------------------
+
+/** Anthropic API キーを env → ~/.kireidot/anthropic_api_key の順で解決する。 */
+function anthropicApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  try {
+    const p = path.join(os.homedir(), '.kireidot', 'anthropic_api_key');
+    const v = fs.readFileSync(p, 'utf8').trim();
+    if (v) return v;
+  } catch (_e) { /* ファイル無しは正常 (未設定) */ }
+  return null;
+}
+
+// エラー解析結果の JSON スキーマ (structured outputs で形を保証する)。
+const ERROR_ANALYSIS_SCHEMA = {
+  type: 'object',
+  properties: {
+    screen_message: { type: 'string', description: '画面に出ているエラーメッセージの要約 (日本語)' },
+    probable_cause: { type: 'string', description: '考えられる原因の推測 (日本語)' },
+    suggested_action: { type: 'string', description: '対処の提案 (日本語)' },
+  },
+  required: ['screen_message', 'probable_cause', 'suggested_action'],
+  additionalProperties: false,
+};
+
+// Claude (Anthropic API) でエラー画面を解析。成功で {screen_message, probable_cause,
+// suggested_action}、キー未設定/失敗で null (呼び出し側が OpenAI へフォールバック)。
+async function analyzeSalonboardErrorWithClaude({ buffer, errorText, jobType, errorCode }) {
+  const apiKey = anthropicApiKey();
+  if (!apiKey) return null;
+  try {
+    const client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 1 });
+    const label = JOB_LABEL[jobType] || jobType || '操作';
+    const content = [];
+    if (buffer && Buffer.isBuffer(buffer)) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: buffer.toString('base64') },
+      });
+    }
+    content.push({
+      type: 'text',
+      text:
+        `SalonBoard (美容サロン向け予約管理サイト) で「${label}」を Playwright で自動操作中にエラーになりました。\n` +
+        `エラーコード: ${errorCode || '不明'}\n` +
+        `Worker が検知したエラー: ${String(errorText || '').slice(0, 800)}\n\n` +
+        `添付のエラー画面スクリーンショットを見て、画面に書かれているテキストを読み取り、` +
+        `(1) 画面に出ているエラーメッセージの要約 (2) 考えられる原因の推測 (3) 対処の提案 ` +
+        `を日本語で簡潔に答えてください。スクリーンショットが無い場合はエラーテキストのみから推測してください。`,
+    });
+    const response = await client.messages.create({
+      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
+      max_tokens: 1024, // 短い3項目のJSONのみ返すため小さめで十分
+      thinking: { type: 'adaptive' },
+      output_config: { format: { type: 'json_schema', schema: ERROR_ANALYSIS_SCHEMA } },
+      messages: [{ role: 'user', content }],
+    });
+    if (response.stop_reason === 'refusal') return null;
+    const textBlock = (response.content || []).find((b) => b.type === 'text');
+    if (!textBlock || !textBlock.text) return null;
+    return JSON.parse(textBlock.text); // structured outputs でスキーマ準拠が保証される
+  } catch (e) {
+    console.warn('[ai] claude analyze error', e?.message ?? e);
+    return null;
+  }
+}
+
+// エラー解析の入口: Claude 優先 → OpenAI フォールバック → 両方無ければ null。
+async function analyzeSalonboardError(args) {
+  const viaClaude = await analyzeSalonboardErrorWithClaude(args);
+  if (viaClaude) return viaClaude;
+  return analyzeSalonboardErrorWithOpenAI(args);
+}
+
 // OpenAI Vision でエラー画面を解析し「なぜ起きたか」の推測を返す。
 //   OPENAI_API_KEY 未設定なら null。画像(base64 data URL)+本文テキストを渡す。
-async function analyzeSalonboardError({ buffer, errorText, jobType, errorCode }) {
+async function analyzeSalonboardErrorWithOpenAI({ buffer, errorText, jobType, errorCode }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
   try {
@@ -3009,17 +3095,26 @@ async function tryLogin(page, c) {
   const wait = (ms) => page.waitForTimeout(ms).catch(() => {});
   const typeInto = async (loc, value) => {
     const v = String(value ?? '');
+    // ★パスワードマネージャー自動入力対応 (2026-07-20):
+    //   Chrome が保存済みログイン情報を自動入力していると、pressSequentially は
+    //   既存値の後ろに「追記」するため ID/パスワードが二重になりログインに失敗
+    //   していた。さらに旧検証は「長さが足りていればOK」で混在値を見逃していた。
+    //   → 既に期待値が入っていれば触らない。違う値ならクリアしてから入力し、
+    //     入力後は期待値との厳密一致で検証する。
+    const current = await loc.inputValue().catch(() => '');
+    if (current === v) return true; // 自動入力済み → そのまま使う (二重入力しない)
     if (slow) {
       await loc.click({ timeout: 8_000 }).catch(() => {});
       await wait(500);
       try {
+        if (current) await loc.fill('', { timeout: 8_000 }); // 自動入力の既存値をクリア
         await loc.pressSequentially(v, { delay: 120, timeout: 8_000 });
-        // 入力が反映されたか確認。空ならフォールバック。
+        // 期待値との厳密一致で検証 (自動入力との混在・欠落を検出)
         const got = await loc.inputValue().catch(() => '');
-        if (got && got.length >= Math.min(v.length, 1)) return true;
+        if (got === v) return true;
       } catch (_e) { /* fallthrough to fill */ }
     }
-    // 通常 / フォールバック: fill で確実に入れる
+    // 通常 / フォールバック: fill は既存値を置き換えるので二重入力にならない
     try {
       await loc.fill(v, { timeout: 8_000 });
       return true;
