@@ -305,10 +305,6 @@ const AUTO_RES_TTL_MS = 6 * 60 * 60_000; // 6時間 住宅に留める(満了で
 const AUTO_RES_MAX_SHOPS = 3; // 同時に住宅へ載せる上限(GB暴走防止)
 const shopThrottleStreak = new Map<string, number>();
 const shopAutoResidentialUntil = new Map<string, number>();
-// 1ジョブにつきCloud内の経路切替は1回だけ。住宅側まで失敗した場合に再帰ループせず、
-// その時点で初めてPC fallbackへ渡す。
-const cloudLoginFailoverAttempted = new Set<string>();
-
 /** この店舗が現在 自動フェイルオーバーで住宅退避中か。 */
 function autoResidentialActive(shopId?: string): boolean {
   if (!shopId) return false;
@@ -1037,10 +1033,16 @@ async function handleJob(job: Job): Promise<void> {
         return;
       }
       const loginUrl = new URL("/login/", baseUrl).toString();
-      let loginResult = await tryLogin(page, loginUrl, {
-        loginId: job.credentials.login_id,
-        password: job.credentials.password,
-      });
+      const loginEndpoint = launch.proxy?.server ?? "direct";
+      const attemptLogin = () => withLoginPacing(
+        loginEndpoint,
+        job.shop_id,
+        () => tryLogin(page, loginUrl, {
+          loginId: job.credentials.login_id,
+          password: job.credentials.password,
+        }),
+      );
+      let loginResult = await attemptLogin();
       // 一過性のナビゲーション失敗 (chrome-error / ERR_ / net:: / navigation) は
       // プロキシの瞬断であることが多いので最大2回までやり直す。ただし
       // 「did not complete」(= Akamai の doLogin ホールド=スロットル) は叩き直しが
@@ -1058,10 +1060,7 @@ async function handleJob(job: Job): Promise<void> {
           `[job] ${tag} login retry ${lt} (${(loginResult.reason ?? "").slice(0, 50)})`
         );
         await page.waitForTimeout(2500);
-        loginResult = await tryLogin(page, loginUrl, {
-          loginId: job.credentials.login_id,
-          password: job.credentials.password,
-        });
+        loginResult = await attemptLogin();
       }
 
       if (loginResult.status === "captcha") {
@@ -1096,31 +1095,10 @@ async function handleJob(job: Job): Promise<void> {
           console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
-          // PCは最終手段。Cloudの固定ISPがdoLoginでホールドされた場合は、同じCloud attemptの
-          // Cloud制限時間内で住宅sticky IPへ1回だけ切り替えて最初から再実行する。同じISPでの
-          // doLogin連打はAkamaiフラグを延命するため行わない。
-          if (
-            isCloudWorker() &&
-            fallbackConfigured() &&
-            !cloudLoginFailoverAttempted.has(job.id)
-          ) {
-            cloudLoginFailoverAttempted.add(job.id);
-            setTimeout(() => cloudLoginFailoverAttempted.delete(job.id), 30 * 60_000);
-            console.log(
-              `[proxy] ${tag} Cloud内failover: ISP login throttle → residentialで再試行`,
-            );
-            await ctx?.close().catch(() => {});
-            await browser?.close().catch(() => {});
-            ctx = null;
-            browser = null;
-            videoPage = null;
-            if (videoDir) {
-              try { rmSync(videoDir, { recursive: true, force: true }); } catch { /* noop */ }
-              videoDir = null;
-            }
-            await handleJob(job);
-            return;
-          }
+          // ここで handleJob を再帰実行すると、書込ジョブの avoidResidential により
+          // 経路が切り替わらず、同じISPから doLogin をもう一度叩くことがある。これは
+          // Akamai の抑制を長引かせるため、同じCloud attemptでは再打せずcallback側の
+          // PC fallbackへ即時移管する。Cloud内のネットワーク瞬断は上の限定リトライで扱う。
         }
         await report(
           {
@@ -2200,6 +2178,53 @@ const _inFlight = new Map<string, Promise<unknown>>();
 //   Chrome を強制killするとセッションが未flush → 次起動で全店再ログイン → Akamaiスロットル、
 //   という今日の障害連鎖を断つ。close は Playwright の 'close' イベントで自動的に集合から外す。
 const _openContexts = new Set<BrowserContext>();
+
+// ── ログイン POST の出口IP単位ペーシング ────────────────────────────────
+// 通常ジョブは店舗別レーンで並列実行できるが、セッション切れが複数店舗で同時に起きると
+// 同じ ISP endpoint から /CNC/login/doLogin/ が短時間に集中する。Akamai は予約画面の
+// GET ではなく、このログイン POST を無応答のまま保持することがあるため、実際にログインが
+// 必要なジョブだけを endpoint 単位で直列化する。ログイン済みジョブには一切待ちを加えない。
+//
+// 既定20秒は同一出口からの連打を避けつつ、150秒の Cloud SLA 内に収まる値。運用中は
+// SB_LOGIN_MIN_INTERVAL_MS でホット調整できる。プロセス再起動で状態は安全にリセットされる。
+const _loginGateTail = new Map<string, Promise<void>>();
+const _lastLoginAttemptAt = new Map<string, number>();
+function loginMinIntervalMs(): number {
+  const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 20_000);
+  if (!Number.isFinite(configured)) return 20_000;
+  return Math.max(0, Math.min(configured, 60_000));
+}
+async function withLoginPacing<T>(
+  endpoint: string,
+  shopId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = endpoint || "direct";
+  const previous = _loginGateTail.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => {}).then(() => mine);
+  _loginGateTail.set(key, tail);
+  await previous.catch(() => {});
+  try {
+    const waitMs = Math.max(
+      0,
+      loginMinIntervalMs() - (Date.now() - (_lastLoginAttemptAt.get(key) ?? 0)),
+    );
+    if (waitMs > 0) {
+      console.log(
+        `[login-gate] endpoint=${key} shop=${shopId.slice(0, 8)} wait=${waitMs}ms`,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+    // 開始時刻を基準にすることで、doLogin が短時間で失敗しても直後の別店舗が連打しない。
+    _lastLoginAttemptAt.set(key, Date.now());
+    return await fn();
+  } finally {
+    release();
+    if (_loginGateTail.get(key) === tail) _loginGateTail.delete(key);
+  }
+}
 // 同時実行数。env追加はコンテナ再作成(=全店セッション消失)になるため、ファイルでも上書き可。
 // 既定は控えめ。Decodo IP数(現状10)が真の上限。インスタンス増強後はファイルで引き上げる。
 function maxConcurrency(): number {
