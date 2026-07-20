@@ -4548,18 +4548,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   //     1) payload の salonboard_equipment_external_id (EQ...) に一致する option
   //        = KIREIDOT で紐付けた設備を優先順位ベースで解決した結果
   //     2) payload の salonboard_equipment_name に一致する option (名前一致)
-  //     3) 「ベッド」を含む option (従来のフォールバック)
+  //     3) 空いている「ベッド/ベット/席」を1台だけ選ぶ
   //   予約登録フォームに設備セクション (#equipArea / select[name="equipIdList"]) があれば、
   //   設備行が無ければ「追加する」(#equipAdd) を押してから選ぶ。
   //   セクションが存在しないフォーム構成でも壊れないよう全工程を try で保護し、
-  //   失敗しても予約登録は続行する (設備は必須でない店舗もあるため)。
+  //   設備欄がある店舗では設備必須。空きが無い・複数行を解除できない場合は登録しない。
   const wantedEquipExtId = (p.salonboard_equipment_external_id || '').trim() || null; // EQ...
   const wantedEquipName = (p.salonboard_equipment_name || '').trim() || null;
   let equipResult = 'なし'; // 'EQ指定' / 'name一致' / 'ベッド設定' / '既存維持' / 'option無し' / 'なし' / 'エラー'
   try {
     // 新規予約フォーム(booking_create)の #equipArea は既定で設備行が無く、
     // 「追加する」(#equipAdd) を押すと equipIdList セレクトを持つ行が生成される。
-    const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList, #equipArea select';
+    const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList';
     const hasEquipArea =
       (await page.locator('#equipArea, #equipAdd').first().count().catch(() => 0)) > 0;
     if (hasEquipArea) {
@@ -4578,11 +4578,31 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       //   payload 指定が無い場合のみ、空行に「ベッド」を入れる従来動作。
       const equipSelects = page.locator(equipSelector);
       const n = await equipSelects.count().catch(() => 0);
+      if (n === 0) {
+        return await fail('設備必須店舗ですが、予約フォームに設備選択行を作成できませんでした。', 'EQUIPMENT_FULL', true);
+      }
+      // 予約には設備を1台だけ割り当てる。複数行が残ると同じ予約が複数ベッドを
+      // 占有するため、2行目以降は空へ戻す。解除不能なら安全のため送信しない。
+      for (let i = 1; i < n; i++) {
+        const extra = equipSelects.nth(i);
+        const emptyValue = await extra.evaluate((el) => {
+          const option = Array.from(el.options).find((o) => !o.value);
+          return option ? option.value : null;
+        }).catch(() => null);
+        if (emptyValue === null) {
+          return await fail('複数の設備行があり、余分な設備割当を解除できないため登録を停止しました。', 'EQUIPMENT_FULL', true);
+        }
+        await extra.selectOption({ value: emptyValue }, { timeout: 3_000 });
+        await extra.evaluate((el) => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      }
       let setBy = null; // 'EQ' / 'name' / 'bed'
       let setCount = 0;
       let keptCount = 0;
       let noOption = false;
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; i < 1; i++) {
         const sel = equipSelects.nth(i);
         // option を value(EQ...) と表示名で評価し、希望に最も合う value を選ぶ。
         const pick = await sel.evaluate(
@@ -4677,7 +4697,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       }
     }
   } catch (_e) {
-    equipResult = 'エラー';
+    return await fail(`必須設備の割当処理に失敗しました: ${_e?.message ?? _e}`, 'EQUIPMENT_FULL', true);
   }
 
   // ※ 旧実装はここで body 全文を /空いて|重複/ 等で検索していたが、フォームの

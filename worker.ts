@@ -4161,7 +4161,8 @@ async function pushBooking(
   // 設備の指定が必須のことがあり、未設定だと errorInput=true で「登録する」が無効化され
   // 登録されない (2026-06-24 実機検証で判明: confirm は出るが onclick=errorInput;return false)。
   // 実証済み scrapers.cjs pushBookingViaForm と同処理: payload 指定設備(EQ/名前)優先、
-  // 無ければ空行に「ベッド」を入れる。設備が無い店舗では #equipArea が無く no-op。
+  // 無ければ空いているベッド/席を1台だけ選ぶ。設備欄がある店舗では設備必須とし、
+  // 空き設備が無い・複数設備行を解消できない場合は登録しない。
   try {
     const pp = p as unknown as {
       salonboard_equipment_external_id?: string | null;
@@ -4170,8 +4171,7 @@ async function pushBooking(
     const wantedEquipId =
       (pp.salonboard_equipment_external_id || "").trim() || null;
     const wantedEquipName = (pp.salonboard_equipment_name || "").trim() || null;
-    const equipSelector =
-      'select[name="equipIdList"], #equipArea select.equipIdList, #equipArea select';
+    const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList';
     const hasEquipArea =
       (await page.locator("#equipArea, #equipAdd").first().count().catch(() => 0)) >
       0;
@@ -4188,7 +4188,41 @@ async function pushBooking(
       }
       const equipSelects = page.locator(equipSelector);
       const n = await equipSelects.count().catch(() => 0);
-      for (let i = 0; i < n; i++) {
+      if (n === 0) {
+        return {
+          status: "failed",
+          reason: "設備必須店舗ですが、予約フォームに設備選択行を作成できませんでした。",
+          errorCode: "EQUIPMENT_FULL",
+          manualRequired: true,
+        };
+      }
+
+      // 既存フォームに複数の設備行があっても、予約には1台だけを割り当てる。
+      // 2行目以降を空へ戻せない場合は、複数ベッド登録を避けるため送信しない。
+      for (let i = 1; i < n; i++) {
+        const extra = equipSelects.nth(i);
+        const emptyValue = await extra.evaluate((el) => {
+          const option = Array.from((el as HTMLSelectElement).options).find(
+            (o) => !o.value,
+          );
+          return option ? option.value : null;
+        }).catch(() => null);
+        if (emptyValue === null) {
+          return {
+            status: "failed",
+            reason: "複数の設備行があり、余分な設備割当を解除できないため登録を停止しました。",
+            errorCode: "EQUIPMENT_FULL",
+            manualRequired: true,
+          };
+        }
+        await extra.selectOption({ value: emptyValue }, { timeout: formFieldTimeoutMs });
+        await extra.evaluate((el) => {
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+      }
+
+      for (let i = 0; i < 1; i++) {
         const sel = equipSelects.nth(i);
         const pick = await sel
           .evaluate(
@@ -4199,17 +4233,27 @@ async function pushBooking(
               };
               const opts = Array.from((el as HTMLSelectElement).options);
               const norm = (s: string) => (s || "").replace(/[○×\s]/g, "");
+              const isAvailable = (o: HTMLOptionElement) =>
+                !!o.value && !/×/.test(o.textContent || "");
               if (wantId) {
-                const o = opts.find((o) => o.value === wantId);
+                const o = opts.find((o) => o.value === wantId && isAvailable(o));
                 if (o) return o.value;
               }
               if (wantName) {
                 const o = opts.find(
-                  (o) => norm(o.textContent || "") === norm(wantName),
+                  (o) =>
+                    norm(o.textContent || "") === norm(wantName) &&
+                    isAvailable(o),
                 );
                 if (o) return o.value;
               }
-              return null;
+              const isBed = (o: HTMLOptionElement) =>
+                /ベッド|ベット|席/.test(o.textContent || "");
+              return (
+                opts.find((o) => isBed(o) && /○/.test(o.textContent || "")) ||
+                opts.find((o) => isBed(o) && isAvailable(o)) ||
+                opts.find((o) => /○/.test(o.textContent || "") && !!o.value)
+              )?.value || null;
             },
             { wantId: wantedEquipId, wantName: wantedEquipName },
           )
@@ -4217,28 +4261,12 @@ async function pushBooking(
         if (pick) {
           await sel.selectOption({ value: pick }, { timeout: formFieldTimeoutMs }).catch(() => {});
         } else {
-          // payload 指定が無い/解決不可: 空行のみ「ベッド」を入れる。
-          const needsSet = await sel
-            .evaluate((el) => {
-              const s = el as HTMLSelectElement;
-              const cur = s.options[s.selectedIndex];
-              return (
-                !s.value ||
-                (cur?.textContent || "").replace(/[○×\s]/g, "") === ""
-              );
-            })
-            .catch(() => false);
-          if (needsSet) {
-            const bedVal = await sel
-              .evaluate((el) => {
-                const opt = Array.from((el as HTMLSelectElement).options).find(
-                  (o) => (o.textContent || "").includes("ベッド"),
-                );
-                return opt ? opt.value : null;
-              })
-              .catch(() => null);
-            if (bedVal) await sel.selectOption({ value: bedVal }, { timeout: formFieldTimeoutMs }).catch(() => {});
-          }
+          return {
+            status: "failed",
+            reason: "予約時間帯に割り当て可能なベッド/席がありません。",
+            errorCode: "EQUIPMENT_FULL",
+            manualRequired: true,
+          };
         }
         // SalonBoard 側の検証 (errorInput クリア) を起こすため input/change 発火。
         await sel
@@ -4249,8 +4277,13 @@ async function pushBooking(
           .catch(() => {});
       }
     }
-  } catch {
-    /* 設備割当の失敗は登録続行 (設備必須でない店舗もあるため) */
+  } catch (e) {
+    return {
+      status: "failed",
+      reason: `必須設備の割当処理に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+      errorCode: "EQUIPMENT_FULL",
+      manualRequired: true,
+    };
   }
 
   // ⚠️ 空き枠/エラー検出はここ (入力直後・送信前) では行わない。
