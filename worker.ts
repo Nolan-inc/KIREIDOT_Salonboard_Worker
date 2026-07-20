@@ -4660,11 +4660,11 @@ const JOB_SAFETY_TIMEOUT_MS = Number(
 const FETCH_SAFETY_TIMEOUT_MS = Number(
   process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
 );
-// cloud の予約書込は、顧客操作から長時間待たせない。90秒を超えた場合は当該
+// cloud の予約書込は、顧客操作から長時間待たせない。150秒を超えた場合は当該
 // Chrome を停止して callback に専用マーカーを返し、Admin が同じジョブの
 // executor を playwright(店舗PC)へ切り替える。PC worker 自身にはこの上限を適用しない。
 const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
-  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 90_000,
+  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 150_000,
 );
 
 function isCloudWorker(): boolean {
