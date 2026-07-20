@@ -5468,7 +5468,14 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`,
     `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`,
   ];
-  const formSel = 'select#jsiRsvHour, select#rsvTime, select[name="rsvTerm"], #rlastupdate, a#change, a#regist';
+  // ★到達判定は「実際に編集できるフォーム本体」で行う (2026-07-20 修正)。
+  //   以前は a#change / a#regist (確定ボタン) を判定に含めていたが、SalonBoard は
+  //   変更不可の予約でも a#change / a#change_disable を **非表示のまま DOM に置く**。
+  //   そのため「到達した」と誤判定 → 後段の a#change:visible が無く
+  //   「変更の確定ボタンが見つかりませんでした」という分かりにくい失敗になっていた
+  //   (実障害: BF29397843。列挙されたのはグローバルナビと空の hidden アンカーのみ)。
+  //   → フォーム本体の要素 + **可視の**確定ボタンだけで判定する。
+  const formSel = 'select#jsiRsvHour, select#rsvTime, select[name="rsvTerm"], #rlastupdate, a#change:visible, a#regist:visible';
   let onForm = false;
   for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
     for (const path of candidates) {
@@ -5492,6 +5499,38 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   }
   const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, genre, url: page.url() } });
   if (!onForm) {
+    // ★原因を切り分けて報告する: SalonBoard 側で「変更できない予約」の場合、
+    //   確定ボタンが hidden/disabled な状態で置かれている。これを検出して、
+    //   リトライしても無駄な手動対応案件であることを明示する。
+    const state = await page.evaluate(() => {
+      const q = (s) => document.querySelector(s);
+      const vis = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        return !!(r.width || r.height) && cs.visibility !== 'hidden' && cs.display !== 'none';
+      };
+      const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+      return {
+        hasChangeAnchor: !!q('a#change') || !!q('a#change_disable'),
+        changeVisible: vis(q('a#change')),
+        disabledVisible: vis(q('a#change_disable')),
+        // SB が変更不可理由を文言で出すケース
+        notice: /変更できません|変更いただけません|キャンセル済|取消済|来店済|過去の予約/.test(body),
+        url: location.href,
+      };
+    }).catch(() => null);
+
+    if (state && (state.hasChangeAnchor || state.notice) && !state.changeVisible) {
+      return fail(
+        `この予約は SalonBoard 上で変更できない状態です (reserveId=${reserveId}` +
+        `${state.disabledVisible ? ', 確定ボタンが無効表示' : ', 確定ボタンが非表示'}` +
+        `${state.notice ? ', 画面に変更不可の案内あり' : ''}` +
+        `${cap1 ? `, capture=${cap1}` : ''})。SalonBoard で直接ご確認ください。`,
+        'MANUAL_REQUIRED',
+        true, // 手動対応が必要 (リトライしても状況は変わらない)
+      );
+    }
     return fail(`予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 

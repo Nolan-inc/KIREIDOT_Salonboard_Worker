@@ -317,18 +317,20 @@ async function connectToUserChrome({ shopId, profileNo, debugPort } = {}) {
 
 /**
  * 既存 Chrome の中で、SalonBoard 操作に使う page を用意する。
- * - 既に SalonBoard を開いているタブがあれば再利用。
- * - 無ければ既存ウィンドウ内に新規タブを開く。
- * 返り値: { page, createdNewTab } — 呼び出し側は createdNewTab の時だけ閉じる。
+ *
+ * ★重要 (2026-07-20): **必ず自分で新規タブを開き、既存タブには一切触らない**。
+ *   以前は「SalonBoard を開いているタブがあれば再利用」していたが、CDP 接続は
+ *   常駐 Chrome の全タブが見えるため、
+ *     - 人が手動で開いて操作中の予約画面タブを worker が横取りして遷移させる
+ *     - 処理後に page.close() でそのタブごと閉じてしまい about:blank になる
+ *   という事故が起きた (実際に「予約画面まで進むと急に about:blank」の原因)。
+ *   Cookie/ログインセッションは Chrome 全体で共有されるため、再利用しなくても
+ *   ログイン状態はそのまま使える。よって常に新規タブで開き、閉じるのも自分の
+ *   タブだけに限定する。
+ *
+ * 返り値: { page, createdNewTab:true } — 呼び出し側は必ずこの page だけを閉じる。
  */
 async function acquireSalonboardPage(context) {
-  const existing = context.pages();
-  const sbTab = existing.find((p) => {
-    try { return /salonboard\.com/i.test(p.url()); } catch (_e) { return false; }
-  });
-  if (sbTab) {
-    return { page: sbTab, createdNewTab: false };
-  }
   const page = await context.newPage();
   return { page, createdNewTab: true };
 }
