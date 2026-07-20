@@ -1034,7 +1034,10 @@ async function handleJob(job: Job): Promise<void> {
       }
       const loginUrl = new URL("/login/", baseUrl).toString();
       const loginEndpoint = launch.proxy?.server ?? "direct";
-      const throttleRemaining = loginThrottleRemainingMs(loginEndpoint);
+      const throttleRemaining = loginThrottleRemainingMs(
+        loginEndpoint,
+        job.credentials.login_id,
+      );
       if (throttleRemaining > 0) {
         await report(
           {
@@ -1053,6 +1056,7 @@ async function handleJob(job: Job): Promise<void> {
       const attemptLogin = () => withLoginPacing(
         loginEndpoint,
         job.shop_id,
+        job.credentials.login_id,
         () => tryLogin(page, loginUrl, {
           loginId: job.credentials.login_id,
           password: job.credentials.password,
@@ -1111,7 +1115,7 @@ async function handleJob(job: Job): Promise<void> {
           console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
-          noteEndpointLoginThrottle(loginEndpoint);
+          noteEndpointLoginThrottle(loginEndpoint, job.credentials.login_id);
           // ここで handleJob を再帰実行すると、書込ジョブの avoidResidential により
           // 経路が切り替わらず、同じISPから doLogin をもう一度叩くことがある。これは
           // Akamai の抑制を長引かせるため、同じCloud attemptでは再打せずcallback側の
@@ -1138,7 +1142,7 @@ async function handleJob(job: Job): Promise<void> {
       // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
       noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
-      noteEndpointLoginSuccess(loginEndpoint);
+      noteEndpointLoginSuccess(loginEndpoint, job.credentials.login_id);
       auth = "logged_in";
     }
 
@@ -2212,20 +2216,32 @@ const _lastLoginAttemptAt = new Map<string, number>();
 // ログイン済みセッションの利用には影響しない。
 const _loginThrottleUntil = new Map<string, number>();
 const LOGIN_THROTTLE_COOLDOWN_MS = 10 * 60_000;
-function loginThrottleRemainingMs(endpoint: string): number {
+function loginGateKeys(endpoint: string, loginId: string): string[] {
+  const account = loginId.trim().toLowerCase();
+  return Array.from(new Set([
+    `endpoint:${endpoint || "direct"}`,
+    ...(account ? [`account:${account}`] : []),
+  ])).sort();
+}
+function loginThrottleRemainingMs(endpoint: string, loginId: string): number {
+  const now = Date.now();
   return Math.max(
     0,
-    (_loginThrottleUntil.get(endpoint || "direct") ?? 0) - Date.now(),
+    ...loginGateKeys(endpoint, loginId).map(
+      (key) => (_loginThrottleUntil.get(key) ?? 0) - now,
+    ),
   );
 }
-function noteEndpointLoginThrottle(endpoint: string): void {
-  _loginThrottleUntil.set(
-    endpoint || "direct",
-    Date.now() + LOGIN_THROTTLE_COOLDOWN_MS,
-  );
+function noteEndpointLoginThrottle(endpoint: string, loginId: string): void {
+  const until = Date.now() + LOGIN_THROTTLE_COOLDOWN_MS;
+  for (const key of loginGateKeys(endpoint, loginId)) {
+    _loginThrottleUntil.set(key, until);
+  }
 }
-function noteEndpointLoginSuccess(endpoint: string): void {
-  _loginThrottleUntil.delete(endpoint || "direct");
+function noteEndpointLoginSuccess(endpoint: string, loginId: string): void {
+  for (const key of loginGateKeys(endpoint, loginId)) {
+    _loginThrottleUntil.delete(key);
+  }
 }
 function loginMinIntervalMs(): number {
   const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 30_000);
@@ -2235,32 +2251,48 @@ function loginMinIntervalMs(): number {
 async function withLoginPacing<T>(
   endpoint: string,
   shopId: string,
+  loginId: string,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const key = endpoint || "direct";
-  const previous = _loginGateTail.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const mine = new Promise<void>((resolve) => { release = resolve; });
-  const tail = previous.catch(() => {}).then(() => mine);
-  _loginGateTail.set(key, tail);
-  await previous.catch(() => {});
+  // Akamai の制限は出口IPだけでなく、同一ログインIDの並列ログインでも発生する。
+  // 両キーを辞書順に獲得して、別IPに割り当てられた同一グループ店舗も直列化する。
+  const keys = loginGateKeys(endpoint, loginId);
+  const releases: Array<() => void> = [];
+  const tails: Array<{ key: string; tail: Promise<void> }> = [];
+  for (const key of keys) {
+    const previous = _loginGateTail.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => mine);
+    _loginGateTail.set(key, tail);
+    await previous.catch(() => {});
+    releases.push(release);
+    tails.push({ key, tail });
+  }
   try {
     const waitMs = Math.max(
       0,
-      loginMinIntervalMs() - (Date.now() - (_lastLoginAttemptAt.get(key) ?? 0)),
+      ...keys.map(
+        (key) =>
+          loginMinIntervalMs() -
+          (Date.now() - (_lastLoginAttemptAt.get(key) ?? 0)),
+      ),
     );
     if (waitMs > 0) {
       console.log(
-        `[login-gate] endpoint=${key} shop=${shopId.slice(0, 8)} wait=${waitMs}ms`,
+        `[login-gate] endpoint=${endpoint || "direct"} shop=${shopId.slice(0, 8)} wait=${waitMs}ms`,
       );
       await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
     }
     // 開始時刻を基準にすることで、doLogin が短時間で失敗しても直後の別店舗が連打しない。
-    _lastLoginAttemptAt.set(key, Date.now());
+    const startedAt = Date.now();
+    for (const key of keys) _lastLoginAttemptAt.set(key, startedAt);
     return await fn();
   } finally {
-    release();
-    if (_loginGateTail.get(key) === tail) _loginGateTail.delete(key);
+    for (let i = releases.length - 1; i >= 0; i--) releases[i]();
+    for (const { key, tail } of tails) {
+      if (_loginGateTail.get(key) === tail) _loginGateTail.delete(key);
+    }
   }
 }
 // 同時実行数。env追加はコンテナ再作成(=全店セッション消失)になるため、ファイルでも上書き可。
@@ -2900,25 +2932,25 @@ function makeRelogin(
           timeout: 20_000,
         })
         .catch(() => {});
-      const remaining = loginThrottleRemainingMs(endpoint);
+      const remaining = loginThrottleRemainingMs(endpoint, creds.login_id);
       if (remaining > 0) {
         console.log(
           `[relogin] endpoint cooldown (${Math.ceil(remaining / 1000)}s remaining) -> skip`,
         );
         return false;
       }
-      const r = await withLoginPacing(endpoint, shopId, () =>
+      const r = await withLoginPacing(endpoint, shopId, creds.login_id, () =>
         tryLogin(page, new URL("/login/", baseUrl).toString(), {
           loginId: creds.login_id,
           password: creds.password,
         }),
       );
-      if (r.status === "ok") noteEndpointLoginSuccess(endpoint);
+      if (r.status === "ok") noteEndpointLoginSuccess(endpoint, creds.login_id);
       else if (
         r.status === "failed" &&
         /did not complete/i.test(r.reason ?? "")
       ) {
-        noteEndpointLoginThrottle(endpoint);
+        noteEndpointLoginThrottle(endpoint, creds.login_id);
         noteLoginThrottle(shopId);
       }
       console.log(
