@@ -1504,7 +1504,12 @@ async function handleJob(job: Job): Promise<void> {
         const safePayload: PushBookingPayload = mustPreflight
           ? { ...payload, preflight_required: true }
           : payload;
-        result = await pushBookingViaProvenForm(page, job, safePayload);
+        result = await pushBookingViaProvenForm(
+          page,
+          job,
+          safePayload,
+          launch.proxy?.server ?? "direct",
+        );
       }
 
       if (result.status === "ok") {
@@ -3686,6 +3691,7 @@ async function pushBookingViaProvenForm(
   page: Page,
   job: Job,
   p: PushBookingPayload,
+  loginEndpoint = "direct",
 ): Promise<PushBookingResult> {
   // 不完全ペイロードで登録フォームが埋められずハングするのを防ぐ早期検証。
   // scheduled_at / staff は必須(scrapers.pushBookingViaForm でも必須)。
@@ -3734,7 +3740,7 @@ async function pushBookingViaProvenForm(
     shopName,
     genre,
     // 失効時の同一ジョブ内自己回復 (スケジュール到達時に expired を踏んだら1回だけ再ログイン)。
-    relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+    relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, loginEndpoint),
   });
   return result;
 }
