@@ -1034,6 +1034,22 @@ async function handleJob(job: Job): Promise<void> {
       }
       const loginUrl = new URL("/login/", baseUrl).toString();
       const loginEndpoint = launch.proxy?.server ?? "direct";
+      const throttleRemaining = loginThrottleRemainingMs(loginEndpoint);
+      if (throttleRemaining > 0) {
+        await report(
+          {
+            job_id: job.id,
+            job_type: job.job_type,
+            status: "retryable_failed",
+            error: `同一Cloud出口でSalonBoardログイン制限を検知済みのため、ログインPOSTを再送せずPCへ移管します (残り${Math.ceil(throttleRemaining / 1000)}秒)。`,
+          },
+          page,
+        );
+        console.log(
+          `[job] done  ${tag} (endpoint login cooldown -> executor fallback)`,
+        );
+        return;
+      }
       const attemptLogin = () => withLoginPacing(
         loginEndpoint,
         job.shop_id,
@@ -1095,6 +1111,7 @@ async function handleJob(job: Job): Promise<void> {
           console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
+          noteEndpointLoginThrottle(loginEndpoint);
           // ここで handleJob を再帰実行すると、書込ジョブの avoidResidential により
           // 経路が切り替わらず、同じISPから doLogin をもう一度叩くことがある。これは
           // Akamai の抑制を長引かせるため、同じCloud attemptでは再打せずcallback側の
@@ -1121,6 +1138,7 @@ async function handleJob(job: Job): Promise<void> {
       // ログイン成功時のみ storageState を保存 + スロットルcooldownを解除。
       await saveStorageState(ctx, ssPath);
       noteLoginSuccess(job.shop_id); // 自動フェイルオーバーの throttle streak をリセット
+      noteEndpointLoginSuccess(loginEndpoint);
       auth = "logged_in";
     }
 
@@ -1457,7 +1475,7 @@ async function handleJob(job: Job): Promise<void> {
           genre: chGenre,
           salonId: chSalonId,
           shopName: chShopName,
-          relogin: makeRelogin(page, baseUrl, job.credentials),
+          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
         });
         if (cr.status === "ok") {
           cr.externalId = payload.external_booking_id ?? null;
@@ -1598,7 +1616,7 @@ async function handleJob(job: Job): Promise<void> {
               shopName,
               genre,
               // 失効時の同一ジョブ内自己回復。
-              relogin: makeRelogin(page, baseUrl, job.credentials),
+              relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
             });
       await reportScraperResult(
         job,
@@ -1624,7 +1642,7 @@ async function handleJob(job: Job): Promise<void> {
         genre,
         salonId,
         shopName,
-        relogin: makeRelogin(page, baseUrl, job.credentials),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       });
       await reportScraperResult(job, "push_shifts", result, {}, page);
       return;
@@ -1638,7 +1656,7 @@ async function handleJob(job: Job): Promise<void> {
         genre,
         salonId,
         shopName,
-        relogin: makeRelogin(page, baseUrl, job.credentials),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string };
       if (result.status === "ok" && Array.isArray(result.shifts)) {
         await report({
@@ -1741,7 +1759,7 @@ async function handleJob(job: Job): Promise<void> {
         genre: aGenre,
         salonId: aSalonId,
         shopName: aShopName,
-        relogin: makeRelogin(page, baseUrl, job.credentials),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       });
       await reportScraperResult(job, "push_acceptance", result, {}, page);
       return;
@@ -1897,7 +1915,7 @@ async function handleJob(job: Job): Promise<void> {
           loginId: job.credentials.login_id,
           password: job.credentials.password,
           // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
-          relogin: makeRelogin(page, baseUrl, job.credentials),
+          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
           abortSignal: _fetchAc.signal,
         })) as { rows: unknown[]; debug?: unknown; acceptance?: unknown[] });
       } catch (e) {
@@ -2185,13 +2203,33 @@ const _openContexts = new Set<BrowserContext>();
 // GET ではなく、このログイン POST を無応答のまま保持することがあるため、実際にログインが
 // 必要なジョブだけを endpoint 単位で直列化する。ログイン済みジョブには一切待ちを加えない。
 //
-// 既定20秒は同一出口からの連打を避けつつ、150秒の Cloud SLA 内に収まる値。運用中は
+// 既定30秒は同一出口からの連打を避けつつ、150秒の Cloud SLA 内に収まる値。運用中は
 // SB_LOGIN_MIN_INTERVAL_MS でホット調整できる。プロセス再起動で状態は安全にリセットされる。
 const _loginGateTail = new Map<string, Promise<void>>();
 const _lastLoginAttemptAt = new Map<string, number>();
+// Akamai がログインPOSTをホールドした出口へ連打すると制限時間が延びるため、
+// 検知後は短時間その出口からの自動ログインを止め、ジョブをPCへ即時移管する。
+// ログイン済みセッションの利用には影響しない。
+const _loginThrottleUntil = new Map<string, number>();
+const LOGIN_THROTTLE_COOLDOWN_MS = 10 * 60_000;
+function loginThrottleRemainingMs(endpoint: string): number {
+  return Math.max(
+    0,
+    (_loginThrottleUntil.get(endpoint || "direct") ?? 0) - Date.now(),
+  );
+}
+function noteEndpointLoginThrottle(endpoint: string): void {
+  _loginThrottleUntil.set(
+    endpoint || "direct",
+    Date.now() + LOGIN_THROTTLE_COOLDOWN_MS,
+  );
+}
+function noteEndpointLoginSuccess(endpoint: string): void {
+  _loginThrottleUntil.delete(endpoint || "direct");
+}
 function loginMinIntervalMs(): number {
-  const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 20_000);
-  if (!Number.isFinite(configured)) return 20_000;
+  const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 30_000);
+  if (!Number.isFinite(configured)) return 30_000;
   return Math.max(0, Math.min(configured, 60_000));
 }
 async function withLoginPacing<T>(
@@ -2847,6 +2885,8 @@ function makeRelogin(
   page: Page,
   baseUrl: string,
   creds: { login_id: string; password: string },
+  shopId: string,
+  endpoint: string,
 ): () => Promise<boolean> {
   return async () => {
     if (autoLoginDisabled()) {
@@ -2860,10 +2900,27 @@ function makeRelogin(
           timeout: 20_000,
         })
         .catch(() => {});
-      const r = await tryLogin(page, new URL("/login/", baseUrl).toString(), {
-        loginId: creds.login_id,
-        password: creds.password,
-      });
+      const remaining = loginThrottleRemainingMs(endpoint);
+      if (remaining > 0) {
+        console.log(
+          `[relogin] endpoint cooldown (${Math.ceil(remaining / 1000)}s remaining) -> skip`,
+        );
+        return false;
+      }
+      const r = await withLoginPacing(endpoint, shopId, () =>
+        tryLogin(page, new URL("/login/", baseUrl).toString(), {
+          loginId: creds.login_id,
+          password: creds.password,
+        }),
+      );
+      if (r.status === "ok") noteEndpointLoginSuccess(endpoint);
+      else if (
+        r.status === "failed" &&
+        /did not complete/i.test(r.reason ?? "")
+      ) {
+        noteEndpointLoginThrottle(endpoint);
+        noteLoginThrottle(shopId);
+      }
       console.log(
         `[relogin] status=${r.status}${
           r.status !== "ok" ? ` (${(r as { reason?: string }).reason ?? ""})` : ""
@@ -3645,7 +3702,7 @@ async function pushBookingViaProvenForm(
     shopName,
     genre,
     // 失効時の同一ジョブ内自己回復 (スケジュール到達時に expired を踏んだら1回だけ再ログイン)。
-    relogin: makeRelogin(page, baseUrl, job.credentials),
+    relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
   });
   return result;
 }
