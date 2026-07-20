@@ -3457,9 +3457,27 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return fail('勤務パターン一覧 (select#shiftIdBatch) を取得できませんでした', 'UNKNOWN_ERROR', true);
   }
   const timeKey = (s, e) => `${s}-${e}`;
+  const normalizePatternLabel = (value) => String(value || '').replace(/[\s　]+/g, '').trim();
+  let shortNameCounts = new Map();
+  const rebuildShortNameCounts = () => {
+    shortNameCounts = new Map();
+    for (const pat of patterns) {
+      const short = normalizePatternLabel(pat.shortName || pat.short_name);
+      if (short) shortNameCounts.set(short, (shortNameCounts.get(short) || 0) + 1);
+    }
+  };
+  const hasUniqueShortName = (pat) => {
+    const short = normalizePatternLabel(pat?.shortName || pat?.short_name);
+    return !short || shortNameCounts.get(short) === 1;
+  };
+  rebuildShortNameCounts();
   let timedPatterns = patterns.filter((x) => x.start && x.end);
   let patternById = new Map(patterns.map((x) => [String(x.id), x]));
-  let patternByTime = new Map(timedPatterns.map((x) => [timeKey(x.start, x.end), x]));
+  // 同じ短縮名が複数時間帯に使われているパターンは、月次表の表示だけでは
+  // どの時間帯か判別不能。誤って「一致」とみなさず、一意な短縮名の新規パターンへ移行する。
+  let patternByTime = new Map(
+    timedPatterns.filter(hasUniqueShortName).map((x) => [timeKey(x.start, x.end), x]),
+  );
 
   const warnings = [];
   // サマリ/戻り値用の集計 (要登録件数・自動登録成功件数)。
@@ -3493,9 +3511,24 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
     // ★SB「短縮名」は半角英数記号あわせて2文字以内。8桁コードは弾かれる(実機確認)。
     //   一意な2文字コードを割当てる(セル表示用)。名称(maxlength40)は可読な KD HH:MM-HH:MM。
-    const toCreate = Array.from(needed.values()).map(({ start, end }, i) => ({
+    const usedShortNames = new Set(
+      patterns.map((pat) => normalizePatternLabel(pat.shortName || pat.short_name)).filter(Boolean),
+    );
+    let shortSeq = 1;
+    const nextUniqueShortName = () => {
+      while (shortSeq < 36 * 36) {
+        const candidate = shortSeq.toString(36).toUpperCase().padStart(2, '0').slice(-2);
+        shortSeq++;
+        if (!usedShortNames.has(candidate)) {
+          usedShortNames.add(candidate);
+          return candidate;
+        }
+      }
+      throw new Error('勤務パターン短縮名の空きがありません');
+    };
+    const toCreate = Array.from(needed.values()).map(({ start, end }) => ({
       name: `KD ${start}-${end}`,
-      short_name: (i + 1).toString(36).toUpperCase().padStart(2, '0').slice(-2), // 01..09,0A.. 一意2文字
+      short_name: nextUniqueShortName(),
       start, end,
     }));
     const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e) }));
@@ -3517,7 +3550,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       patterns = re;
       timedPatterns = patterns.filter((x) => x.start && x.end);
       patternById = new Map(patterns.map((x) => [String(x.id), x]));
-      patternByTime = new Map(timedPatterns.map((x) => [timeKey(x.start, x.end), x]));
+      rebuildShortNameCounts();
+      patternByTime = new Map(
+        timedPatterns.filter(hasUniqueShortName).map((x) => [timeKey(x.start, x.end), x]),
+      );
     }
     cells = await readCells().catch(() => cells);
   };
@@ -3530,10 +3566,13 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     end_time: x.end ?? '',
   }));
   const cellMatchesPattern = (text, pat) => {
-    const normalize = (value) => String(value || '').replace(/[\s　]+/g, '').trim();
+    const normalize = normalizePatternLabel;
     const t = normalize(text);
     if (!t || t === '休') return false;
-    const names = [pat?.name, pat?.shortName, pat?.short_name]
+    const names = [
+      pat?.name,
+      ...(hasUniqueShortName(pat) ? [pat?.shortName, pat?.short_name] : []),
+    ]
       .map(normalize)
       .filter(Boolean);
     if (names.some((name) => t === name || name.startsWith(t) || t.startsWith(name))) {
