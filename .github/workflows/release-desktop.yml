@@ -62,8 +62,17 @@ jobs:
           if [[ "$signing_ready" == true ]]; then
             echo "BUILD_MODE=signed" >> "$GITHUB_ENV"
           else
-            echo "BUILD_MODE=unsigned" >> "$GITHUB_ENV"
-            echo "Apple signing secrets are incomplete; publishing an unsigned fallback build."
+            # ★署名なしフォールバック公開は廃止 (2026-07-20)。
+            #   署名なしビルドを同一リリースへ公開すると、ローカルでアップロード済みの
+            #   署名・公証済みアセットを上書きし、electron-updater の署名検証が必ず失敗する
+            #   (「コードは指定されたコード要件を満たしていません」で全端末が更新不能。
+            #    v0.2.207 / v0.2.208 で実際に発生)。署名シークレット未設定の間は
+            #   CI リリースを失敗させ、ローカルの署名付きリリースを正とする。
+            #   CI で署名するにはリポジトリ secrets に
+            #   MACOS_CERTIFICATE_P12 / MACOS_CERTIFICATE_PASSWORD / APPLE_ID /
+            #   APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID を設定すること。
+            echo "Apple signing secrets are incomplete; refusing to publish an unsigned build (would break auto-update)." >&2
+            exit 1
           fi
 
       - name: Install dependencies

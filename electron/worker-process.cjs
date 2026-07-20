@@ -316,23 +316,39 @@ async function connectToUserChrome({ shopId, profileNo, debugPort } = {}) {
 }
 
 /**
- * 既存 Chrome の中で、SalonBoard 操作に使う page を用意する。
+ * 店舗用 Chrome の中で、SalonBoard 操作に使う「worker 専用の作業タブ」を用意する。
  *
- * ★重要 (2026-07-20): **必ず自分で新規タブを開き、既存タブには一切触らない**。
- *   以前は「SalonBoard を開いているタブがあれば再利用」していたが、CDP 接続は
- *   常駐 Chrome の全タブが見えるため、
- *     - 人が手動で開いて操作中の予約画面タブを worker が横取りして遷移させる
- *     - 処理後に page.close() でそのタブごと閉じてしまい about:blank になる
- *   という事故が起きた (実際に「予約画面まで進むと急に about:blank」の原因)。
- *   Cookie/ログインセッションは Chrome 全体で共有されるため、再利用しなくても
- *   ログイン状態はそのまま使える。よって常に新規タブで開き、閉じるのも自分の
- *   タブだけに限定する。
+ * ★設計 (2026-07-20 改訂): 店舗用 Chrome (ensureManagedChrome が専用 user-data-dir で
+ *   起動) のタブは全て worker の所有物なので、**1 本の作業タブを使い回す**。
+ *   - 接続キャッシュ (managedCdpBrowsers のエントリ) に workerPage を保持し、
+ *     ジョブ/セッション延命をまたいで再利用する。
+ *   - 初回は起動時の about:blank タブがあればそれを採用 (余計なタブを作らない)。
+ *   - 作業後もタブは閉じない (createdNewTab:false)。ジョブごとに開閉すると、
+ *     残るのが起動時の about:blank だけになり「画面が真っ白で何もできない」
+ *     ように見えるため。タブを閉じないことで直近の SalonBoard 画面が残り、
+ *     状態確認もできる。
  *
- * 返り値: { page, createdNewTab:true } — 呼び出し側は必ずこの page だけを閉じる。
+ * 引数は connectToUserChrome の返り値 (接続キャッシュと同一オブジェクト)。
+ * 後方互換のため context を直接渡された場合も動く (その場合キャッシュはしない)。
  */
-async function acquireSalonboardPage(context) {
-  const page = await context.newPage();
-  return { page, createdNewTab: true };
+async function acquireSalonboardPage(conn) {
+  const context = conn && conn.context ? conn.context : conn;
+  // 1) キャッシュ済みの作業タブが生きていれば再利用
+  const cached = conn && conn.workerPage;
+  if (cached && !(cached.isClosed && cached.isClosed())) {
+    return { page: cached, createdNewTab: false };
+  }
+  // 2) 起動時の about:blank タブがあれば作業タブとして採用
+  let page = null;
+  try {
+    page = (context.pages ? context.pages() : []).find((p) => {
+      try { return p.url() === 'about:blank'; } catch (_e) { return false; }
+    }) || null;
+  } catch (_e) { /* noop */ }
+  // 3) 無ければ新規タブ
+  if (!page) page = await context.newPage();
+  if (conn && conn.context) conn.workerPage = page;
+  return { page, createdNewTab: false };
 }
 
 /**
@@ -1485,7 +1501,7 @@ async function keepAliveShop(target) {
       profileNo: profile.profileNo,
       debugPort: profile.debugPort,
     });
-    const acquired = await acquireSalonboardPage(managed.context);
+    const acquired = await acquireSalonboardPage(managed);
     page = acquired.page;
     createdNewTab = acquired.createdNewTab;
 
@@ -2899,6 +2915,32 @@ async function tryLogin(page, c) {
   // フォーム出現を主軸にする。従来は 60+45+45 秒待ち、nav 自体が成功して
   // selector だけ出ない場合は失敗判定も漏れていたため「無限ロード」に見えた。
   // 1回20秒・最大2回で明示的に打ち切り、ジョブ側のリトライへ返す。
+  //
+  // ★既ログイン検出 (2026-07-20 修正): セッションが既に有効な状態でログインURLを
+  //   開くと SalonBoard は管理画面トップへリダイレクトし、パスワード欄は永遠に
+  //   出ない。旧実装はこれを「フォームが見えない=失敗」と誤判定し、リトライ時に
+  //   page.goto('about:blank') で画面を破壊していた (「ログイン直後に about:blank
+  //   に飛んで真っ白」の原因。手動ログイン完了直後にパスワード欄が消えるケースも
+  //   同じ経路で破壊された)。→ パスワード欄が見えないときはまず「ログイン済みか」
+  //   を確認し、済みなら成功として返す。about:blank への退避遷移は廃止。
+  const alreadyLoggedIn = async () => {
+    try {
+      if (/login/i.test(page.url())) return false;
+      const pw = await page
+        .locator('input[type="password"], input[name="password"]')
+        .count()
+        .catch(() => 0);
+      if (pw > 0) return false;
+      return await page.evaluate(() => {
+        const body = (document.body && document.body.innerText) || '';
+        // 管理画面グローバルナビの定番メニューが並んでいればログイン済みとみなす
+        return /予約管理/.test(body) && /(お客様管理|売上管理|メッセージ管理|設定)/.test(body);
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
+
   const MAX_ATTEMPTS = 2;
   let formVisible = false;
   let lastNavError = null;
@@ -2923,16 +2965,22 @@ async function tryLogin(page, c) {
       formVisible = true;
       break;
     } catch (_e) {
-      lastNavError = navError;
       await navPromise.catch(() => {});
+      // ログイン済みでトップへリダイレクトされた (=フォームは出ない) なら成功。
+      if (await alreadyLoggedIn()) {
+        return { status: 'ok', alreadyLoggedIn: true };
+      }
+      lastNavError = navError;
       if (attempt < MAX_ATTEMPTS) {
-        // 少し待ってからリトライ (バックオフ)
-        await page.goto('about:blank', { waitUntil: 'commit', timeout: 5_000 }).catch(() => {});
+        // 少し待ってからリトライ (バックオフ)。表示中ページは壊さない。
         await new Promise((r) => setTimeout(r, 1_500));
       }
     }
   }
   if (!formVisible) {
+    if (await alreadyLoggedIn()) {
+      return { status: 'ok', alreadyLoggedIn: true };
+    }
     return {
       status: 'failed',
       reason: `login form not visible within 40s after ${MAX_ATTEMPTS} attempts (url=${page.url()}${
@@ -3595,10 +3643,10 @@ async function runPushJobs({ showBrowser } = {}) {
       cdpConnected = true; // finally で「接続を切るだけ (Chrome は閉じない)」判定に使う
       emit('log', { level: 'info', msg: `[${tag}] 既存Chrome(CDP)に接続: profile="${launched.profile}" port=${launched.port}`, at: new Date().toISOString() });
       const ssPath = storageStatePathFor(job.shop_id);
-      // 既存 Chrome を使うため Cookie/ログインは Chrome 自身が保持している。
+      // 店舗用 Chrome の Cookie/ログインは Chrome 自身が保持している。
       // storageState 注入は不要 (むしろ既存セッションを壊すのでしない)。
-      // 既存の SalonBoard タブがあれば再利用、無ければ既存ウィンドウ内に新規タブ。
-      const acquired = await acquireSalonboardPage(ctx);
+      // worker 専用の作業タブ (接続キャッシュに保持) をジョブ間で使い回す。
+      const acquired = await acquireSalonboardPage(launched);
       const page = acquired.page;
       createdNewTab = acquired.createdNewTab;
       cdpPage = page;
