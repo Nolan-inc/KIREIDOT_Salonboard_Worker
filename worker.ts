@@ -1492,7 +1492,19 @@ async function handleJob(job: Job): Promise<void> {
         }
         result = cr;
       } else {
-        result = await pushBookingViaProvenForm(page, job, payload);
+        // Cloud -> PC fallback / 同一ジョブ内リトライでは、Admin 側の payload に
+        // preflight_required が付かなかった場合でも必ず既存予約を照合する。
+        // Cloud が登録完了レスポンスを受け取る前に切断されたケースで、PC が同じ予約を
+        // 新規登録して二重予約にする事故を Worker 側でも防ぐ。
+        const mustPreflight =
+          payload.preflight_required === true ||
+          job.executor === "playwright" ||
+          job.attempts > 1 ||
+          typeof (payload as { reason?: unknown }).reason === "string";
+        const safePayload: PushBookingPayload = mustPreflight
+          ? { ...payload, preflight_required: true }
+          : payload;
+        result = await pushBookingViaProvenForm(page, job, safePayload);
       }
 
       if (result.status === "ok") {
