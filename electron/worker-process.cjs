@@ -887,13 +887,15 @@ async function sendSlack(text) {
 
 // =====================================================================
 // エラー画面のスクショ + 画面テキストAI判別 + 原因推測を Slack へ送る
-//   - 通知先は専用チャンネル C0BAPMRQR2L (設定で上書き可: deviceAuth.slack.error_channel)
+//   - 通知先は専用チャンネル C0BJDTG7KPY (設定で上書き可: deviceAuth.slack.error_channel)
+//     https://nolan-co-jp.slack.com/archives/C0BJDTG7KPY
+//     (2026-07-20 ユーザ指示で C0BAPMRQR2L から変更。AIがまとめた原因・内容つき)
 //   - スクショは Slack files.upload(v2: getUploadURLExternal→completeUploadExternal)
-//   - AI推測は OpenAI Vision を直叩き (OPENAI_API_KEY 未設定ならスキップ)
+//   - AI推測は Claude 優先 → OpenAI フォールバック (キー未設定ならスキップ)
 //   - 全ジョブの失敗 (postCallback の失敗ステータス) で発火。重複抑制なし(毎回送る)
 // =====================================================================
 const SLACK_ERROR_SCREENSHOT_CHANNEL =
-  process.env.SALONBOARD_SLACK_ERROR_CHANNEL || 'C0BAPMRQR2L';
+  process.env.SALONBOARD_SLACK_ERROR_CHANNEL || 'C0BJDTG7KPY';
 
 function slackErrorChannel() {
   return (
