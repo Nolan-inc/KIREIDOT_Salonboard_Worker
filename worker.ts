@@ -4642,23 +4642,14 @@ async function pollOnce(): Promise<number> {
   return jobs.length;
 }
 
-// ジョブ全体のセーフティタイムアウト。handleJob 内のページ操作には個別 timeout が
-// あるが、enrichDurations 等が累積すると 1 ジョブが数十分 running のまま固まり、
-// callback も返らず「実行中だが進まない」状態になる。ここで上限を設け、超過したら
-// running を解除する failed callback を送って再キューさせる(reaper を待たない)。
-const JOB_SAFETY_TIMEOUT_MS = Number(
-  process.env.SB_JOB_TIMEOUT_MS ?? 8 * 60_000, // 既定 8 分
-);
-// fetch_bookings は美容室(hair)の日次スケジュール巡回で 90日×数秒 ≒ 9分かかるため別枠。
-// 8分だと毎回タイムアウト→レーン解放→次ジョブが生きた Chrome と同一プロファイルで衝突
-// →セッション相互破壊→ログイン連打で IP フラグ、という連鎖の起点になっていた(2026-07-04 郡山)。
-// ★予約書込3分SLAは (1) claim RPCの fetch同時実行cap(=書込用に常時2スロット予約) と
-//   (2) 同一lane走行fetchの preemption(AbortController+page.close) の2段で担保するように
-//   なったため、fetch を短時間で強制killする必要はなくなった。むしろ 210s だと正当な
-//   90日hair fetch(~9分)を毎回kill→再キュー→再実行の二重走行/storm を招いていた
-//   (実測: 242件doneの直後にTIMEOUTログ→再キューの競合)。真のハング検出用に 12分へ戻す。
-const FETCH_SAFETY_TIMEOUT_MS = Number(
-  process.env.SB_FETCH_TIMEOUT_MS ?? 720_000, // 既定 12 分 (ハング検出用の上限。SLAは cap+preemptionで担保)
+// 取得系（予約取込・シフト取込など）は利用者操作のSLA対象ではないため、短い期限で
+// 打ち切らない。完全な無制限だとブラウザ停止時に lane が永久占有されるので、10分を
+// 「処理期限」ではなくハング検知の安全弁として共通適用する。
+const READ_JOB_SAFETY_TIMEOUT_MS = Number(
+  process.env.SB_READ_JOB_TIMEOUT_MS ??
+    process.env.SB_FETCH_TIMEOUT_MS ??
+    process.env.SB_JOB_TIMEOUT_MS ??
+    10 * 60_000,
 );
 // cloud の予約書込は、顧客操作から長時間待たせない。150秒を超えた場合は当該
 // Chrome を停止して callback に専用マーカーを返し、Admin が同じジョブの
@@ -4679,9 +4670,7 @@ async function handleJobGuarded(job: Job): Promise<void> {
   const limitMs =
     isCloudWorker() && isBookingWrite(job)
       ? CLOUD_BOOKING_FALLBACK_TIMEOUT_MS
-      : job.job_type === "fetch_bookings"
-        ? FETCH_SAFETY_TIMEOUT_MS
-        : JOB_SAFETY_TIMEOUT_MS;
+      : READ_JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<"timeout">((resolve) => {
     timer = setTimeout(() => resolve("timeout"), limitMs);
