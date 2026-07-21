@@ -3527,14 +3527,31 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       throw new Error('勤務パターン短縮名の空きがありません');
     };
     const toCreate = Array.from(needed.values()).map(({ start, end }) => ({
-      name: `KD ${start}-${end}`,
+      // SalonBoard のシフト名称は実機上10文字まで。従来の
+      // `KD 11:00-16:30` は `KD 11:00-1` に切られ、11:00開始の別パターン
+      // (例 11:00-19:30) と名称重複して登録できなかった。
+      // HHMMを連結した固定10文字なら、開始・終了の組み合わせごとに一意になる。
+      name: `KD${start.replace(':', '')}${end.replace(':', '')}`,
       short_name: nextUniqueShortName(),
       start, end,
     }));
-    const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e) }));
+    const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e), results: [] }));
+    const createFailures = [];
     for (const r of (cr?.results || [])) {
       if (r.status === 'ok') registeredCount++;
-      else if (r.status === 'failed') warnings.push(`勤務パターン新規登録に失敗: ${r.name} (${r.reason || ''})`);
+      else if (r.status === 'failed') {
+        const msg = `${r.name} (${r.reason || ''})`;
+        createFailures.push(msg);
+        warnings.push(`勤務パターン新規登録に失敗: ${msg}`);
+      }
+    }
+    if (cr?.status === 'failed' && createFailures.length === 0) {
+      createFailures.push(String(cr?.reason || cr?.error || '原因不明'));
+    }
+    if (createFailures.length > 0) {
+      const err = new Error(`勤務パターンを登録できませんでした: ${createFailures.join(' | ')}`);
+      err.code = 'SHIFT_PATTERN_CREATE_FAILED';
+      throw err;
     }
     if (registeredCount > 0) {
       warnings.push(`SBに無かった勤務パターン ${registeredCount}件を自動登録しました: ${toCreate.map((p) => p.name).join(', ')}`);
@@ -3557,7 +3574,15 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
     cells = await readCells().catch(() => cells);
   };
-  await ensureKdPatterns();
+  try {
+    await ensureKdPatterns();
+  } catch (e) {
+    return fail(
+      `${e?.message || '勤務パターンの自動登録に失敗しました'}。予定方式へ切り替えず停止しました。`,
+      e?.code || 'SHIFT_PATTERN_CREATE_FAILED',
+      true,
+    );
+  }
   // DB保存用 (worker-process が salonboard_bulk_upsert_shift_patterns へ upsert する)
   const patternsOut = patterns.map((x) => ({
     external_id: x.id,

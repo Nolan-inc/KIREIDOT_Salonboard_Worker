@@ -49,6 +49,7 @@ type ScraperResult = {
   reason?: string;
   manualRequired?: boolean;
   summary?: string;
+  warnings?: string[];
   alreadyAbsent?: boolean;
 };
 type ScraperFn = (
@@ -796,12 +797,15 @@ async function reportScraperResult(
 ): Promise<void> {
   const tag = `${jobType} ${job.id.slice(0, 8)}`;
   if (result.status === "ok") {
+    const warningText = Array.isArray(result.warnings) && result.warnings.length > 0
+      ? ` / 注意: ${result.warnings.slice(0, 5).join(" | ")}${result.warnings.length > 5 ? ` 他${result.warnings.length - 5}件` : ""}`
+      : "";
     await report({
       job_id: job.id,
       job_type: jobType,
       status: "succeeded",
       external_id: result.externalId ?? result.recoveredReserveId ?? null,
-      summary: result.summary ?? `${jobType} 完了`,
+      summary: `${result.summary ?? `${jobType} 完了`}${warningText}`.slice(0, 900),
       ...extra,
     } as unknown as CallbackBody);
     console.log(`[job] done  ${tag} (ok)`);
