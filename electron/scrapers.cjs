@@ -2818,7 +2818,22 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   page.on('dialog', onDialog);
   const beforeUrl = page.url();
   try {
-    await registerBtn.click({ timeout: 15_000 }).catch(() => {});
+    await registerBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await registerBtn.click({ timeout: 15_000 });
+    // 店舗/画面状態によっては native confirm ではなくHTMLダイアログで
+    // 「はい」を要求される。これを押さないと scheduleRegist に残ったまま未登録になる。
+    await page.waitForTimeout(500);
+    const htmlConfirm = page.locator([
+      '.mod_dialog a.accept:visible',
+      '.mod_popup_02 a.accept:visible',
+      '#dragDialog a.accept:visible',
+      '#dragDialog a.mod_btn_116:visible',
+      'a:has-text("はい"):visible',
+      'button:has-text("はい"):visible',
+    ].join(', ')).first();
+    if ((await htmlConfirm.count().catch(() => 0)) > 0) {
+      await htmlConfirm.click({ timeout: 10_000 });
+    }
     // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大15秒ポーリング。
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
