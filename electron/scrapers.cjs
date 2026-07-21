@@ -2828,6 +2828,12 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       '.mod_popup_02 a.accept:visible',
       '#dragDialog a.accept:visible',
       '#dragDialog a.mod_btn_116:visible',
+      '#dragDialog a.mod_btn_118:visible',
+      '#confirmOK:visible',
+      '#dialogOK:visible',
+      '.jscDialogOk:visible',
+      '.mod_dialog a:has-text("登録する"):visible',
+      '.mod_popup_02 a:has-text("登録する"):visible',
       'a:has-text("はい"):visible',
       'button:has-text("はい"):visible',
     ].join(', ')).first();
@@ -2857,7 +2863,11 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const doneText = await page.locator('text=/登録しました|完了しました|受け付けました/').count().catch(() => 0);
   const looksDone = !stillOnForm || doneText > 0 || afterUrl !== beforeUrl;
   if (!looksDone) {
-    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl})`, 'UNKNOWN_ERROR', true);
+    const visibleMessage = await page.locator(
+      '.mod_box_warning:visible, #warningMessageArea:visible, .error:visible, .errorMessage:visible, #dragDialog:visible, .mod_dialog:visible',
+    ).allInnerTexts().catch(() => []);
+    const detail = visibleMessage.map((s) => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ').slice(0, 300);
+    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl}${detail ? `, message=${detail}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
   // 完了画面の一般文言だけでは成功としない。実際のスケジュールへ戻り、
