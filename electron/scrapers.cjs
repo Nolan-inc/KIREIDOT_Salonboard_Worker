@@ -2839,10 +2839,58 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   }
   const afterUrl = page.url();
   const stillOnForm = /scheduleRegist/i.test(afterUrl);
-  const doneText = await page.locator('text=/登録しました|完了しました|スケジュール/').count().catch(() => 0);
+  const doneText = await page.locator('text=/登録しました|完了しました|受け付けました/').count().catch(() => 0);
   const looksDone = !stillOnForm || doneText > 0 || afterUrl !== beforeUrl;
   if (!looksDone) {
     return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 完了画面の一般文言だけでは成功としない。実際のスケジュールへ戻り、
+  // 対象スタッフ列に「開始・終了・タイトル」が一致する予定が存在することを確認する。
+  // 以前は画面内の「スケジュール」という見出しだけでも成功になり、未登録を synced と
+  // 誤判定するケースがあった。
+  try {
+    const verifyUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+    verifyUrl.searchParams.set('date', ymd);
+    await page.goto(verifyUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 15_000 });
+  } catch (e) {
+    return fail(`予定登録後のスケジュール確認画面を開けません: ${e?.message ?? e}`, 'CONFIRMATION_MISMATCH', true);
+  }
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('予定登録後の確認時にreCAPTCHAが表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  const verified = await page.evaluate(
+    ({ staffExt, startTotal, endTotal, title }) => {
+      const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
+        const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
+        return m ? m[1].toUpperCase() : null;
+      });
+      const staffTable = document.querySelector('.jscScheduleMainTableStaff');
+      if (!staffTable) return { ok: false, reason: 'no_staff_table' };
+      const ext = String(staffExt || '').toUpperCase();
+      const staffIndex = heads.indexOf(ext);
+      if (staffIndex < 0) return { ok: false, reason: 'staff_not_found' };
+      const line = staffTable.querySelectorAll('.scheduleMainTableLine')[staffIndex];
+      if (!line) return { ok: false, reason: 'staff_line_not_found' };
+      for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
+        if (el.classList.contains('isDayOff')) continue;
+        const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
+        const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
+        if (!m) continue;
+        const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+        const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+        const actualTitle = (el.querySelector('.todoTitle')?.textContent || '').trim();
+        if (start === startTotal && end === endTotal && actualTitle === title) {
+          return { ok: true };
+        }
+      }
+      return { ok: false, reason: 'exact_schedule_not_found' };
+    },
+    { staffExt, startTotal, endTotal, title },
+  ).catch((e) => ({ ok: false, reason: `verify_exception:${e?.message ?? e}` }));
+  if (!verified?.ok) {
+    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'})`, 'CONFIRMATION_MISMATCH', true);
   }
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
 }
