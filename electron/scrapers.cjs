@@ -5897,13 +5897,13 @@ async function changeBookingViaForm(page, payload, opts = {}) {
 
   // 3) 時間・所要を更新。エステ(jsiRsvHour/Minute + jsiRsvTermHour/Minute) と
   //    美容室(rsvTime=HHMM + rsvTerm=分) の両フィールドを存在チェック付きでセットする。
+  const dMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
+    ? Number(p.duration_min)
+    : 60;
+  const thVal = String(Math.floor(dMin / 60) * 60);
+  const tmVal = String(dMin % 60).padStart(2, '0');
+  const hhmm = `${String(when.hour).padStart(2, '0')}${startMM}`;
   {
-    const dMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min)))
-      ? Number(p.duration_min)
-      : 60;
-    const thVal = String(Math.floor(dMin / 60) * 60);
-    const tmVal = String(dMin % 60).padStart(2, '0');
-    const hhmm = `${String(when.hour).padStart(2, '0')}${startMM}`;
     await page.evaluate(
       ({ hh, mm, th, tm, hhmm, dur }) => {
         const setSel = (el, val) => {
@@ -6041,9 +6041,35 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   let confirmClicked = false;
+  let primaryClicked = false;
+  let primaryClickError = '';
   try {
-    await submitBtn.click({ timeout: 12_000 }).catch(() => {});
-    await page.waitForTimeout(1500);
+    await submitBtn.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+    try {
+      await submitBtn.click({ timeout: 12_000 });
+      primaryClicked = true;
+    } catch (e1) {
+      primaryClickError = e1?.message || String(e1);
+      try {
+        await submitBtn.click({ timeout: 8_000, force: true });
+        primaryClicked = true;
+      } catch (e2) {
+        primaryClickError = `${primaryClickError} / force=${e2?.message || String(e2)}`;
+        try {
+          await submitBtn.evaluate((el) => el.click());
+          primaryClicked = true;
+        } catch (e3) {
+          primaryClickError = `${primaryClickError} / dom=${e3?.message || String(e3)}`;
+        }
+      }
+    }
+    if (!primaryClicked) {
+      const cap = await captureScrapeDebug(page, 'change', `submit_click_failed_${reserveId}`, {
+        diagnostics: { reserveId, primaryClickError, url: page.url() },
+      });
+      return fail(`変更ボタンを押せませんでした (${primaryClickError.slice(0, 300)}${cap ? `, capture=${cap}` : ''})`, 'UNKNOWN_ERROR', false);
+    }
+    await page.waitForTimeout(2500);
     // 「確定する」後に確認画面/ダイアログが出る場合があるので、最終確定ボタンを押す。
     //   ① HTMLダイアログ「はい」(a.accept) ② 確認画面の「登録する」(a#regist) / 「確定する」(a#change)
     // 時間超過警告(「予約時間を過ぎていますがよろしいですか？」)→確認画面 のように
@@ -6071,7 +6097,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   }
 
   let cap2 = await captureScrapeDebug(page, 'change', `after_${reserveId}`, {
-    diagnostics: { reserveId, confirmClicked, nativeDialogAccepted, normalizedHyphenFields, url: page.url() },
+    diagnostics: { reserveId, primaryClicked, primaryClickError, confirmClicked, nativeDialogAccepted, normalizedHyphenFields, url: page.url() },
   });
 
   // 5) 検証
@@ -6099,7 +6125,47 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return fail(`変更時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
   }
   if (!looksDone && !confirmClicked && !nativeDialogAccepted) {
-    return fail(`変更の完了を確認できませんでした (confirmClicked=${confirmClicked}${cap1 ? `, form=${cap1}` : ''}${cap2 ? `, after=${cap2}` : ''})。SalonBoard で状態を確認してください。`, 'UNKNOWN_ERROR', true);
+    // SalonBoard は保存後も完了文言を出さず詳細画面へ戻る場合がある。曖昧成功にせず、
+    // 一度 about:blank へ離れてサーバから変更フォームを再取得し、時刻・所要が保存済みか照合する。
+    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5_000 }).catch(() => {});
+    let persisted = false;
+    let persistedState = null;
+    for (const path of candidates) {
+      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForSelector(formSel, { timeout: 6_000 }).catch(() => {});
+      if ((await page.locator(formSel).count().catch(() => 0)) === 0) {
+        await openChangeFormFromDetail();
+      }
+      if ((await page.locator(formSel).count().catch(() => 0)) === 0) continue;
+      persistedState = await page.evaluate(({ wantHour, wantMinute, wantHhmm, wantDuration }) => {
+        const val = (sel) => document.querySelector(sel)?.value || '';
+        const estHour = val('#jsiRsvHour');
+        const estMinute = val('#jsiRsvMinute');
+        const estTermHour = Number(val('#jsiRsvTermHour') || 0);
+        const estTermMinute = Number(val('#jsiRsvTermMinute') || 0);
+        const hairTime = val('#rsvTime, select[name="time"]');
+        const hairTerm = Number(val('#rsvTermId, select[name="rsvTerm"]') || 0);
+        const estheticOk = !!estHour && Number(estHour) === Number(wantHour)
+          && Number(estMinute) === Number(wantMinute)
+          && estTermHour + estTermMinute === Number(wantDuration);
+        const hairOk = !!hairTime && hairTime.replace(':', '') === wantHhmm
+          && hairTerm >= Number(wantDuration);
+        return { estheticOk, hairOk, estHour, estMinute, estTermHour, estTermMinute, hairTime, hairTerm };
+      }, {
+        wantHour: String(when.hour),
+        wantMinute: startMM,
+        wantHhmm: hhmm,
+        wantDuration: dMin,
+      }).catch(() => null);
+      persisted = !!(persistedState?.estheticOk || persistedState?.hairOk);
+      break;
+    }
+    if (!persisted) {
+      const verifyCap = await captureScrapeDebug(page, 'change', `verify_failed_${reserveId}`, {
+        diagnostics: { reserveId, persistedState, primaryClicked, primaryClickError, url: page.url() },
+      });
+      return fail(`変更の保存を再読込で確認できませんでした (primaryClicked=${primaryClicked}, state=${JSON.stringify(persistedState)}${verifyCap ? `, capture=${verifyCap}` : ''})`, 'UNKNOWN_ERROR', false);
+    }
   }
   return { status: 'ok' };
 }

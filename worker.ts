@@ -1110,6 +1110,12 @@ async function handleJob(job: Job): Promise<void> {
         // 戻り/doLogin未完了は一時失敗としてジョブ全体を再試行する。
         const isAuthLike =
           /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
+        if (!isAuthLike) {
+          // 同じ出口でfresh loginを3回行っても改善しないため、次ジョブは別static ISPへ。
+          // 読み取りジョブでは既存のResidential自動退避も有効になる。固定待機はしない。
+          rotateAccountProxy(sessionKey);
+          noteLoginThrottle(job.shop_id);
+        }
         await report(
           {
             job_id: job.id,
@@ -2183,6 +2189,16 @@ type ResolvedLaunch = {
  */
 // プロキシIPプールの round-robin 割当て用カウンタ。
 let _proxyRrCounter = 0;
+// doLogin が完了しない静的ISP出口へアカウントが固定され続けないよう、ログイン全滅時に
+// 次のpoolへ進める。loginId+baseUrl の sessionKey 単位なのでグループ店舗でも共有される。
+const accountProxyRotation = new Map<string, number>();
+function rotateAccountProxy(sessionKey: string): void {
+  const pool = proxyPoolList();
+  if (pool.length <= 1) return;
+  const next = ((accountProxyRotation.get(sessionKey) ?? 0) + 1) % pool.length;
+  accountProxyRotation.set(sessionKey, next);
+  console.log(`[proxy] account=${sessionKey.slice(0, 12)} static ISPを次の出口へ切替 (${next + 1}/${pool.length})`);
+}
 // IP プール ヘルスチェック結果 (フラグ/到達不可IPを使わないためのバックオフ)。
 let _healthyProxies: string[] | null = null;
 let _lastProxyCheck = 0;
@@ -2580,10 +2596,11 @@ function pickProxy(
     let pick: string;
     const accountStickyKey = stickyKey ?? shopId;
     if (accountStickyKey) {
-      const stable = pool[hashShop(accountStickyKey) % pool.length];
+      const rotation = accountProxyRotation.get(accountStickyKey) ?? 0;
+      const stable = pool[(hashShop(accountStickyKey) + rotation) % pool.length];
       pick = healthy.includes(stable)
         ? stable
-        : healthy[hashShop(accountStickyKey) % healthy.length];
+        : healthy[(hashShop(accountStickyKey) + rotation) % healthy.length];
     } else {
       pick = healthy[_proxyRrCounter % healthy.length];
       _proxyRrCounter += 1;
@@ -2624,9 +2641,10 @@ function resolveLaunchOptions(
   const useResidential =
     (forceResidential || (!avoidResidential && shopPrefersResidential(shopId))) &&
     fallbackConfigured();
+  const hasRotatedAccount = !!stickyKey && (accountProxyRotation.get(stickyKey) ?? 0) > 0;
   const picked = useResidential
     ? pickProxy(forceResidential, shopId, undefined, stickyKey)
-    : credProxy?.server
+    : credProxy?.server && !hasRotatedAccount
     ? {
         server: credProxy.server,
         username: credProxy.username ?? undefined,
