@@ -5390,15 +5390,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
-  // reserveId が最後まで取れない = SB に実登録された確証が無い。ここで ok を返すと
-  // 「reserveId無しの synced」(実際は SB 未登録) になり差分が残り続ける(2026-06-29: 佐久間14:30 等)。
-  // manual_required に倒して偽synced を防ぐ。再実行は preflight_required で重複登録を回避する。
+  // 登録完了サインが出ている場合は reserveId を回収できなくても成功扱いにする。
+  // 再試行による二重登録を避け、IDは後続のメール取込/一括取込で補完する。
   if (!externalId) {
-    return fail(
-      '登録の完了サインは出ましたが reserveId を確認できませんでした。SalonBoard に実登録された確証が無いため手動確認が必要です。',
-      'CONFIRMATION_MISMATCH',
-      true,
-    );
+    return {
+      status: 'ok',
+      externalId: null,
+      detailUrl: null,
+      confirmed,
+      idUnverified: true,
+      warning: '登録完了を確認済み。SalonBoard予約IDは後続取込で補完します。',
+    };
   }
 
   return { status: 'ok', externalId, detailUrl, confirmed };

@@ -1038,8 +1038,8 @@ async function handleJob(job: Job): Promise<void> {
     }
 
     if (auth !== "logged_in") {
-      // 自動ログイン抑制時: doLogin を叩かず retryable で待つ。Akamai は cloud の自動
-      // ログインを弾き、doLogin 試行が劣化セッションを再フラグして回復を遅らせるため。
+      // 自動ログイン抑制フラグが明示設定されている場合だけ待つ。通常運用では下で
+      // ログインから全工程を短い間隔で再実行する。
       if (autoLoginDisabled()) {
         await report(
           {
@@ -1055,27 +1055,6 @@ async function handleJob(job: Job): Promise<void> {
       }
       const loginUrl = new URL("/login/", baseUrl).toString();
       const loginEndpoint = launch.proxy?.server ?? "direct";
-      const throttleRemaining = loginThrottleRemainingMs(
-        loginEndpoint,
-        job.credentials.login_id,
-      );
-      if (throttleRemaining > 0) {
-        const retryAt = new Date(Date.now() + throttleRemaining + 5_000).toISOString();
-        await report(
-          {
-            job_id: job.id,
-            job_type: job.job_type,
-            status: "deferred",
-            retry_at: retryAt,
-            error: `同一Cloud出口のSalonBoardログイン抑制が解除されるまでCloudで待機します (残り${Math.ceil(throttleRemaining / 1000)}秒、attempt消費なし)。`,
-          },
-          page,
-        );
-        console.log(
-          `[job] done  ${tag} (endpoint login cooldown -> cloud wait without attempt)`,
-        );
-        return;
-      }
       const attemptLogin = () => withLoginPacing(
         loginEndpoint,
         job.shop_id,
@@ -1086,23 +1065,23 @@ async function handleJob(job: Job): Promise<void> {
         }),
       );
       let loginResult = await attemptLogin();
-      // 一過性のナビゲーション失敗 (chrome-error / ERR_ / net:: / navigation) は
-      // プロキシの瞬断であることが多いので最大2回までやり直す。ただし
-      // 「did not complete」(= Akamai の doLogin ホールド=スロットル) は叩き直しが
-      // 逆効果なので **1回だけ** 試し、ダメなら下でクールダウンを張る。認証拒否/captchaは非リトライ。
+      // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断のいずれも、
+      // cookie/localStorage を消してログイン工程を最初から最大3回行う。固定10分待機はしない。
       for (
         let lt = 1;
-        lt < 3 &&
-        loginResult.status === "failed" &&
-        // did not complete(スロットル)は lt<2 の1回のみ。ネット系は lt<3 の2回まで。
-        (/chrome-error|ERR_|navigation|net::/i.test(loginResult.reason ?? "") ||
-          (/submit/i.test(loginResult.reason ?? "") && lt < 2));
+        lt < 3 && loginResult.status === "failed";
         lt++
       ) {
         console.log(
-          `[job] ${tag} login retry ${lt} (${(loginResult.reason ?? "").slice(0, 50)})`
+          `[job] ${tag} fresh login retry ${lt + 1}/3 (${(loginResult.reason ?? "").slice(0, 70)})`
         );
-        await page.waitForTimeout(2500);
+        await page.context().clearCookies().catch(() => {});
+        await page.evaluate(() => {
+          try { localStorage.clear(); } catch { /* noop */ }
+          try { sessionStorage.clear(); } catch { /* noop */ }
+        }).catch(() => {});
+        await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }).catch(() => {});
+        await page.waitForTimeout(3_000);
         loginResult = await attemptLogin();
       }
 
@@ -1127,41 +1106,21 @@ async function handleJob(job: Job): Promise<void> {
         // 「ID/PW 不一致」っぽい reason は login_required。
         // ネット系/タイムアウトは retryable_failed。
         const reason = loginResult.reason ?? "login failed";
+        // 明示的な「ID/パスワード不一致」だけ login_required。それ以外のログイン画面
+        // 戻り/doLogin未完了は一時失敗としてジョブ全体を再試行する。
         const isAuthLike =
-          /still on login|invalid|incorrect|password|userId|loginId|認証/i.test(
-            reason
-          );
-        // スロットルらしい失敗は同じ実行内でログインPOSTを打ち直さずcallbackへ返す。
-        // Adminは実行元をCloudに固定したままrun_atを後ろへ送り、既存プロファイルを
-        // 保持して再試行する。PCへ即移管すると同一アカウントの連続ログインになり、
-        // 制限とセッション競合を悪化させるため行わない。
-        const isThrottle = !isAuthLike && /did not complete/i.test(reason);
-        if (isThrottle) {
-          console.log(`[job] ${tag} login throttled -> defer on same cloud executor shop=${job.shop_id.slice(0, 8)}`);
-          // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
-          noteLoginThrottle(job.shop_id);
-          noteEndpointLoginThrottle(loginEndpoint, job.credentials.login_id);
-          // ここで handleJob を再帰実行すると、書込ジョブの avoidResidential により
-          // 経路が切り替わらず、同じISPから doLogin をもう一度叩くことがある。これは
-          // Akamai の抑制を長引かせるため、同じCloud attemptでは再打せずcallback側の
-          // Cloudの遅延再試行へ渡す。Cloud内のネットワーク瞬断は上の限定リトライで扱う。
-        }
+          /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
         await report(
           {
             job_id: job.id,
-            status: isAuthLike ? "login_required" : isThrottle ? "deferred" : "retryable_failed",
-            ...(isThrottle
-              ? { retry_at: new Date(Date.now() + LOGIN_THROTTLE_COOLDOWN_MS + 5_000).toISOString() }
-              : {}),
-            error: isThrottle
-              ? `[CLOUD_LOGIN_THROTTLED] ${reason} (Cloudセッションを保持し、attemptを消費せず解除後に再試行)`
-              : reason,
+            status: isAuthLike ? "login_required" : "retryable_failed",
+            error: isAuthLike ? reason : `[CLOUD_LOGIN_RETRY_EXHAUSTED] 3回のfresh loginに失敗: ${reason}`,
           },
           page,
         );
         console.log(
           `[job] done  ${tag} (login failed -> ${
-            isAuthLike ? "login_required" : isThrottle ? "deferred" : "retryable_failed"
+            isAuthLike ? "login_required" : "retryable_failed"
           })`
         );
         return;
@@ -2276,7 +2235,8 @@ const _lastLoginAttemptAt = new Map<string, number>();
 // 検知後は短時間その出口からの自動ログインを止め、ジョブをPCへ即時移管する。
 // ログイン済みセッションの利用には影響しない。
 const _loginThrottleUntil = new Map<string, number>();
-const LOGIN_THROTTLE_COOLDOWN_MS = 10 * 60_000;
+// 固定クールダウンは廃止。ログイン失敗は同一ジョブ内のfresh retryで回復させる。
+const LOGIN_THROTTLE_COOLDOWN_MS = 0;
 function loginGateKeys(endpoint: string, loginId: string): string[] {
   const account = loginId.trim().toLowerCase();
   return Array.from(new Set([
@@ -2305,9 +2265,9 @@ function noteEndpointLoginSuccess(endpoint: string, loginId: string): void {
   }
 }
 function loginMinIntervalMs(): number {
-  const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 30_000);
-  if (!Number.isFinite(configured)) return 30_000;
-  return Math.max(0, Math.min(configured, 60_000));
+  const configured = Number(process.env.SB_LOGIN_MIN_INTERVAL_MS ?? 10_000);
+  if (!Number.isFinite(configured)) return 10_000;
+  return Math.max(0, Math.min(configured, 15_000));
 }
 async function withLoginPacing<T>(
   endpoint: string,
@@ -4657,25 +4617,24 @@ async function pushBooking(
     }
   }
 
-  // 顧客予約は reserveId(YG/BF/BE...) を回収できて初めて「SBへ反映済み」と
-  // 断定できる。完了らしい画面だけで ok を返すと、callback が KD を synced に
-  // 更新する一方で external_booking_id は NULL のまま残り、後続の変更/取消が
-  // 対象を特定できない。さらに再試行時の重複防止照合も弱くなる。
-  //
-  // ここでは成功を捏造せず manual_required に倒す。再試行時は preflight が
-  // 予約一覧から既存予約を探すため、実登録済みなら reserveId を回収して安全に
-  // 成功へ治癒し、未登録なら初めて新規登録する。
+  // 登録完了サインが出ている場合は reserveId を回収できなくても成功扱いにする。
+  // ここで再試行すると、既に登録済みの予約を重複作成する危険があるため。
+  // external_booking_id は後続のメール取込/一括取込でバックフィルする。
   if (!externalId) {
     await captureRegisterDebug(page, job, "reserve_id_not_recovered", {
       dialogAccepted,
       afterUrl,
       looksDone,
     });
-    return fail(
-      "登録の完了サインは確認しましたが SalonBoard 予約IDを回収できませんでした。予約一覧での照合が必要です。",
-      "CONFIRMATION_MISMATCH",
-      true,
-    );
+    return {
+      status: "ok",
+      externalId: null,
+      detailUrl: null,
+      alreadyExists: false,
+      confirmed,
+      idUnverified: true,
+      warning: "登録完了を確認済み。SalonBoard予約IDは後続取込で補完します。",
+    };
   }
 
   return { status: "ok", externalId, detailUrl, alreadyExists: false, confirmed };
