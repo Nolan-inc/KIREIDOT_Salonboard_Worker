@@ -102,8 +102,16 @@ begin
   should_fallback :=
     new.executor = 'playwright_cloud'
     and new.job_type in ('push_booking', 'cancel_booking')
-    and new.attempts >= new.max_attempts
-    and new.status in ('retryable_failed', 'failed', 'queued');
+    and (
+      new.status = 'failed'
+      or (
+        new.status = 'queued'
+        and (
+          new.attempts >= new.max_attempts
+          or coalesce(new.error, '') like '%[IMAGE_AUTH_REQUIRED]%'
+        )
+      )
+    );
 
   if not should_fallback then return new; end if;
 
@@ -128,14 +136,22 @@ begin
     update public.salonboard_sync_jobs
        set status = 'queued',
            executor = 'playwright',
+           payload = coalesce(payload, '{}'::jsonb) || jsonb_build_object(
+             'pc_fallback', true,
+             'pc_fallback_at', now(),
+             'pc_fallback_from', 'playwright_cloud'
+           ),
            attempts = 0,
            max_attempts = greatest(max_attempts, 3),
            run_at = now(),
            completed_at = null,
            locked_at = null,
            locked_by = null,
-           error = '[CLOUD_PC_FALLBACK] Cloud規定回数失敗のためPC workerへ移管: '
-             || coalesce(new.error, '詳細なし')
+           error = case
+             when coalesce(new.error, '') like '%[IMAGE_AUTH_REQUIRED]%'
+               then '[CLOUD_PC_FALLBACK] CloudでSalonBoard画像認証を検知したためPC workerへ即時移管: '
+             else '[CLOUD_PC_FALLBACK] Cloud処理が終端失敗したためPC workerへ移管: '
+           end || coalesce(new.error, '詳細なし')
      where id = new.id;
   end if;
   return new;
@@ -149,6 +165,82 @@ for each row
 when (
   new.executor = 'playwright_cloud'
   and new.job_type in ('push_booking', 'cancel_booking')
-  and new.status in ('retryable_failed', 'failed', 'queued')
+  and new.status in ('failed', 'queued')
 )
 execute function public.salonboard_force_cloud_failure_fallback();
+
+-- The callback replaces error with the latest PC attempt error.  Therefore the
+-- fallback marker must not live only in error text: the legacy stale-PC rescue
+-- would otherwise mistake it for a normal desktop job and send it back to Cloud.
+create or replace function public.salonboard_reroute_stale_pc_writes()
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $function$
+declare
+  v_n integer := 0;
+begin
+  update public.salonboard_sync_jobs j
+     set executor = 'playwright_cloud',
+         updated_at = now()
+    from public.salonboard_credentials c
+   where c.shop_id = j.shop_id
+     and c.enabled = true
+     and j.status = 'queued'
+     and j.executor = 'playwright'
+     and j.job_type in (
+       'push_booking', 'cancel_booking', 'push_blog', 'delete_blog',
+       'push_review_reply', 'push_shifts', 'push_staff', 'push_menu',
+       'push_coupon', 'push_equipment', 'push_shift_patterns',
+       'push_acceptance', 'fetch_shift_patterns'
+     )
+     and j.created_at < now() - interval '45 seconds'
+     and coalesce(j.error, '') not like '%[CLOUD_PC_FALLBACK]%'
+     and coalesce(j.payload->>'pc_fallback', 'false') <> 'true';
+  get diagnostics v_n = row_count;
+  return v_n;
+end;
+$function$;
+
+revoke all on function public.salonboard_reroute_stale_pc_writes() from public;
+
+-- Defense in depth: keep an intentional fallback on PC even if an older API
+-- or maintenance function attempts to change only the executor back to Cloud.
+create or replace function public.salonboard_preserve_pc_fallback_executor()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $function$
+begin
+  if old.executor = 'playwright'
+     and coalesce(old.payload->>'pc_fallback', 'false') = 'true'
+     and new.executor = 'playwright_cloud'
+  then
+    new.executor := 'playwright';
+    new.payload := coalesce(new.payload, old.payload, '{}'::jsonb)
+      || jsonb_build_object('pc_fallback', true);
+  end if;
+  return new;
+end;
+$function$;
+
+drop trigger if exists trg_preserve_pc_fallback_executor
+  on public.salonboard_sync_jobs;
+create trigger trg_preserve_pc_fallback_executor
+before update of executor on public.salonboard_sync_jobs
+for each row
+execute function public.salonboard_preserve_pc_fallback_executor();
+
+-- Backfill the active incident job that was moved before the durable payload
+-- marker existed.  The predicate is intentionally narrow and idempotent.
+update public.salonboard_sync_jobs
+   set payload = coalesce(payload, '{}'::jsonb) || jsonb_build_object(
+         'pc_fallback', true,
+         'pc_fallback_at', now(),
+         'pc_fallback_from', 'playwright_cloud'
+       )
+ where id = '9036b44b-0c40-4ebc-934a-a60b0e5c8c27'::uuid
+   and executor = 'playwright'
+   and status in ('queued', 'running');

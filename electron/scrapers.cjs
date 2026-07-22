@@ -3268,7 +3268,12 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
     }).catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
     diag.tried.push({ salonSelect: selected, url: page.url().replace('https://salonboard.com', '') });
     if (!selected.ok) {
-      const err = new Error(`グループ店舗のサロン選択に失敗しました (${selected.reason || 'unknown'})`);
+      const capture = await captureScrapeDebug(page, 'shift-patterns', 'group_salon_selection_failed', {
+        diagnostics: { salonId: opts.salonId, shopName: opts.shopName, selected, tried: diag.tried },
+      }).catch(() => null);
+      const err = new Error(
+        `グループ店舗のサロン選択に失敗しました (${selected.reason || 'unknown'}${capture ? `, capture=${capture}` : ''})`,
+      );
       err.code = 'GROUP_SALON_SELECTION_FAILED';
       err.diag = diag;
       throw err;
@@ -9092,13 +9097,28 @@ async function ensureSalonSelected(page, opts = {}) {
         hasMgmt: /予約管理|掲載管理/.test(body),
         hasPassword: !!document.querySelector('input[type="password"]'),
         errored: /システムエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(body),
+        title: document.title || '',
+        excerpt: body.slice(0, 160),
       };
-    }).catch(() => ({ hasMgmt: false, hasPassword: true, errored: true }));
+    }).catch(() => ({ hasMgmt: false, hasPassword: true, errored: true, title: '', excerpt: '' }));
     if (!/\/CLP\/bt\/top\/?$/i.test(page.url()) || !context.hasMgmt || context.hasPassword || context.errored) {
+      // グループ選択POSTが一見成功しても、セッション反映前の遷移競合で
+      // 「サロンが選択されていません」へ着地する個体がある。対象Hコードを
+      // groupTopからもう一度選び直し、管理TOPの肯定確認まで全工程を再実行する。
+      if (!opts._hairContextRetry) {
+        const groupTop = new URL('/CNC/groupTop/', opts.baseUrl || 'https://salonboard.com/').toString();
+        await page.goto(groupTop, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        await page.waitForSelector('a[id^="H"]', { timeout: 8_000 }).catch(() => {});
+        const retried = await ensureSalonSelected(page, {
+          ...opts,
+          _hairContextRetry: true,
+        }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
+        if (retried.ok && retried.selected) return retried;
+      }
       return {
         ok: false,
         selected: false,
-        reason: `hair_context_not_established(url=${page.url()})`,
+        reason: `hair_context_not_established(url=${page.url()},title=${context.title},hasMgmt=${context.hasMgmt},errored=${context.errored},excerpt=${context.excerpt})`,
         salonId: target.id,
       };
     }
