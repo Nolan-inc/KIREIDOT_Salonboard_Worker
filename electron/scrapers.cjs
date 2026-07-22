@@ -3300,6 +3300,9 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   const enablePush = !!opts.enablePush;
   const p = payload || {};
   const readOnly = p.read_only === true;
+  // authoritative=true は KIREIDOT を唯一の正として月全体を収束させるジョブ。
+  // この場合、KDで休日/欠損の日はSBも休日へ戻すため、大量休化ガードを適用しない。
+  const authoritative = p.authoritative === true;
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
   const month = String(p.month || '');
@@ -3879,7 +3882,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   //   保留し、出勤の追加/更新だけ反映して警告する(=SBの実シフトを消さない)。
   const offClearDays = plans.reduce((n, pl) => n + (pl.kind === 'off' ? pl.days.length : 0), 0);
   const MAX_CLEAR = Number(process.env.SB_SHIFT_MAX_CLEAR ?? 12);
-  if (offClearDays > MAX_CLEAR) {
+  if (!authoritative && offClearDays > MAX_CLEAR) {
     const detail = plans
       .filter((pl) => pl.kind === 'off' && pl.days.length)
       .map((pl) => `${pl.staffName}:${pl.days.length}日`)
@@ -3895,6 +3898,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
 
   console.log('[SHIFT-B] plan totalChanges=' + totalChanges + ' skipped=' + skipped
     + ' plans=' + plans.length + ' custom=' + customPlans.length
+    + ' authoritative=' + authoritative
     + ' cellsSample=' + JSON.stringify(Object.entries(cells).slice(0, 6))
     + ' warn=' + JSON.stringify(warnings.slice(0, 10)));
   if (totalChanges === 0) {
