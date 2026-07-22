@@ -283,13 +283,15 @@ const INFRA_TRANSIENT_ERROR_CODES = new Set<string>([
   "SB_SERVER_ERROR",
   "SB_REGISTER_INCOMPLETE",
 ]);
-function isInfraTransientError(code?: string | null): boolean {
-  return !!code && INFRA_TRANSIENT_ERROR_CODES.has(code);
+function isInfraTransientError(code?: string | null, reason?: string | null): boolean {
+  if (code && INFRA_TRANSIENT_ERROR_CODES.has(code)) return true;
+  return /login did not complete|ERR_HTTP_RESPONSE_CODE_FAILURE|再度操作しなおしてください|システムエラー|予定の登録完了を確認できません|exact_schedule_not_found|予定登録後の実在確認に失敗|削除操作後もスケジュール上に予定が残っています|フォームに到達できません|登録ボタンが見つかりません|並び順が保存されません|保存を確認できません|timeout|タイムアウト|navigation|net::/i.test(
+    reason ?? "",
+  );
 }
 
-// Cloudで失敗したジョブはcallback側で即PCへ移すため、worker内で店舗を
-// 20〜45分停止するログインクールダウンは持たない。失敗はその場で報告し、
-// 別executorへ切り替えることで「待って回復」を予約処理から排除する。
+// ログイン制限は同じCloud出口からPOSTを重ねるほど悪化する。検知後はendpoint単位の
+// 解除時刻までログインPOSTを止め、callbackへdeferredを返してattemptを消費せず待つ。
 
 /**
  * ★店舗単位 自動フェイルオーバー (ISP → Residential, 2026-07-09):
@@ -540,6 +542,7 @@ type ScrapedBooking = {
  */
 type CallbackStatus =
   | "succeeded"
+  | "deferred"
   | "retryable_failed"
   | "non_retryable_failed"
   | "login_required"
@@ -558,6 +561,7 @@ type CallbackBody = {
   sales?: unknown;
   external_id?: string;
   block?: { until: string; reason: string };
+  retry_at?: string;
   // 失敗時の「直前画面」スクショ(base64 PNG)。Admin が Storage へ保存し Slack 通知に添付する。
   error_capture_b64?: string;
 
@@ -835,8 +839,8 @@ async function reportScraperResult(
   const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
   // 一過性インフラ失敗(500着地/doComplete未確定)は上限超過でも manual に昇格させず
   // retryable のまま維持する(Akamai 回復後の自動再投入に委ねる)。実枠競合や要素未検出は従来どおり。
-  const infraTransient = isInfraTransientError(result.errorCode);
-  const toManual = !!result.manualRequired || (exhausted && !infraTransient);
+  const infraTransient = isInfraTransientError(result.errorCode, result.reason);
+  const toManual = !infraTransient && (!!result.manualRequired || exhausted);
   await report(
     {
       job_id: job.id,
@@ -1056,17 +1060,19 @@ async function handleJob(job: Job): Promise<void> {
         job.credentials.login_id,
       );
       if (throttleRemaining > 0) {
+        const retryAt = new Date(Date.now() + throttleRemaining + 5_000).toISOString();
         await report(
           {
             job_id: job.id,
             job_type: job.job_type,
-            status: "retryable_failed",
-            error: `同一Cloud出口でSalonBoardログイン制限を検知済みのため、ログインPOSTを再送せずPCへ移管します (残り${Math.ceil(throttleRemaining / 1000)}秒)。`,
+            status: "deferred",
+            retry_at: retryAt,
+            error: `同一Cloud出口のSalonBoardログイン抑制が解除されるまでCloudで待機します (残り${Math.ceil(throttleRemaining / 1000)}秒、attempt消費なし)。`,
           },
           page,
         );
         console.log(
-          `[job] done  ${tag} (endpoint login cooldown -> executor fallback)`,
+          `[job] done  ${tag} (endpoint login cooldown -> cloud wait without attempt)`,
         );
         return;
       }
@@ -1143,16 +1149,19 @@ async function handleJob(job: Job): Promise<void> {
         await report(
           {
             job_id: job.id,
-            status: isAuthLike ? "login_required" : "retryable_failed",
+            status: isAuthLike ? "login_required" : isThrottle ? "deferred" : "retryable_failed",
+            ...(isThrottle
+              ? { retry_at: new Date(Date.now() + LOGIN_THROTTLE_COOLDOWN_MS + 5_000).toISOString() }
+              : {}),
             error: isThrottle
-              ? `[CLOUD_LOGIN_THROTTLED] ${reason} (ログインPOSTを再送せずCloudで遅延再試行)`
+              ? `[CLOUD_LOGIN_THROTTLED] ${reason} (Cloudセッションを保持し、attemptを消費せず解除後に再試行)`
               : reason,
           },
           page,
         );
         console.log(
           `[job] done  ${tag} (login failed -> ${
-            isAuthLike ? "login_required" : "retryable_failed"
+            isAuthLike ? "login_required" : isThrottle ? "deferred" : "retryable_failed"
           })`
         );
         return;
@@ -2224,6 +2233,29 @@ let _lastProxyCheck = 0;
 // 保証するので、ここでは「プロセス全体の同時実行数」だけを上限管理する。別店舗(=別ISP
 // IP/別セッション)は安全に並行可能(店舗→IPは pickProxy で sticky)。
 const _inFlight = new Map<string, Promise<unknown>>();
+// SalonBoard は1ログインで複数店舗を持つ。DB の per-shop lane だけでは同じ
+// ログインIDの店舗が並列実行され、サロン選択・フォーム状態・Cookie を奪い合う。
+// Cloud worker 内ではログインアカウント単位で必ず直列化する。
+const _accountJobTail = new Map<string, Promise<void>>();
+
+async function withAccountJobGate<T>(job: Job, fn: () => Promise<T>): Promise<T> {
+  const key = sessionKeyFor(
+    job.credentials.login_id,
+    job.credentials.base_url ?? "https://salonboard.com/",
+  );
+  const previous = _accountJobTail.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => {}).then(() => mine);
+  _accountJobTail.set(key, tail);
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (_accountJobTail.get(key) === tail) _accountJobTail.delete(key);
+  }
+}
 // ★②A(セッション保護): 現在開いている全 BrowserContext を追跡する。デプロイ(SIGTERM)時に
 //   これらを明示 close して cookie/_abck を userDataDir に flush する。docker の SIGKILL で
 //   Chrome を強制killするとセッションが未flush → 次起動で全店再ログイン → Akamaiスロットル、
@@ -4876,7 +4908,7 @@ async function pollOnce(): Promise<number> {
   for (const job of jobs) {
     // await しない: 別店舗レーンを並行処理。handleJobGuarded は必ず callback を返し、
     // 例外も内部で握って running を解除する(取りこぼし防止)。
-    const p = handleJobGuarded(job)
+    const p = withAccountJobGate(job, () => handleJobGuarded(job))
       .catch((e) =>
         console.error(`[job] guarded uncaught ${job.id.slice(0, 8)}: ${e}`)
       )
@@ -4897,9 +4929,8 @@ const READ_JOB_SAFETY_TIMEOUT_MS = Number(
     process.env.SB_JOB_TIMEOUT_MS ??
     10 * 60_000,
 );
-// cloud の予約書込は、顧客操作から長時間待たせない。150秒を超えた場合は当該
-// Chrome を停止して callback に専用マーカーを返し、Admin が同じジョブの
-// executor を playwright(店舗PC)へ切り替える。PC worker 自身にはこの上限を適用しない。
+// cloud の予約書込は、顧客操作から長時間待たせない。上限を超えた場合は当該
+// Chrome を停止し、同じCloud executorで全工程を再実行する。
 const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
   process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 150_000,
 );
@@ -4945,14 +4976,11 @@ async function handleJobGuarded(job: Job): Promise<void> {
       } catch {
         /* 生きていなければ no-op */
       }
-      const fallbackToPc = isCloudWorker() && isBookingWrite(job);
       await report({
         job_id: job.id,
         job_type: job.job_type,
         status: "retryable_failed",
-        error: fallbackToPc
-          ? `[CLOUD_PC_FALLBACK] cloud処理が${secs}秒以内に完了しなかったため停止し、PC workerへ移管します`
-          : `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため打ち切りました(自動再試行)`,
+        error: `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため停止しました。同じCloudで全工程を自動再試行します`,
       }).catch(() => {});
     }
   } catch (e) {

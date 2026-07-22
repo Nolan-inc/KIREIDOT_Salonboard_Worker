@@ -2679,6 +2679,39 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
 //     - メモ:       input[name=schMemo]  (最大100)
 //     - 登録:       a#regist
 // =====================================================================
+// スケジュール画面 (salonSchedule) の対象スタッフ列から「開始・終了・タイトル」が一致する
+// 予定ブロックを探す (page.evaluate 用)。予定は reserveId を持たず一覧からも読めないため、
+// 登録前の冪等チェックと登録後の実在確認の両方でこの関数を使う。
+// 戻り値 blocks には対象スタッフ列の全予定を入れ、失敗診断 (何が実在するか) に使う。
+function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
+  const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
+    const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
+    return m ? m[1].toUpperCase() : null;
+  });
+  const staffTable = document.querySelector('.jscScheduleMainTableStaff');
+  if (!staffTable) return { ok: false, reason: 'no_staff_table', blocks: [] };
+  const ext = String(staffExt || '').toUpperCase();
+  const staffIndex = heads.indexOf(ext);
+  if (staffIndex < 0) return { ok: false, reason: 'staff_not_found', blocks: [] };
+  const line = staffTable.querySelectorAll('.scheduleMainTableLine')[staffIndex];
+  if (!line) return { ok: false, reason: 'staff_line_not_found', blocks: [] };
+  const blocks = [];
+  let found = false;
+  for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
+    if (el.classList.contains('isDayOff')) continue;
+    const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
+    const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
+    if (!m) continue;
+    const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+    const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
+    blocks.push({ start, end, title: actualTitle });
+    if (start === startTotal && end === endTotal && actualTitle === norm(title)) found = true;
+  }
+  return found ? { ok: true, reason: null, blocks } : { ok: false, reason: 'exact_schedule_not_found', blocks };
+}
+
 async function pushScheduleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -2733,6 +2766,23 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  }
+
+  // 再試行時の二重登録防止。前回の登録が成功したのに完了画面/実在確認だけ失敗した
+  // ケースでは、ここで既存予定を検出して冪等成功にする。
+  const existing = await page.evaluate(findScheduleBlockInPage, {
+    staffExt: p.salonboard_staff_external_id,
+    startTotal,
+    endTotal,
+    title,
+  }).catch(() => null);
+  if (existing?.ok) {
+    return {
+      status: 'ok',
+      externalId: null,
+      alreadyExists: true,
+      confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
+    };
   }
 
   // (2) 予約登録フォームを開く (予約と同じ URL + パラメータ)。
@@ -2804,6 +2854,36 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     { ext: staffExt, hh: startHH, mm: startMM, eh: endHH, em: endMM, title, memo, ymd, dispDate },
   ).catch(() => {});
 
+  // ★入力の読み戻し検証: setSel は該当 option が無いと黙って何もしないため、
+  //   そのまま登録すると「既定スタッフ/既定日/既定時刻への誤登録」になる
+  //   (同時刻でスタッフによって成否が分かれた 2026-07-22 の失敗パターン)。
+  //   実フォーム値が意図と一致することを確認してから登録する。
+  const formState = await page.evaluate(() => ({
+    date: document.querySelector('input[name="date"]')?.value || '',
+    staffId: document.querySelector('select[name="staffId"]')?.value || '',
+    staffOptions: Array.from(document.querySelector('select[name="staffId"]')?.options || [])
+      .map((o) => o.value).filter(Boolean).slice(0, 40),
+    hh: document.querySelector('#jsiRsvHour')?.value || '',
+    mm: document.querySelector('#jsiRsvMinute')?.value || '',
+    eh: document.querySelector('#jsiSchEndHour')?.value || '',
+    em: document.querySelector('#jsiSchEndMinute')?.value || '',
+    title: document.querySelector('input[name="schTitle"]')?.value || '',
+  })).catch(() => null);
+  const timeMismatch = formState && (
+    Number(formState.hh) !== when.hour || Number(formState.mm) !== when.minute
+    || Number(formState.eh) !== endHour || Number(formState.em) !== endMin
+  );
+  if (!formState || formState.staffId !== staffExt || formState.date !== ymd || timeMismatch) {
+    const cap = await captureScrapeDebug(page, 'schedule', `form_mismatch_${ymd}_${staffExt}`, {
+      diagnostics: { expected: { staffExt, ymd, startHH, startMM, endHH, endMM, title }, formState },
+    });
+    const why = !formState ? 'フォーム値を読めません'
+      : formState.staffId !== staffExt ? `スタッフ不一致 (form=${formState.staffId || '(空)'} 期待=${staffExt}。選択肢に無い場合はSB側の掲載/在籍状態を確認)`
+      : formState.date !== ymd ? `対象日不一致 (form=${formState.date || '(空)'} 期待=${ymd})`
+      : `時刻不一致 (form=${formState.hh}:${formState.mm}-${formState.eh}:${formState.em} 期待=${startHH}:${startMM}-${endHH}:${String(endMin).padStart(2, '0')})`;
+    return fail(`予定登録フォームの値が意図と一致しないため登録を中止しました (${why}${cap ? `, capture=${cap}` : ''})`, 'CONFIRMATION_MISMATCH', true);
+  }
+
   if (!enablePush) {
     return { status: 'confirm_only', confirmed: { confirmed_scheduled_at: p.scheduled_at, title } };
   }
@@ -2867,7 +2947,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       '.mod_box_warning:visible, #warningMessageArea:visible, .error:visible, .errorMessage:visible, #dragDialog:visible, .mod_dialog:visible',
     ).allInnerTexts().catch(() => []);
     const detail = visibleMessage.map((s) => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ').slice(0, 300);
-    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl}${detail ? `, message=${detail}` : ''})`, 'UNKNOWN_ERROR', true);
+    const capA = await captureScrapeDebug(page, 'schedule', `no_complete_${ymd}_${staffExt}`, {
+      diagnostics: { dialogAccepted, afterUrl, formState, detail },
+    });
+    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl}${detail ? `, message=${detail}` : ''}${capA ? `, capture=${capA}` : ''})`, 'UNKNOWN_ERROR', true);
   }
 
   // 完了画面の一般文言だけでは成功としない。実際のスケジュールへ戻り、
@@ -2886,36 +2969,14 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail('予定登録後の確認時にreCAPTCHAが表示されました', 'RECAPTCHA_REQUIRED', true);
   }
   const verified = await page.evaluate(
-    ({ staffExt, startTotal, endTotal, title }) => {
-      const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
-        const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
-        return m ? m[1].toUpperCase() : null;
-      });
-      const staffTable = document.querySelector('.jscScheduleMainTableStaff');
-      if (!staffTable) return { ok: false, reason: 'no_staff_table' };
-      const ext = String(staffExt || '').toUpperCase();
-      const staffIndex = heads.indexOf(ext);
-      if (staffIndex < 0) return { ok: false, reason: 'staff_not_found' };
-      const line = staffTable.querySelectorAll('.scheduleMainTableLine')[staffIndex];
-      if (!line) return { ok: false, reason: 'staff_line_not_found' };
-      for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
-        if (el.classList.contains('isDayOff')) continue;
-        const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
-        const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
-        if (!m) continue;
-        const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-        const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
-        const actualTitle = (el.querySelector('.todoTitle')?.textContent || '').trim();
-        if (start === startTotal && end === endTotal && actualTitle === title) {
-          return { ok: true };
-        }
-      }
-      return { ok: false, reason: 'exact_schedule_not_found' };
-    },
+    findScheduleBlockInPage,
     { staffExt, startTotal, endTotal, title },
   ).catch((e) => ({ ok: false, reason: `verify_exception:${e?.message ?? e}` }));
   if (!verified?.ok) {
-    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'})`, 'CONFIRMATION_MISMATCH', true);
+    const blocks = Array.isArray(verified?.blocks)
+      ? verified.blocks.slice(0, 8).map((b) => `${b.start}-${b.end}:${b.title}`).join(',')
+      : '';
+    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''})`, 'CONFIRMATION_MISMATCH', true);
   }
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
 }
@@ -10686,6 +10747,16 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   const sortNo = p.sort_no ?? p.sortNo ?? null;
   const pickup = p.pickup ?? p.pickup_flg ?? null;
 
+  // グループアカウントは掲載管理へ入る前に対象サロンを明示選択する。
+  // /CNK/draft/staffList へ直行すると「サロンが選択されていません」になる。
+  if (opts.salonId) {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+    if (!selected?.ok) {
+      return fail(`グループ店舗のサロン選択に失敗 (${selected?.reason || 'unknown'})`, 'SALON_SELECTION_FAILED', false);
+    }
+  }
+
   await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
@@ -11140,14 +11211,20 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
   const listUrl = genre === 'hair' ? '/CNB/draft/stylistList/' : '/CNK/draft/staffList';
 
+  // グループ店舗はジャンルに関係なく先にサロンを選択する。従来は hair のみで、
+  // エステ系グループ(マグサロン等)が「サロンが選択されていません」になっていた。
+  if (opts.salonId) {
+    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+    if (!selected?.ok) {
+      return fail(`グループ店舗のサロン選択に失敗 (${selected?.reason || 'unknown'})`, 'SALON_SELECTION_FAILED', false);
+    }
+  }
+
   // staffList/stylistList → 該当行の 編集画面 へ遷移
   if (genre === 'hair') {
     // ★hair掲載スタイリスト一覧はサロン未選択だと「ユーザエラー」で空になる(count=0)。
     //   動く scrapeStylists と同様 groupTop→サロン選択→一覧 の順で入り、跳ね返り時は再選択して入り直す。
-    if (opts.salonId) {
-      await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-    }
     await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => ({ selected: false }));
