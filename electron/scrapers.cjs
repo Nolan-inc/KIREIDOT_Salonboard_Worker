@@ -3246,7 +3246,7 @@ async function changeScheduleViaForm(page, payload, opts = {}) {
 // 選択時の #shiftTextBatch の時間帯表示) を取得する。
 // Admin のシフトパターン紐付けUIのデータソース。毎時同期の shifts チャンネルと
 // push_shifts 実行時に DB (salonboard_shift_patterns) へ upsert される。
-async function scrapeShiftPatterns(page, baseUrl) {
+async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
   const base = baseUrl || 'https://salonboard.com/';
   // 勤務パターンは「勤務パターン登録」画面 (/KLP/set/workPatternSetup/) の
   // 登録済み一覧テーブルから取得する。これはシフト設定(毎月の受付設定)の完了に
@@ -3256,6 +3256,37 @@ async function scrapeShiftPatterns(page, baseUrl) {
   //       td[0]=シフト名称, td[1]=短縮名, td[2]=設定時間(span 開始 / span 終了),
   //       削除チェックボックス input[name=deleteShiftIds][value=S…] (=external_id)
   const diag = { tried: [] };
+  // グループアカウントはログイン後 /CNC/groupTop/ に居る。この選択をせず設定URLへ
+  // 直接遷移すると、別ジャンルの staffSetup や「サロンが選択されていません」へ着地する。
+  // fetch_bookings と同様、対象Hコードを選択して店舗文脈を確立してから取得する。
+  const ensureTargetSalon = async () => {
+    const selected = await ensureSalonSelected(page, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+      genre: opts.genre,
+      baseUrl: base,
+    }).catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
+    diag.tried.push({ salonSelect: selected, url: page.url().replace('https://salonboard.com', '') });
+    if (!selected.ok) {
+      const err = new Error(`グループ店舗のサロン選択に失敗しました (${selected.reason || 'unknown'})`);
+      err.code = 'GROUP_SALON_SELECTION_FAILED';
+      err.diag = diag;
+      throw err;
+    }
+    return !!selected.selected;
+  };
+  if (opts.salonId || opts.shopName) await ensureTargetSalon();
+
+  // 直接URLが groupTop に戻した場合は、対象サロンを選択して同じURLをもう一度開く。
+  const gotoInSalonContext = async (path) => {
+    await page.goto(new URL(path, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    if (/\/(?:CNC|KLP)\/groupTop/i.test(page.url()) && (opts.salonId || opts.shopName)) {
+      const selected = await ensureTargetSalon();
+      if (selected) {
+        await page.goto(new URL(path, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      }
+    }
+  };
   const isReached = async () =>
     (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0;
 
@@ -3263,7 +3294,7 @@ async function scrapeShiftPatterns(page, baseUrl) {
   // hair は月次シフトと同じく /CLP/bt/set 配下にある。
   for (const path of ['/CLP/bt/set/workPatternSetup/', '/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
     try {
-      await page.goto(new URL(path, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      await gotoInSalonContext(path);
     } catch (e) {
       diag.tried.push({ path, err: String(e?.message ?? e).slice(0, 60) });
       continue;
@@ -3278,7 +3309,7 @@ async function scrapeShiftPatterns(page, baseUrl) {
   if (!(await isReached())) {
     for (const staffPath of ['/CLP/bt/set/staffSetup/', '/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
       try {
-        await page.goto(new URL(staffPath, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+        await gotoInSalonContext(staffPath);
       } catch (_e) { continue; }
       if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) break;
       // 「勤務パターン登録」へのリンク (テキスト or href) を探してクリック
@@ -9011,21 +9042,38 @@ async function ensureSalonSelected(page, opts = {}) {
   // JS(フォームPOST/AJAX)経由で店舗文脈に入る。クリック → 遷移待ち。
   // 遷移が起きないケースに備え、URL 変化 or groupTop 離脱のいずれかを待つ。
   const beforeUrl = page.url();
-  try {
-    await page.locator(`a[id="${target.id}"]`).first().click({ timeout: 8_000 });
-  } catch (e2) {
-    return { ok: false, selected: false, reason: `store_click_failed: ${e2?.message ?? e2}`, salonId: target.id };
+  let clickError = null;
+  for (let clickAttempt = 1; clickAttempt <= 2; clickAttempt++) {
+    try {
+      const link = page.locator(`a[id="${target.id}"]`).first();
+      await link.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(clickAttempt === 1 ? 300 : 800);
+      await link.click({ timeout: 8_000, force: clickAttempt > 1 });
+    } catch (e2) {
+      clickError = e2;
+    }
+    // 遷移 or URL変化を待つ (javascript:void リンクなので load イベントに頼らない)。
+    await page.waitForFunction(
+      (prev) => location.href !== prev || !/\/(?:CNC|KLP)\/groupTop/i.test(location.href),
+      beforeUrl,
+      { timeout: 8_000 },
+    ).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    if (!/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) break;
+    if (clickAttempt === 1) {
+      // AJAXのイベント登録が間に合わない個体があるため、同じgroupTopを再読込して再試行。
+      await page.goto(beforeUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+      await page.waitForSelector(`a[id="${target.id}"]`, { timeout: 8_000 }).catch(() => {});
+    }
   }
-  // 遷移 or URL変化を最大15秒待つ (javascript:void リンクなので load イベントに頼らない)。
-  await page.waitForFunction(
-    (prev) => location.href !== prev || !/\/(?:CNC|KLP)\/groupTop/i.test(location.href),
-    beforeUrl,
-    { timeout: 15_000 },
-  ).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
   if (/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
-    return { ok: false, selected: false, reason: 'still_on_group_top', salonId: target.id };
+    return {
+      ok: false,
+      selected: false,
+      reason: `still_on_group_top${clickError ? `: ${clickError?.message ?? clickError}` : ''}`,
+      salonId: target.id,
+    };
   }
   // サロン選択は POST→セッション確定→リダイレクトのため、直後の goto で戻されないよう少し待つ。
   await page.waitForTimeout(1200);

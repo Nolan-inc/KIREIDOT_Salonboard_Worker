@@ -81,6 +81,7 @@ type ScrapersModule = {
   scrapeShiftPatterns: (
     page: Page,
     baseUrl: string,
+    opts?: Record<string, unknown>,
   ) => Promise<{ patterns?: unknown[] }>;
 };
 const scrapers = scrapersDefault as unknown as ScrapersModule;
@@ -950,7 +951,7 @@ async function handleJob(job: Job): Promise<void> {
     //   ISP に戻すと成功)。write-via-residential を明示 ON にした場合を除き、auto-FO 中でも
     //   住宅を使わず ISP(定額・warm session)に固定する。住宅はあくまで読み(fetch)専用。
     const avoidResidential = isWriteJob && !forceResidential;
-    const { launch, realChrome } = resolveLaunchOptions(
+    let { launch, realChrome } = resolveLaunchOptions(
       job.credentials.proxy,
       forceResidential,
       job.shop_id,
@@ -987,27 +988,30 @@ async function handleJob(job: Job): Promise<void> {
       recordVideoDir: videoDir ?? undefined,
     });
     browser = ctx.browser();
-    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    let page = ctx.pages()[0] ?? (await ctx.newPage());
     videoPage = page;
 
     // ★従量課金の住宅(residential)IP利用時のみ、画像/動画/フォントの読込を遮断して
     //   帯域(GB)を節約する。DOM/データ取得には不要な要素で、SBページの転送量の大半を占める。
     //   ISP(定額)は転送量課金が無いので遮断せず、実証済みフローをそのまま使う。
     //   ※CSS(stylesheet)は Playwright の :visible 判定に影響するので遮断しない(安全側)。
-    const _resCfg = residentialConfig();
-    const _usingResidential = !!(
-      _resCfg &&
-      launch.proxy?.server &&
-      launch.proxy.server.includes(_resCfg.host)
-    );
-    if (_usingResidential) {
+    const applyResidentialBandwidthPolicy = async () => {
+      if (!ctx) return;
+      const residential = residentialConfig();
+      const usingResidential = !!(
+        residential &&
+        launch.proxy?.server &&
+        launch.proxy.server.includes(residential.host)
+      );
+      if (!usingResidential) return;
       await ctx.route("**/*", (route) => {
         const t = route.request().resourceType();
         if (t === "image" || t === "media" || t === "font") return route.abort();
         return route.continue();
       });
       console.log(`[proxy] ${tag} residential: 画像/動画/フォント遮断(GB節約)`);
-    }
+    };
+    await applyResidentialBandwidthPolicy();
 
     // 1) ログイン済み判定 → 必要時のみ tryLogin
     //    ジャンル/グループ(ADER 等の美容室・1ログイン複数サロン)で管理TOPを出し分ける。
@@ -1054,8 +1058,10 @@ async function handleJob(job: Job): Promise<void> {
         return;
       }
       const loginUrl = new URL("/login/", baseUrl).toString();
-      const loginEndpoint = launch.proxy?.server ?? "direct";
-      const attemptLogin = () => withLoginPacing(
+      let loginEndpoint = launch.proxy?.server ?? "direct";
+      const attemptLogin = () => {
+        loginEndpoint = launch.proxy?.server ?? "direct";
+        return withLoginPacing(
         loginEndpoint,
         job.shop_id,
         job.credentials.login_id,
@@ -1064,24 +1070,61 @@ async function handleJob(job: Job): Promise<void> {
           password: job.credentials.password,
         }),
       );
+      };
+      const isCredentialFailure = (reason: string) =>
+        /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
       let loginResult = await attemptLogin();
-      // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断のいずれも、
-      // cookie/localStorage を消してログイン工程を最初から最大3回行う。固定10分待機はしない。
+      // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断では、同じChrome・
+      // 同じ出口を再利用しない。Cookie削除だけでは Akamai の接続/IP状態が残り、同じ失敗を
+      // 3回繰り返していたため、各試行で browser context を完全終了し、次のstatic ISP出口へ
+      // 切替えてログイン工程を最初から最大3回行う。固定待機はしない。
       for (
         let lt = 1;
         lt < 3 && loginResult.status === "failed";
         lt++
       ) {
+        if (isCredentialFailure(loginResult.reason ?? "")) break;
         console.log(
-          `[job] ${tag} fresh login retry ${lt + 1}/3 (${(loginResult.reason ?? "").slice(0, 70)})`
+          `[job] ${tag} full browser login retry ${lt + 1}/3 (${(loginResult.reason ?? "").slice(0, 70)})`
         );
         await page.context().clearCookies().catch(() => {});
         await page.evaluate(() => {
           try { localStorage.clear(); } catch { /* noop */ }
           try { sessionStorage.clear(); } catch { /* noop */ }
         }).catch(() => {});
-        await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }).catch(() => {});
-        await page.waitForTimeout(3_000);
+
+        // persistent context は profile lock と接続プールを保持するため、必ず閉じ切ってから再起動。
+        const previousContext = ctx;
+        const previousBrowser = browser;
+        ctx = null;
+        browser = null;
+        await previousContext?.close().catch(() => {});
+        await previousBrowser?.close().catch(() => {});
+
+        rotateAccountProxy(sessionKey);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        ({ launch, realChrome } = resolveLaunchOptions(
+          job.credentials.proxy,
+          forceResidential,
+          job.shop_id,
+          avoidResidential,
+          sessionKey,
+        ));
+        console.log(
+          `[job] ${tag} retry proxy=${launch.proxy?.server ?? "direct"} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`,
+        );
+        ctx = await launchStealthContext({
+          launch,
+          realChrome,
+          shopId: job.shop_id,
+          profileKey: sessionKey,
+          legacyShopId: job.shop_id,
+          recordVideoDir: videoDir ?? undefined,
+        });
+        browser = ctx.browser();
+        page = ctx.pages()[0] ?? (await ctx.newPage());
+        videoPage = page;
+        await applyResidentialBandwidthPolicy();
         loginResult = await attemptLogin();
       }
 
@@ -1108,19 +1151,17 @@ async function handleJob(job: Job): Promise<void> {
         const reason = loginResult.reason ?? "login failed";
         // 明示的な「ID/パスワード不一致」だけ login_required。それ以外のログイン画面
         // 戻り/doLogin未完了は一時失敗としてジョブ全体を再試行する。
-        const isAuthLike =
-          /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
+        const isAuthLike = isCredentialFailure(reason);
         if (!isAuthLike) {
-          // 同じ出口でfresh loginを3回行っても改善しないため、次ジョブは別static ISPへ。
-          // 読み取りジョブでは既存のResidential自動退避も有効になる。固定待機はしない。
-          rotateAccountProxy(sessionKey);
+          // 各試行ですでに出口を切替済み。読み取りジョブでは既存のResidential自動退避も
+          // 次ジョブから有効になる。固定待機はしない。
           noteLoginThrottle(job.shop_id);
         }
         await report(
           {
             job_id: job.id,
             status: isAuthLike ? "login_required" : "retryable_failed",
-            error: isAuthLike ? reason : `[CLOUD_LOGIN_RETRY_EXHAUSTED] 3回のfresh loginに失敗: ${reason}`,
+            error: isAuthLike ? reason : `[CLOUD_LOGIN_RETRY_EXHAUSTED] 3回の完全再ログインに失敗: ${reason}`,
           },
           page,
         );
@@ -1987,7 +2028,11 @@ async function handleJob(job: Job): Promise<void> {
       // SHIFT_PATTERNS_NONE/PARSE は再試行しても直らないので manual_required に倒す
       // (PC worker-process.cjs と同じ分類)。
       try {
-        const res = await scrapers.scrapeShiftPatterns(page, baseUrl);
+        const res = await scrapers.scrapeShiftPatterns(page, baseUrl, {
+          genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
+          salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
+          shopName: (job as { shop_name?: string | null }).shop_name ?? null,
+        });
         const patterns = (res?.patterns ?? []) as unknown[];
         await report({
           job_id: job.id,
@@ -4942,10 +4987,10 @@ const READ_JOB_SAFETY_TIMEOUT_MS = Number(
     process.env.SB_JOB_TIMEOUT_MS ??
     10 * 60_000,
 );
-// cloud の予約書込は、顧客操作から長時間待たせない。上限を超えた場合は当該
-// Chrome を停止し、同じCloud executorで全工程を再実行する。
+// cloud の予約書込は、3回の「Chrome完全再起動 + 出口切替 + 全工程再実行」を
+// 6分以内で完結させる。5分30秒でハングを打ち切り、残り時間でcallback/PC移管を行う。
 const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
-  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 150_000,
+  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 330_000,
 );
 
 function isCloudWorker(): boolean {
