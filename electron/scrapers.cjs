@@ -2405,7 +2405,12 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   if (!opts || !opts.salonId) return;
   try {
     await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await ensureSalonSelected(page, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+      genre: opts.genre,
+      baseUrl,
+    }).catch(() => {});
   } catch (_e) { /* best-effort */ }
 }
 
@@ -3432,7 +3437,12 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     if (viaGroupTop) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     }
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await ensureSalonSelected(page, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+      genre: shiftGenre,
+      baseUrl,
+    }).catch(() => {});
   };
   // 「毎月の受付設定」へ。現在文脈のナビリンクをクリック優先(hairは直gotoで失効しやすい)→失敗時 bare-goto。
   const navigateToMonthly = async () => {
@@ -5779,20 +5789,44 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // 詳細画面にも存在する #rlastupdate / a#change / a#regist は到達判定に使わない。
   // 実際に編集できる時刻・所要フィールドがある場合だけ変更フォームとみなす。
   const formSel = [
-    'select#jsiRsvHour',
-    'select#jsiRsvMinute',
-    'select#rsvTime',
-    'select[name="time"]',
-    'select#rsvTermId',
-    'select[name="rsvTerm"]',
+    'select#jsiRsvHour:visible',
+    'select#jsiRsvMinute:visible',
+    'select#rsvTime:visible',
+    'select[name="time"]:visible',
+    'select#rsvTermId:visible',
+    'select[name="rsvTerm"]:visible',
   ].join(', ');
+  // SalonBoard は URL を直接開いても、予約種別や画面状態によっては変更フォームではなく
+  // 予約詳細へ着地する。その場合は画面最下部の青い「変更する」を押してから編集フォームへ
+  // 進む必要がある（実画面 2026-07-23: BF36648303）。hidden の時刻 select をフォームと
+  // 誤認しないよう、上の formSel は可視要素だけを対象にする。
+  const openChangeFormFromDetail = async () => {
+    if ((await page.locator(formSel).count().catch(() => 0)) > 0) return true;
+    const changeCta = page.locator([
+      'a#change:visible',
+      'a:has-text("変更する"):visible',
+      'button:has-text("変更する"):visible',
+      'input[type="submit"][value*="変更"]:visible',
+      'input[type="button"][value*="変更"]:visible',
+      'input[type="image"][alt*="変更"]:visible',
+    ].join(', ')).last();
+    if ((await changeCta.count().catch(() => 0)) === 0) return false;
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+      changeCta.click({ timeout: 10_000 }).catch(() => {}),
+    ]);
+    await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
+    return (await page.locator(formSel).count().catch(() => 0)) > 0;
+  };
   let onForm = false;
   for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
     for (const path of candidates) {
       await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
       // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
       await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
-      if ((await page.locator(formSel).count().catch(() => 0)) > 0) { onForm = true; break; }
+      onForm = (await page.locator(formSel).count().catch(() => 0)) > 0;
+      if (!onForm) onForm = await openChangeFormFromDetail();
+      if (onForm) break;
     }
     if (onForm) break;
     const expired = await page.evaluate(() =>
@@ -5971,6 +6005,10 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       'input[type="submit"][value*="確定"]:visible',
       'input[type="submit"][value*="登録"]:visible',
       'input[type="button"][value*="確定"]:visible',
+      'input[type="submit"][value*="変更"]:visible',
+      'input[type="button"][value*="変更"]:visible',
+      'button:has-text("変更する"):visible',
+      'a:has-text("変更する"):visible',
     ].join(', '))
     .first();
   if ((await submitBtn.count().catch(() => 0)) === 0) {
@@ -8925,7 +8963,33 @@ async function ensureSalonSelected(page, opts = {}) {
   }
   // サロン選択は POST→セッション確定→リダイレクトのため、直後の goto で戻されないよう少し待つ。
   await page.waitForTimeout(1200);
-  return { ok: true, selected: true, salonId: target.id };
+
+  // 美容室グループ（ADER等）は選択後に /CLP/bt/top/ へ入って初めて店舗文脈が確立する。
+  // groupTop を離れただけではユーザエラー/システムエラーへ着地する場合があるため、hair
+  // 呼び出しでは管理TOPを明示的に開いて肯定確認する。
+  if (opts.genre === 'hair') {
+    const hairTop = new URL('/CLP/bt/top/', opts.baseUrl || 'https://salonboard.com/').toString();
+    if (!/\/CLP\/bt\/top\/?$/i.test(page.url())) {
+      await page.goto(hairTop, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    }
+    const context = await page.evaluate(() => {
+      const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+      return {
+        hasMgmt: /予約管理|掲載管理/.test(body),
+        hasPassword: !!document.querySelector('input[type="password"]'),
+        errored: /システムエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(body),
+      };
+    }).catch(() => ({ hasMgmt: false, hasPassword: true, errored: true }));
+    if (!/\/CLP\/bt\/top\/?$/i.test(page.url()) || !context.hasMgmt || context.hasPassword || context.errored) {
+      return {
+        ok: false,
+        selected: false,
+        reason: `hair_context_not_established(url=${page.url()})`,
+        salonId: target.id,
+      };
+    }
+  }
+  return { ok: true, selected: true, salonId: target.id, contextUrl: page.url() };
 }
 
 // =====================================================================
@@ -10765,7 +10829,12 @@ async function pushStaffViaForm(page, payload, opts = {}) {
     for (let n = 0; n < 2; n += 1) {
       if (opts.salonId) {
         await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-        const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+        const selected = await ensureSalonSelected(page, {
+          salonId: opts.salonId,
+          shopName: opts.shopName,
+          genre,
+          baseUrl,
+        }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
         if (!selected?.ok) {
           if (n === 1) return { ok: false, reason: selected?.reason || 'unknown' };
           continue;
@@ -11285,7 +11354,12 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     for (let n = 0; n < 2; n += 1) {
       if (opts.salonId) {
         await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-        const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+        const selected = await ensureSalonSelected(page, {
+          salonId: opts.salonId,
+          shopName: opts.shopName,
+          genre,
+          baseUrl,
+        }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
         if (!selected?.ok) { selectionReason = selected?.reason || 'unknown'; continue; }
       }
       await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});

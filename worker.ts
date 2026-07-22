@@ -2940,7 +2940,7 @@ async function isLoggedIn(
           hasSalonList:
             /サロン一覧/.test(document.title || "") ||
             !!document.querySelector(
-              'a[href*="selectSalon"], a[href*="/CLP/bt/"], form[action*="selectSalon"]'
+              'a[id^="H"], a[href*="selectSalon"], a[href*="/CLP/bt/"], form[action*="selectSalon"]'
             ),
           expired:
             /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(
@@ -3216,6 +3216,42 @@ async function tryLogin(
     /\/(?:CNC|KLP)\/groupTop/i.test(page.url())
   ) {
     return { status: "ok" };
+  }
+
+  // グループアカウントでは doLogin のレスポンス/リダイレクトだけが途中で止まっても、
+  // 認証Cookie自体は発行済みで /CNC/groupTop/ を直接開けるケースがある。
+  // doLogin 停止を即ログイン失敗にせず、正規のサロン一覧を1回だけ肯定確認する。
+  // ADER は groupTop → Hコード選択 → /CLP/bt/top/ が正式な導線。
+  if (/\/CNC\/login\/doLogin/i.test(page.url())) {
+    try {
+      await gotoResilient(
+        page,
+        new URL("/CNC/groupTop/", url).toString(),
+        { waitUntil: "domcontentloaded", timeout: 20_000 },
+        "post-login groupTop probe",
+        2,
+      );
+      const groupState = await page
+        .evaluate(() => {
+          const body = (document.body?.innerText || "").replace(/\s+/g, "");
+          return {
+            hasSalon: !!document.querySelector('a[id^="H"]'),
+            hasPassword: !!document.querySelector('input[type="password"]'),
+            errored: /システムエラー|サロンが選択されていません|再度ログイン/.test(body),
+          };
+        })
+        .catch(() => ({ hasSalon: false, hasPassword: true, errored: true }));
+      if (
+        /\/CNC\/groupTop/i.test(page.url()) &&
+        groupState.hasSalon &&
+        !groupState.hasPassword &&
+        !groupState.errored
+      ) {
+        return { status: "ok" };
+      }
+    } catch {
+      // 下の詳細付き failed に落とす。
+    }
   }
   return {
     status: "failed",
