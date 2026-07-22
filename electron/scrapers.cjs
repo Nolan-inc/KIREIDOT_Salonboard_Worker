@@ -3260,12 +3260,24 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
   // 直接遷移すると、別ジャンルの staffSetup や「サロンが選択されていません」へ着地する。
   // fetch_bookings と同様、対象Hコードを選択して店舗文脈を確立してから取得する。
   const ensureTargetSalon = async () => {
-    const selected = await ensureSalonSelected(page, {
+    const selectTarget = () => ensureSalonSelected(page, {
       salonId: opts.salonId,
       shopName: opts.shopName,
       genre: opts.genre,
       baseUrl: base,
     }).catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
+    let selected = await selectTarget();
+    // ログイン直後でもグループ選択POSTのセッションが失効する個体がある。
+    // 同一ジョブ内でfresh loginし、対象Hコードの選択から一度だけやり直す。
+    if (
+      !selected.ok
+      && /有効期限|expired|ログインしなお|ログインへ/i.test(selected.reason || '')
+      && typeof opts.relogin === 'function'
+    ) {
+      const relogged = await opts.relogin().catch(() => false);
+      diag.tried.push({ relogin: relogged, reason: selected.reason });
+      if (relogged) selected = await selectTarget();
+    }
     diag.tried.push({ salonSelect: selected, url: page.url().replace('https://salonboard.com', '') });
     if (!selected.ok) {
       const capture = await captureScrapeDebug(page, 'shift-patterns', 'group_salon_selection_failed', {

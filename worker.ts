@@ -2032,6 +2032,13 @@ async function handleJob(job: Job): Promise<void> {
           genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
           salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
           shopName: (job as { shop_name?: string | null }).shop_name ?? null,
+          relogin: makeRelogin(
+            page,
+            baseUrl,
+            job.credentials,
+            job.shop_id,
+            launch.proxy?.server ?? "direct",
+          ),
         });
         const patterns = (res?.patterns ?? []) as unknown[];
         await report({
