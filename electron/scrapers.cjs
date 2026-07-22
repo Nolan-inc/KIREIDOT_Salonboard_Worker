@@ -3598,7 +3598,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   // 後段で結合する。取得後は月次シフト画面へ戻す。
   let registeredPatternById = new Map();
   try {
-    const registered = await scrapeShiftPatterns(page, baseUrl);
+    const registered = await scrapeShiftPatterns(page, baseUrl, {
+      ...opts,
+      genre: shiftGenre,
+    });
     registeredPatternById = new Map(
       (registered?.patterns || []).map((pat) => [String(pat.external_id), pat]),
     );
@@ -11346,29 +11349,88 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
   const patterns = Array.isArray(p.patterns) ? p.patterns : (p.name ? [p] : []);
   if (patterns.length === 0) return fail('勤務パターンが指定されていません (patterns)', 'UNKNOWN_ERROR', true);
 
-  // 勤務パターン登録画面へ到達 (scrapeShiftPatterns と同じロジック)
-  const isReached = async () =>
-    (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0 ||
-    (await page.locator('tr:has(select)').count().catch(() => 0)) > 0;
-  let reached = false;
-  for (const path of ['/CLP/bt/set/workPatternSetup/', '/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
-    await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    if (await isReached()) { reached = true; break; }
+  // 勤務パターン登録画面へ到達する。
+  // SalonBoard は monthlySetup で確立した業態/店舗コンテキストと
+  // returnPathStorage=04 を要求することがある。異なる業態のURLを総当たりすると、
+  // KLP(エステ)のジョブが最後のCNB(美容)画面に残り、正しい認証状態でも
+  // SHIFT_PATTERNS_UNREACHABLE になるため、現在の業態の正規導線だけを使う。
+  const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
+  const setupPrefix = genre === 'hair' ? '/CLP/bt/set/' : '/KLP/set/';
+  const monthlyPath = `${setupPrefix}monthlySetup/`;
+  const workPatternPath = `${setupPrefix}workPatternSetup/?returnPathStorage=04`;
+  const isReached = async () => {
+    if ((await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0) {
+      return true;
+    }
+    // 入力行だけで判定する場合も、monthlySetup等の別画面にあるselectを
+    // 勤務パターンフォームと誤認しないようURLを併用する。
+    return /\/workPatternSetup\//.test(page.url())
+      && (await page.locator('tr:has(select)').count().catch(() => 0)) > 0;
+  };
+  const openFromMonthlySetup = async () => {
+    // hairのグループアカウントでは、monthlySetupを開く前に対象サロンを選択する。
+    if (genre === 'hair' && (opts.salonId || opts.shopName)) {
+      const selected = await ensureSalonSelected(page, {
+        salonId: opts.salonId,
+        shopName: opts.shopName,
+        genre,
+        baseUrl,
+      }).catch(() => ({ ok: false }));
+      if (!selected?.ok) return false;
+    }
+
+    await page.goto(new URL(monthlyPath, baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 25_000,
+    }).catch(() => {});
+
+    // 正規導線: 毎月の受付設定 -> 勤務パターン登録。
+    const link = page.locator(
+      `a[href*="${setupPrefix}workPatternSetup"], a[href*="workPatternSetup"]:has-text("勤務パターン"), a:has-text("勤務パターン登録")`,
+    ).first();
+    if ((await link.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}),
+        link.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', {
+        timeout: 10_000,
+      }).catch(() => {});
+      if (await isReached()) return true;
+    }
+
+    // リンクのDOMが店舗ごとに異なる場合のみ、monthlySetupで文脈を確立した後に
+    // returnPathStorage=04付きの同一業態URLを開く。
+    await page.goto(new URL(workPatternPath, baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 25_000,
+    }).catch(() => {});
+    await page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', {
+      timeout: 10_000,
+    }).catch(() => {});
+    return isReached();
+  };
+
+  let reached = await openFromMonthlySetup();
+  if (!reached && typeof opts.relogin === 'function') {
+    const relogged = await opts.relogin().catch(() => false);
+    if (relogged) reached = await openFromMonthlySetup();
   }
   if (!reached) {
-    for (const sp of ['/CLP/bt/set/staffSetup/', '/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
-      await page.goto(new URL(sp, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      const link = page.locator('a:has-text("勤務パターン"), a[href*="workPatternSetup"]').first();
-      if ((await link.count().catch(() => 0)) > 0) {
-        await Promise.all([
-          page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
-          link.click({ timeout: 10_000 }).catch(() => {}),
-        ]);
-      }
-      if (await isReached()) { reached = true; break; }
-    }
+    const capture = await captureScrapeDebug(page, 'shift-patterns', 'work_pattern_unreachable', {
+      diagnostics: {
+        genre,
+        monthlyPath,
+        workPatternPath,
+        finalUrl: page.url().replace('https://salonboard.com', ''),
+      },
+    }).catch(() => null);
+    return fail(
+      `勤務パターン登録画面に到達できませんでした (genre=${genre}, url=${page.url().replace('https://salonboard.com', '')}${capture ? `, capture=${capture}` : ''})`,
+      'SHIFT_PATTERNS_UNREACHABLE',
+      true,
+    );
   }
-  if (!reached) return fail(`勤務パターン登録画面に到達できませんでした (url=${page.url().replace('https://salonboard.com', '')})`, 'SHIFT_PATTERNS_UNREACHABLE', true);
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
 
   // 登録済み判定: 名称一致 OR 設定時間(開始AND終了)一致。Admin プリセット名(例 平日早番)と

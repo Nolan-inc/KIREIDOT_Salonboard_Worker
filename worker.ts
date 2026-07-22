@@ -5461,6 +5461,7 @@ async function directJob(shopId: string): Promise<void> {
       result = await s.pushWorkPatternViaForm(page, payload, {
         baseUrl,
         enablePush: ENABLE_PUSH,
+        genre,
       });
     } else if (jobType === "push_menu") {
       result = await s.pushMenuViaForm(page, payload, {
