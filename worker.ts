@@ -1113,25 +1113,27 @@ async function handleJob(job: Job): Promise<void> {
           /still on login|invalid|incorrect|password|userId|loginId|認証/i.test(
             reason
           );
-        // スロットルらしい失敗も待機させずcallbackへ返す。CloudならAdminが
-        // 即PCへ移管し、同じCloud IPでの再試行は行わない。
+        // スロットルらしい失敗は同じ実行内でログインPOSTを打ち直さずcallbackへ返す。
+        // Adminは実行元をCloudに固定したままrun_atを後ろへ送り、既存プロファイルを
+        // 保持して再試行する。PCへ即移管すると同一アカウントの連続ログインになり、
+        // 制限とセッション競合を悪化させるため行わない。
         const isThrottle = !isAuthLike && /did not complete/i.test(reason);
         if (isThrottle) {
-          console.log(`[job] ${tag} login throttled -> report immediately for executor fallback shop=${job.shop_id.slice(0, 8)}`);
+          console.log(`[job] ${tag} login throttled -> defer on same cloud executor shop=${job.shop_id.slice(0, 8)}`);
           // 連続 throttle で ISP→住宅へ自動退避(次ジョブから住宅IPを使う)。
           noteLoginThrottle(job.shop_id);
           noteEndpointLoginThrottle(loginEndpoint, job.credentials.login_id);
           // ここで handleJob を再帰実行すると、書込ジョブの avoidResidential により
           // 経路が切り替わらず、同じISPから doLogin をもう一度叩くことがある。これは
           // Akamai の抑制を長引かせるため、同じCloud attemptでは再打せずcallback側の
-          // PC fallbackへ即時移管する。Cloud内のネットワーク瞬断は上の限定リトライで扱う。
+          // Cloudの遅延再試行へ渡す。Cloud内のネットワーク瞬断は上の限定リトライで扱う。
         }
         await report(
           {
             job_id: job.id,
             status: isAuthLike ? "login_required" : "retryable_failed",
             error: isThrottle
-              ? `${reason} (Akamaiログインスロットルの可能性。待機せずexecutor切替)`
+              ? `[CLOUD_LOGIN_THROTTLED] ${reason} (ログインPOSTを再送せずCloudで遅延再試行)`
               : reason,
           },
           page,
