@@ -3169,8 +3169,9 @@ async function scrapeShiftPatterns(page, baseUrl) {
   const isReached = async () =>
     (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0;
 
-  // (1) 直接 goto を複数プレフィックスで試す (店舗ジャンルで KLP/CNK が異なる)。
-  for (const path of ['/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
+  // (1) 直接 goto を複数プレフィックスで試す。
+  // hair は月次シフトと同じく /CLP/bt/set 配下にある。
+  for (const path of ['/CLP/bt/set/workPatternSetup/', '/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
     try {
       await page.goto(new URL(path, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     } catch (e) {
@@ -3185,7 +3186,7 @@ async function scrapeShiftPatterns(page, baseUrl) {
   //   勤務パターン登録は「スタッフ設定」配下の画面で、直接URLだと
   //   「情報が一部失われています」で弾かれることがある。
   if (!(await isReached())) {
-    for (const staffPath of ['/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
+    for (const staffPath of ['/CLP/bt/set/staffSetup/', '/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
       try {
         await page.goto(new URL(staffPath, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       } catch (_e) { continue; }
@@ -4236,6 +4237,24 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   };
 }
 
+// 電話番号を SalonBoard が受け付ける国内形式(0始まり・数字のみ)へ正規化する。
+// KIREIDOT 側は +81 国際形式(例 +81-70-1455-1257)で保存されることがあり、単純に
+// 数字だけ残すと「817014551257」(12桁・0始まりでない)のまま送られ、SalonBoard の
+// validation(「※ハイフンなしで入力してください」)に弾かれる(2026-07-22 YG97547036)。
+function normalizeJpPhoneDigits(raw) {
+  const digits = String(raw || '').replace(/[^\d]/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('0') && digits.length <= 11) return digits;
+  // 01081/0081 = 国際プレフィックス経由、81 = 国番号のみ。国内 0 始まりへ戻す。
+  for (const prefix of ['01081', '0081', '81']) {
+    if (!digits.startsWith(prefix)) continue;
+    let rest = digits.slice(prefix.length);
+    if (!rest.startsWith('0')) rest = `0${rest}`;
+    if (rest.length === 10 || rest.length === 11) return rest;
+  }
+  return digits;
+}
+
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
@@ -4259,17 +4278,23 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
-  // ★開始時刻を大きく過ぎた予約は SalonBoard の最終確定(doComplete)が通らない。
-  //   ただし SalonBoard は開始から約1時間以内の枠までは登録可能(運用実績)。そのため
-  //   「開始から1時間より前」の枠だけを弾き、直近1時間以内の当日枠は登録を試みる。
-  //   (過去実測 2026-07-05 郡山で 09:04/09:11 が失敗したのは別要因の可能性があり、
-  //    ここでは1時間グレースを設ける。)
+  // ★過去時刻の予約: SalonBoard は当日(JST)内なら開始時刻を過ぎていても
+  //   警告確認(「予約時間を過ぎていますがよろしいですか？」等)付きで登録/変更を
+  //   受け付ける。警告は acceptWarningModal / ネイティブ confirm ハンドラが自動で
+  //   OK するため、ここでは「JST で前日以前」の予約だけを弾く。
+  //   (2026-07-22 変更: 従来の1時間グレースだと当日内の事後入力・修正が
+  //    BOOKING_TIME_PAST で止まっていた。日跨ぎ直後の edge のため1時間グレースも併存。)
   //   scheduled_at は JST ISO(+09:00) の絶対時刻なので、Date で now と直接比較できる(TZ非依存)。
-  const PAST_GRACE_MS = 60 * 60 * 1000; // 開始から1時間まで許容
+  const PAST_GRACE_MS = 60 * 60 * 1000; // 日跨ぎ直後(前日23時台など)の許容
   const startMs = new Date(p.scheduled_at).getTime();
-  if (Number.isFinite(startMs) && startMs < Date.now() - PAST_GRACE_MS) {
+  const jstDayOf = (ms) => Math.floor((ms + 9 * 60 * 60 * 1000) / 86_400_000);
+  if (
+    Number.isFinite(startMs)
+    && jstDayOf(startMs) < jstDayOf(Date.now())
+    && startMs < Date.now() - PAST_GRACE_MS
+  ) {
     return fail(
-      `予約の開始時刻(${p.scheduled_at})が1時間以上前のため SalonBoard に登録できません。当日・過去分の予約は SalonBoard へ直接ご登録ください。`,
+      `予約の開始時刻(${p.scheduled_at})が前日以前のため SalonBoard に登録できません。過去日の予約は SalonBoard へ直接ご登録ください。`,
       'BOOKING_TIME_PAST',
       true,
     );
@@ -4671,8 +4696,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     await page.locator('input#nmMeiKana').first().fill(meiKana, { timeout: 6_000 }).catch(() => {});
   }
   if (p.customer_phone) {
-    // 電話はハイフン無し数字のみ (SB の注意書きに従う)
-    const tel = String(p.customer_phone).replace(/[^\d]/g, '');
+    // 電話はハイフン無し数字のみ + 国内0始まり (SB の注意書きに従う。+81形式は 0 始まりへ変換)
+    const tel = normalizeJpPhoneDigits(p.customer_phone);
     if (tel) await page.locator('input#tel').first().fill(tel, { timeout: 6_000 }).catch(() => {});
   }
   // 備考 (KIREIDOT予約ID を必ず入れる)
@@ -5805,26 +5830,43 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return { status: 'confirm_only' };
   }
 
-  // 3.5) 既存顧客情報に残った電話番号/郵便番号のハイフンを除去する。
+  // 3.5) 既存顧客情報に残った電話番号/郵便番号を SB が受け付ける形へ正規化する。
   // SalonBoard は変更対象でない既存フィールドも再検証し、電話だけでなく郵便番号等でも
-  // 「※ハイフンなしで入力してください」を返す。値そのものはログへ出さず、補正した
-  // field名だけを後段の診断情報へ残す。
+  // 「※ハイフンなしで入力してください」を返す。ハイフン除去に加え、電話系フィールドは
+  // +81 国際形式の残骸(例 817014551257 = 12桁・0始まりでない)も国内 0 始まりへ変換する
+  // (ハイフンが無くてもこの validation 文言で弾かれる。2026-07-22 YG97547036)。
+  // 値そのものはログへ出さず、補正した field 名だけを後段の診断情報へ残す。
   const normalizedHyphenFields = await page.evaluate(() => {
     const changed = [];
     const contactHint = /(tel|phone|mobile|zip|post|postal|郵便|電話)/i;
+    const telHint = /(tel|phone|mobile|電話)/i;
     const dateHint = /(date|time|year|month|day|日時|年月日)/i;
+    // normalizeJpPhoneDigits と同ロジック (page.evaluate 内は Node 側関数を参照できない)
+    const toDomestic = (digits) => {
+      if (!digits || (digits.startsWith('0') && digits.length <= 11)) return digits;
+      for (const prefix of ['01081', '0081', '81']) {
+        if (!digits.startsWith(prefix)) continue;
+        let rest = digits.slice(prefix.length);
+        if (!rest.startsWith('0')) rest = `0${rest}`;
+        if (rest.length === 10 || rest.length === 11) return rest;
+      }
+      return digits;
+    };
     document.querySelectorAll('input').forEach((el) => {
       const value = String(el.value || '');
       const digits = value.replace(/[^\d]/g, '');
       const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''}`;
       const type = String(el.type || 'text').toLowerCase();
-      if (!/[-‐‑‒–—―ー−]/.test(value) || digits.length < 7 || digits.length > 15) return;
+      if (!value || digits.length < 7 || digits.length > 15) return;
       if (type === 'date' || type === 'datetime-local' || dateHint.test(key)) return;
       if (!contactHint.test(key) && type !== 'tel') return;
-      el.value = digits;
+      const isTel = telHint.test(key) || type === 'tel';
+      const next = isTel ? toDomestic(digits) : digits;
+      if (next === value) return; // 既に正規形 (書き戻し不要)
+      el.value = next;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      changed.push({ field: el.name || el.id || '(unnamed)', digitCount: digits.length });
+      changed.push({ field: el.name || el.id || '(unnamed)', digitCount: next.length });
     });
     return changed;
   }).catch(() => []);
@@ -5879,19 +5921,25 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     await page.waitForTimeout(1500);
     // 「確定する」後に確認画面/ダイアログが出る場合があるので、最終確定ボタンを押す。
     //   ① HTMLダイアログ「はい」(a.accept) ② 確認画面の「登録する」(a#regist) / 「確定する」(a#change)
-    const finalBtn = page
-      .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a#change:visible')
-      .first();
-    await finalBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
-    if ((await finalBtn.count().catch(() => 0)) > 0) {
+    // 時間超過警告(「予約時間を過ぎていますがよろしいですか？」)→確認画面 のように
+    // 確認が多段で出ることがあるため、完了表示が出るまで最大3回まで押し進める。
+    for (let round = 0; round < 3; round++) {
+      const bodyNow = (await page.locator('body').innerText().catch(() => '')) || '';
+      if (/変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyNow)) break;
+      const finalBtn = page
+        .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a#change:visible')
+        .first();
+      await finalBtn.waitFor({ state: 'visible', timeout: round === 0 ? 6_000 : 2_500 }).catch(() => {});
+      if ((await finalBtn.count().catch(() => 0)) === 0) {
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+        break;
+      }
       await Promise.all([
         page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
         finalBtn.click({ timeout: 10_000 }).catch(() => {}),
       ]);
       confirmClicked = true;
       await page.waitForTimeout(1500);
-    } else {
-      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
   } finally {
     page.off('dialog', onDialog);
@@ -10929,12 +10977,12 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
     (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0 ||
     (await page.locator('tr:has(select)').count().catch(() => 0)) > 0;
   let reached = false;
-  for (const path of ['/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
+  for (const path of ['/CLP/bt/set/workPatternSetup/', '/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
     await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     if (await isReached()) { reached = true; break; }
   }
   if (!reached) {
-    for (const sp of ['/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
+    for (const sp of ['/CLP/bt/set/staffSetup/', '/CNK/set/staffSetup/', '/KLP/set/staffSetup/', '/CNB/set/staffSetup/']) {
       await page.goto(new URL(sp, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
       const link = page.locator('a:has-text("勤務パターン"), a[href*="workPatternSetup"]').first();
       if ((await link.count().catch(() => 0)) > 0) {
