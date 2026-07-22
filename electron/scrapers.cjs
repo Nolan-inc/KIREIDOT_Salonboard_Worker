@@ -10744,43 +10744,67 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   const extId = String(p.external_id || p.salonboard_staff_external_id || p.staff_id || '').trim();
   if (!extId) return fail('スタッフの external_id (staffId) がありません', 'UNKNOWN_ERROR', true);
   const presentFlg = p.present_flg ?? (p.is_published == null ? null : (p.is_published ? 1 : 0));
-  const sortNo = p.sort_no ?? p.sortNo ?? null;
+  // KD の sort_order は未設定時 0。SalonBoard の表示順は 1 以上なので、0 を送ると
+  // 「変更内容を登録する」を押しても保存されず、再読込時に current="" となる。
+  const sortNoRaw = p.sort_no ?? p.sortNo ?? null;
+  const sortNoNum = sortNoRaw == null || sortNoRaw === '' ? null : Number(sortNoRaw);
+  const sortNo = Number.isFinite(sortNoNum) && sortNoNum > 0 ? Math.trunc(sortNoNum) : null;
   const pickup = p.pickup ?? p.pickup_flg ?? null;
 
-  // グループアカウントは掲載管理へ入る前に対象サロンを明示選択する。
-  // /CNK/draft/staffList へ直行すると「サロンが選択されていません」になる。
-  if (opts.salonId) {
-    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
-    if (!selected?.ok) {
-      return fail(`グループ店舗のサロン選択に失敗 (${selected?.reason || 'unknown'})`, 'SALON_SELECTION_FAILED', false);
-    }
-  }
+  const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
+  const listPath = genre === 'hair' ? '/CNB/draft/stylistList/' : '/CNK/draft/staffList';
+  const dtoPrefix = genre === 'hair' ? 'frmStylistListStylistDtoList' : 'frmStaffListStafferDtoList';
+  const idField = genre === 'hair' ? 'stylistId' : 'staffId';
+  const sortFormId = genre === 'hair' ? 'stylistSortForm' : 'staffSortForm';
 
-  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  // グループ店舗では SalonBoard が画面遷移中に店舗文脈を失うことがあるため、
+  // 「サロン選択→一覧」の組を最大2回やり直し、実際の一覧フォーム到達で成功判定する。
+  const openList = async () => {
+    for (let n = 0; n < 2; n += 1) {
+      if (opts.salonId) {
+        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+        if (!selected?.ok) {
+          if (n === 1) return { ok: false, reason: selected?.reason || 'unknown' };
+          continue;
+        }
+      }
+      await page.goto(new URL(listPath, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      const count = await page.locator(`input[name^="${dtoPrefix}"][name$=".${idField}"]`).count().catch(() => 0);
+      if (count > 0) return { ok: true, count };
+      await page.waitForTimeout(800);
+    }
+    return { ok: false, reason: 'staff_list_form_missing' };
+  };
+
+  const opened = await openList();
+  if (!opened.ok && opened.reason !== 'staff_list_form_missing') {
+    return fail(`グループ店舗のサロン選択に失敗 (${opened.reason})`, 'SALON_SELECTION_FAILED', false);
+  }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
-  if ((await page.locator('input[name^="frmStaffListStafferDtoList"][name$=".staffId"]').count().catch(() => 0)) === 0) {
-    const cap = await captureScrapeDebug(page, 'staff', 'no_form', { diagnostics: { url: page.url() } });
+  if (!opened.ok) {
+    const body = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ').slice(0, 220);
+    const cap = await captureScrapeDebug(page, 'staff', 'no_form', { diagnostics: { url: page.url(), genre, listPath, body } });
     return fail(`スタッフ一覧フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  const applied = await page.evaluate(({ extId, presentFlg, sortNo, pickup }) => {
+  const applied = await page.evaluate(({ extId, presentFlg, sortNo, pickup, dtoPrefix, idField }) => {
     let idx = -1;
-    const hids = document.querySelectorAll('input[type="hidden"][name^="frmStaffListStafferDtoList"][name$=".staffId"]');
+    const hids = document.querySelectorAll(`input[type="hidden"][name^="${dtoPrefix}"][name$=".${idField}"]`);
     for (const h of hids) {
       if (h.value === extId) { const m = h.name.match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
     }
     if (idx < 0) return { ok: false, reason: 'staff_not_found' };
-    const byField = (f) => document.querySelector(`[name="frmStaffListStafferDtoList[${idx}].${f}"]`);
+    const byField = (f) => document.querySelector(`[name="${dtoPrefix}[${idx}].${f}"]`);
     const r = { idx };
     if (sortNo != null) { const el = byField('sortNo'); if (el) { el.value = String(sortNo); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); r.sortNo = true; } }
-    if (presentFlg != null) { const el = byField('presentFlg'); if (el) { el.value = String(presentFlg); r.presentFlg = true; } }
+    if (presentFlg != null) { const el = byField('presentFlg'); if (el) { r.presentFlg = true; r.currentPublished = String(el.value) === '1'; } }
     if (pickup != null) { const cb = byField('pickupFlg'); if (cb) { cb.checked = !!pickup; cb.dispatchEvent(new Event('change', { bubbles: true })); r.pickup = true; } }
     return { ok: true, ...r };
-  }, { extId, presentFlg, sortNo, pickup });
+  }, { extId, presentFlg, sortNo, pickup, dtoPrefix, idField });
 
   if (!applied || !applied.ok) {
     const cap = await captureScrapeDebug(page, 'staff', 'no_row', { diagnostics: { applied } });
@@ -10788,7 +10812,7 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   }
   // sortNo は locator.fill で実入力 (dirty state を確実に立てる)
   if (sortNo != null && applied.idx != null && applied.idx >= 0) {
-    const sel = `[name="frmStaffListStafferDtoList[${applied.idx}].sortNo"]`;
+    const sel = `[name="${dtoPrefix}[${applied.idx}].sortNo"]`;
     await page.fill(sel, '', { timeout: 6000 }).catch(() => {});
     await page.fill(sel, String(sortNo), { timeout: 6000 }).catch(() => {});
   }
@@ -10798,42 +10822,80 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   try {
-    // 並び順は staffSortForm(doSort)、掲載は staffPresentForm(doPresent) を直接 submit する。
-    const formId = sortNo != null ? 'staffSortForm' : (presentFlg != null ? 'staffPresentForm' : 'staffSortForm');
-    const hasForm = await page.evaluate((fid) => !!document.getElementById(fid), formId).catch(() => false);
-    if (!hasForm) {
-      const cap = await captureScrapeDebug(page, 'staff', 'no_form2', { diagnostics: { url: page.url(), formId } });
-      return fail(`スタッフ保存フォーム (${formId}) が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    // 並び順/PickUp は一覧上部の「変更内容を登録する」に相当する sort form を保存する。
+    if (sortNo != null || pickup != null) {
+      const hasForm = await page.evaluate((fid) => !!document.getElementById(fid), sortFormId).catch(() => false);
+      if (!hasForm) {
+        const cap = await captureScrapeDebug(page, 'staff', 'no_form2', { diagnostics: { url: page.url(), sortFormId, genre } });
+        return fail(`スタッフ保存フォーム (${sortFormId}) が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+      }
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        page.evaluate((fid) => { const f = document.getElementById(fid); if (f) f.submit(); }, sortFormId),
+      ]);
+      await page.waitForTimeout(1800);
+      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("設定する"):visible').first();
+      if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1500); }
     }
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-      page.evaluate((fid) => { const f = document.getElementById(fid); if (f) f.submit(); }, formId),
-    ]);
-    await page.waitForTimeout(1800);
-    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible, a:has-text("設定する"):visible').first();
-    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1500); }
   } finally {
     page.off('dialog', onDialog);
   }
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
-  // 送信後に staffList を再取得し、sortNo が保存されているか確認
-  await page.goto(new URL('/CNK/draft/staffList', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  const reRead = await page.evaluate(({ extId, wantSort }) => {
+  // 送信後に一覧を再取得し、sortNo/掲載状態が保存されているか確認する。
+  await openList();
+  let reRead = await page.evaluate(({ extId, wantSort, dtoPrefix, idField }) => {
     let idx = -1;
-    for (const h of document.querySelectorAll('input[type="hidden"][name^="frmStaffListStafferDtoList"][name$=".staffId"]')) {
+    for (const h of document.querySelectorAll(`input[type="hidden"][name^="${dtoPrefix}"][name$=".${idField}"]`)) {
       if (h.value === extId) { const m = (h.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
     }
-    if (idx < 0) return { persisted: false, current: null };
-    const el = document.querySelector(`[name="frmStaffListStafferDtoList[${idx}].sortNo"]`);
+    if (idx < 0) return { persisted: false, current: null, published: null };
+    const el = document.querySelector(`[name="${dtoPrefix}[${idx}].sortNo"]`);
+    const pub = document.querySelector(`[name="${dtoPrefix}[${idx}].presentFlg"]`);
     const cur = el ? (el.value || '') : null;
-    return { persisted: wantSort == null || cur === String(wantSort), current: cur };
-  }, { extId, wantSort: sortNo }).catch(() => ({ persisted: false, current: null }));
+    return { persisted: wantSort == null || cur === String(wantSort), current: cur, published: pub ? String(pub.value) === '1' : null };
+  }, { extId, wantSort: sortNo, dtoPrefix, idField }).catch(() => ({ persisted: false, current: null, published: null }));
+
+  // 掲載/非掲載は一覧 sort form ではなく、対象行の専用ボタンで切り替える。
+  const wantPublished = presentFlg == null ? null : Number(presentFlg) === 1;
+  if (wantPublished != null && reRead.published != null && reRead.published !== wantPublished) {
+    const toggle = page.locator(`a[onclick*="${extId}"][onclick*="Present" i], a[onclick*="${extId}"][onclick*="present" i]`).first();
+    if ((await toggle.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'staff', 'no_present_toggle', { diagnostics: { extId, genre, wantPublished, reRead } });
+      return fail(`スタッフ掲載状態の変更ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    const toggleDialogs = [];
+    const acceptToggle = async (d) => { toggleDialogs.push(String(d.message() || '')); try { await d.accept(); } catch (_e) { /* noop */ } };
+    page.on('dialog', acceptToggle);
+    try {
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {}),
+        toggle.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1500);
+    } finally {
+      page.off('dialog', acceptToggle);
+    }
+    await openList();
+    reRead = await page.evaluate(({ extId, dtoPrefix, idField, wantSort }) => {
+      const ids = Array.from(document.querySelectorAll(`input[type="hidden"][name^="${dtoPrefix}"][name$=".${idField}"]`));
+      const h = ids.find((x) => x.value === extId);
+      const m = h && (h.name || '').match(/\[(\d+)\]/);
+      if (!m) return { persisted: false, current: null, published: null };
+      const idx = Number(m[1]);
+      const s = document.querySelector(`[name="${dtoPrefix}[${idx}].sortNo"]`);
+      const pub = document.querySelector(`[name="${dtoPrefix}[${idx}].presentFlg"]`);
+      return { persisted: wantSort == null || (s && s.value === String(wantSort)), current: s ? s.value : null, published: pub ? String(pub.value) === '1' : null };
+    }, { extId, dtoPrefix, idField, wantSort: sortNo }).catch(() => ({ persisted: false, current: null, published: null }));
+  }
   const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
   if (sortNo != null && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'staff', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `スタッフの並び順が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  if (wantPublished != null && reRead.published != null && reRead.published !== wantPublished) {
+    const cap = await captureScrapeDebug(page, 'staff', 'publish_not_persisted', { diagnostics: { ...diag, wantPublished } });
+    return { status: 'failed', reason: `スタッフ掲載状態が保存されませんでした (current=${reRead.published}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: false, diag };
   }
   return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
 }
@@ -11210,31 +11272,32 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   //   staffEdit に到達できず全 hair店が no_edit_page で失敗していた(2026-07-16 26件/24h)。
   const genre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
   const listUrl = genre === 'hair' ? '/CNB/draft/stylistList/' : '/CNK/draft/staffList';
+  const listIdSelector = genre === 'hair'
+    ? 'input[name^="frmStylistListStylistDtoList"][name$=".stylistId"]'
+    : 'input[name^="frmStaffListStafferDtoList"][name$=".staffId"]';
 
-  // グループ店舗はジャンルに関係なく先にサロンを選択する。従来は hair のみで、
-  // エステ系グループ(マグサロン等)が「サロンが選択されていません」になっていた。
-  if (opts.salonId) {
-    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
-    if (!selected?.ok) {
-      return fail(`グループ店舗のサロン選択に失敗 (${selected?.reason || 'unknown'})`, 'SALON_SELECTION_FAILED', false);
-    }
-  }
-
-  // staffList/stylistList → 該当行の 編集画面 へ遷移
-  if (genre === 'hair') {
-    // ★hair掲載スタイリスト一覧はサロン未選択だと「ユーザエラー」で空になる(count=0)。
-    //   動く scrapeStylists と同様 groupTop→サロン選択→一覧 の順で入り、跳ね返り時は再選択して入り直す。
-    await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => ({ selected: false }));
-    if (sel && sel.selected) {
+  // staffList/stylistList → 該当行の編集画面へ。グループ店舗ではサロン選択が
+  // 直後の掲載管理遷移で失われることがあるため、一覧の実DOMが出るまで選択から1回やり直す。
+  const openProfileList = async () => {
+    let selectionReason = null;
+    for (let n = 0; n < 2; n += 1) {
+      if (opts.salonId) {
+        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        const selected = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+        if (!selected?.ok) { selectionReason = selected?.reason || 'unknown'; continue; }
+      }
       await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      if ((await page.locator(listIdSelector).count().catch(() => 0)) > 0) return { ok: true };
+      await page.waitForTimeout(800);
     }
-  } else {
-    await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    return { ok: false, reason: selectionReason || 'staff_list_form_missing' };
+  };
+  const listOpened = await openProfileList();
+  if (!listOpened.ok) {
+    const body = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ').slice(0, 220);
+    const cap = await captureScrapeDebug(page, 'staffprofile', 'no_list', { diagnostics: { url: page.url(), genre, listUrl, reason: listOpened.reason, body } });
+    return fail(`スタッフ一覧フォームに到達できませんでした (${listOpened.reason}, capture=${cap || '?'})`, listOpened.reason === 'staff_list_form_missing' ? 'UNKNOWN_ERROR' : 'SALON_SELECTION_FAILED', false);
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
 
@@ -11270,7 +11333,9 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   // ★編集リンクは staffEdit('Wxxx')/stylistEdit(...) を明示指定する。
   //   1行に showErrorPopup/staffEdit/staffUnpresent/staffDelete の4アンカーが全てextIdを含むため、
   //   単純な a[onclick*=extId] だと先頭の showErrorPopup を掴んで編集画面に行けなかった(no_edit_page 真因)。
-  const navLink = page.locator(`a[onclick*="staffEdit('${extId}')"], a[onclick*="stylistEdit('${extId}')"]`).first();
+  const navLink = page.locator(
+    `a[onclick*="staffEdit"][onclick*="'${extId}'"], a[onclick*="stylistEdit"][onclick*="'${extId}'"]`,
+  ).first();
   if ((await navLink.count().catch(() => 0)) > 0) {
     await Promise.all([
       page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}),
@@ -11278,15 +11343,25 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     ]);
   } else {
     await page.evaluate((id) => {
-      try { if (typeof stylistEdit === 'function') { stylistEdit(id); return; } } catch (_e) { /* noop */ }
+      // hair の stylistEdit は (event, id) シグネチャ。1引数で呼ぶと id が undefined になり
+      // システムエラーへ遷移するため、一覧のPOSTフォームを直接使う。
+      try {
+        const f = document.getElementById('stylistEditForm');
+        const i = f && f.querySelector('input[name="stylistId"]');
+        if (f && i) { i.value = id; f.submit(); return; }
+      } catch (_e) { /* noop */ }
       try { if (typeof staffEdit === 'function') staffEdit(id); } catch (_e) { /* noop */ }
     }, extId).catch(() => {});
     await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
   }
   await page.waitForTimeout(800);
   // 編集画面 到達確認 (名前 or フリガナ ラベルの入力欄 / URL)
-  const onEdit = (await page.locator('tr:has(th:has-text("名前")) input, tr:has(th:has-text("フリガナ")) input').count().catch(() => 0)) > 0
-    || /staffEdit|stylistEdit/i.test(page.url());
+  const editFieldCount = await page.locator(
+    'tr:has(th:has-text("名前")) input, tr:has(th:has-text("フリガナ")) input, '
+    + 'tr:has(td:has-text("名前")) input, tr:has(td:has-text("フリガナ")) input',
+  ).count().catch(() => 0);
+  const editBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+  const onEdit = editFieldCount > 0 && !/システムエラー|サロンが選択されていません/.test(editBody);
   if (!onEdit) {
     const cap = await captureScrapeDebug(page, 'staffprofile', 'no_edit_page', { diagnostics: { url: page.url(), extId, genre, listUrl } });
     // ★一覧のロード遅延/同時実行負荷で staffEdit リンクを掴めないことが多い(中目黒で
@@ -11369,13 +11444,22 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     // ★登録は <a onclick="moveToRegist('staffForm',...)"> を厳密に狙う。
     //   a.moveBtn.chk 等を union に入れると Playwright は DOM順で先頭を返すため、別の「設定」アンカーを
     //   掴んで /KLP/schedule へ飛ぶ不具合があった(2026-07-17)。まず staffForm の登録を単独で探す。
-    let btn = page.locator(`a[onclick*="moveToRegist('staffForm'"]`).first();
+    let btn = page.locator(`a[onclick*="moveToRegist('staffForm'"], a[onclick*="moveToRegist('stylistForm'"]`).first();
     if ((await btn.count().catch(() => 0)) === 0) {
-      // 他genre / フォールバック: 登録テキスト・画像ボタン
-      btn = page.locator(`input[type="image"][alt="登録"], input[type="submit"][value="登録"], a:has-text("登録する"):visible, a:has-text("登録"):visible, button:has-text("登録")`).first();
+      // 実画面の青い「登録」は <a><img alt="登録"></a>。画像自体ではなく親aを優先して押す。
+      btn = page.locator(
+        `a:has(img[alt="登録"]):visible, a:has(input[type="image"][alt="登録"]):visible, `
+        + `a[onclick*="regist" i]:visible, a[onclick*="confirm" i]:visible, `
+        + `input[type="image"][alt="登録"], input[type="submit"][value="登録"], `
+        + `a:has-text("登録する"):visible, a:has-text("登録"):visible, button:has-text("登録")`,
+      ).first();
     }
     if ((await btn.count().catch(() => 0)) === 0) {
-      const cap = await captureScrapeDebug(page, 'staffprofile', 'no_regist', { diagnostics: { url: page.url() } });
+      const btns = await page.evaluate(() => Array.from(document.querySelectorAll('a,input,img,button'))
+        .filter((e) => /登.?録|保存|更新|regist|confirm/i.test((e.textContent || '') + (e.getAttribute('alt') || '') + (e.getAttribute('value') || '') + (e.getAttribute('onclick') || '')))
+        .slice(0, 16)
+        .map((e) => ({ tag: e.tagName, text: (e.textContent || '').trim().slice(0, 20), alt: e.getAttribute('alt'), id: e.id, cls: String(e.className || '').slice(0, 40), onclick: String(e.getAttribute('onclick') || '').slice(0, 80) }))).catch(() => []);
+      const cap = await captureScrapeDebug(page, 'staffprofile', 'no_regist', { diagnostics: { url: page.url(), genre, btns, body: editBody.slice(0, 220) } });
       return fail(`スタッフ編集の登録ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
     }
     await btn.scrollIntoViewIfNeeded().catch(() => {});
@@ -11409,13 +11493,8 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
     return { status: 'ok', externalId: extId, summary: `スタッフ情報を更新しました(${genre})`, confirmed: { ...applied, dialogAccepted, registered: true }, note: 'HPB反映は掲載管理の反映申請が別途必要' };
   }
   // reRead: 編集画面を再度開き 名前 が保存されているか
-  if (genre === 'hair' && opts.salonId) {
-    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-  }
-  await page.goto(new URL(listUrl, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
-  const re = page.locator(`a[onclick*="staffEdit('${extId}')"], a[onclick*="stylistEdit('${extId}')"]`).first();
+  await openProfileList();
+  const re = page.locator(`a[onclick*="staffEdit"][onclick*="'${extId}'"], a[onclick*="stylistEdit"][onclick*="'${extId}'"]`).first();
   if ((await re.count().catch(() => 0)) > 0) {
     await Promise.all([page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {}), re.click({ timeout: 10_000 }).catch(() => {})]);
     await page.waitForTimeout(800);
