@@ -23,6 +23,7 @@
 import { chromium, type Browser, type BrowserContext, type Dialog, type Page } from "playwright";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync, readdirSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -913,7 +914,10 @@ async function handleJob(job: Job): Promise<void> {
   }
 
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
-  const ssPath = storageStatePathFor(job.shop_id);
+  // グループ店舗は同じSalonBoardログインIDを共有する。店舗別profileだと店舗数分の
+  // login POSTが発生するため、認証セッションと出口IPはアカウント単位で共有する。
+  const sessionKey = sessionKeyFor(job.credentials.login_id, baseUrl);
+  const ssPath = storageStatePathFor(sessionKey);
 
   let browser: Browser | null = null;
   let ctx: BrowserContext | null = null;
@@ -942,7 +946,13 @@ async function handleJob(job: Job): Promise<void> {
     //   ISP に戻すと成功)。write-via-residential を明示 ON にした場合を除き、auto-FO 中でも
     //   住宅を使わず ISP(定額・warm session)に固定する。住宅はあくまで読み(fetch)専用。
     const avoidResidential = isWriteJob && !forceResidential;
-    const { launch, realChrome } = resolveLaunchOptions(job.credentials.proxy, forceResidential, job.shop_id, avoidResidential);
+    const { launch, realChrome } = resolveLaunchOptions(
+      job.credentials.proxy,
+      forceResidential,
+      job.shop_id,
+      avoidResidential,
+      sessionKey,
+    );
     if (launch.proxy) {
       console.log(
         `[job] ${tag} proxy=${launch.proxy.server} channel=${launch.channel ?? "chromium"} headless=${launch.headless}`
@@ -968,6 +978,8 @@ async function handleJob(job: Job): Promise<void> {
       launch,
       realChrome,
       shopId: job.shop_id,
+      profileKey: sessionKey,
+      legacyShopId: job.shop_id,
       recordVideoDir: videoDir ?? undefined,
     });
     browser = ctx.browser();
@@ -2524,13 +2536,18 @@ function proxyShopOverride(shopId?: string): string | null {
   }
 }
 
-function pickProxy(forceResidential?: boolean, shopId?: string, avoidResidential?: boolean): { server: string; username?: string; password?: string } {
+function pickProxy(
+  forceResidential?: boolean,
+  shopId?: string,
+  avoidResidential?: boolean,
+  stickyKey?: string,
+): { server: string; username?: string; password?: string } {
   // 書込ジョブ等で residential を強制 (静的ISPが登録フォーム等の深い操作で Akamai ソフト
   // チャレンジを受けハングするのを回避)。静的の健全/不健全に関わらず residential を返す。
   // 書込強制 or 「この店舗は住宅IP」指定 → 住宅(sticky)へ。creds はファイル/env(residentialConfig)。
   // avoidResidential(書込・既定) のときは住宅を一切使わず ISP に固定する。
   if (!avoidResidential && (forceResidential || shopPrefersResidential(shopId)) && fallbackConfigured()) {
-    const r = residentialProxyFor(shopId);
+    const r = residentialProxyFor(stickyKey ?? shopId);
     if (r) {
       // 認証情報は出さず host:port と理由のみ (どの店舗が住宅IPを使ったか監査可能に)
       const why = forceResidential
@@ -2569,11 +2586,12 @@ function pickProxy(forceResidential?: boolean, shopId?: string, avoidResidential
     // (2026-06-30 銀座書込500の真因)。安定indexは全poolに対するハッシュ。当該IPが
     // 不健全なら健全集合内でハッシュ的に決定。shopId 無し(直接実行系)は従来round-robin。
     let pick: string;
-    if (shopId) {
-      const stable = pool[hashShop(shopId) % pool.length];
+    const accountStickyKey = stickyKey ?? shopId;
+    if (accountStickyKey) {
+      const stable = pool[hashShop(accountStickyKey) % pool.length];
       pick = healthy.includes(stable)
         ? stable
-        : healthy[hashShop(shopId) % healthy.length];
+        : healthy[hashShop(accountStickyKey) % healthy.length];
     } else {
       pick = healthy[_proxyRrCounter % healthy.length];
       _proxyRrCounter += 1;
@@ -2586,7 +2604,7 @@ function pickProxy(forceResidential?: boolean, shopId?: string, avoidResidential
   }
   // 健全な静的IPが無い → Residential フォールバック (設定時)。
   // ただし書込(avoidResidential)は住宅で壊れるのでフォールバックせず ISP 待機に倒す。
-  const rfb = avoidResidential ? null : residentialProxyFor(shopId);
+  const rfb = avoidResidential ? null : residentialProxyFor(stickyKey ?? shopId);
   if (rfb) {
     if (_proxyRrCounter % 20 === 0)
       console.log("[proxy] 全static IPフラグ → Residential フォールバックを使用");
@@ -2600,7 +2618,8 @@ function resolveLaunchOptions(
   credProxy?: { server: string; username?: string | null; password?: string | null } | null,
   forceResidential?: boolean,
   shopId?: string,
-  avoidResidential?: boolean
+  avoidResidential?: boolean,
+  stickyKey?: string,
 ): ResolvedLaunch {
   const channel = process.env.SB_BROWSER_CHANNEL || undefined;
   const headless = process.env.SB_HEADLESS !== "0";
@@ -2614,14 +2633,14 @@ function resolveLaunchOptions(
     (forceResidential || (!avoidResidential && shopPrefersResidential(shopId))) &&
     fallbackConfigured();
   const picked = useResidential
-    ? pickProxy(forceResidential, shopId)
+    ? pickProxy(forceResidential, shopId, undefined, stickyKey)
     : credProxy?.server
     ? {
         server: credProxy.server,
         username: credProxy.username ?? undefined,
         password: credProxy.password ?? undefined,
       }
-    : pickProxy(undefined, shopId, avoidResidential);
+    : pickProxy(undefined, shopId, avoidResidential, stickyKey);
   const proxy = picked.server
     ? {
         // Playwright の proxy.server はスキーム必須。host:port だけなら http:// を補う。
@@ -2706,6 +2725,8 @@ async function launchStealthContext(opts: {
   launch: ResolvedLaunch["launch"];
   realChrome: boolean;
   shopId: string;
+  profileKey?: string;
+  legacyShopId?: string;
   // 反映(書込)フローの画面遷移を動画記録する dir。失敗診断用 (500/Akamai混雑は
   // 前後の遷移が無いと原因が分からないため)。指定時のみ recordVideo を有効化。
   recordVideoDir?: string;
@@ -2714,9 +2735,20 @@ async function launchStealthContext(opts: {
     homedir(),
     ".kireidot",
     "salonboard-chrome-profile",
-    opts.shopId
+    opts.profileKey ?? opts.shopId,
   );
+  // 段階移行: アカウントprofileがまだ無ければ、現在店舗の既存profileをコピーして
+  // Cookie/_abckを引き継ぐ。最初のデプロイで全アカウントが再ログインになるのを防ぐ。
+  const legacyDir = opts.legacyShopId
+    ? join(homedir(), ".kireidot", "salonboard-chrome-profile", opts.legacyShopId)
+    : null;
   try {
+    if (!existsSync(userDataDir) && legacyDir && legacyDir !== userDataDir && existsSync(legacyDir)) {
+      cpSync(legacyDir, userDataDir, { recursive: true, errorOnExist: false });
+      console.log(
+        `[session] 店舗profileからアカウントprofileへ移行 shop=${opts.legacyShopId?.slice(0, 8)} key=${(opts.profileKey ?? "").slice(0, 12)}`,
+      );
+    }
     mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
   } catch {
     /* 作れない環境では Playwright が一時 dir を使う */
@@ -2813,6 +2845,20 @@ function storageStatePathFor(shopId: string): string {
     // ディレクトリを作れない環境 (CI, sandbox) では storageState を使わない
   }
   return join(dir, `${shopId}.json`);
+}
+
+function sessionKeyFor(loginId: string, baseUrl: string): string {
+  let origin = baseUrl;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    // baseUrlが不正でもloginIdだけで安定キーを作り、認証情報そのものはパスに出さない。
+  }
+  const digest = createHash("sha256")
+    .update(`${origin}\n${String(loginId ?? "").trim().toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `account-${digest}`;
 }
 
 function readStorageState(path: string): string | undefined {
@@ -4888,7 +4934,12 @@ async function handleJobGuarded(job: Job): Promise<void> {
       //   次ジョブが同一プロファイルへ突入して衝突(セッション相互破壊)していた。
       //   当該店舗プロファイルの Chrome を確実に kill して浮きブラウザを残さない。
       try {
-        const udd = join(homedir(), ".kireidot", "salonboard-chrome-profile", job.shop_id);
+        const udd = join(
+          homedir(),
+          ".kireidot",
+          "salonboard-chrome-profile",
+          sessionKeyFor(job.credentials.login_id, job.credentials.base_url ?? "https://salonboard.com/"),
+        );
         execSync(`pkill -f -- "--user-data-dir=${udd}"`, { stdio: "ignore" });
         console.error(`[job] TIMEOUT ${job.id.slice(0, 8)} → 浮き Chrome を kill (shop=${job.shop_id.slice(0, 8)})`);
       } catch {
