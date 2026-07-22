@@ -42,6 +42,7 @@ const {
   scrapeCustomerDetails,
   pushBookingViaForm,
   pushScheduleViaForm,
+  changeScheduleViaForm,
   deleteScheduleViaForm,
   pushShiftsViaForm,
   scrapeShiftPatterns,
@@ -4212,7 +4213,15 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isUpdate) {
         // ---- 変更 (時間/所要/担当) ----
-        const result = await changeBookingViaForm(page, payload, {
+        // 休憩・業務は通常予約ではなく SalonBoard の「予定」。通常予約の変更画面へ
+        // 送ると一時エラーになるため、予定専用の削除→再登録フローで KD に収束させる。
+        const isBlockSchedule = payload.booking_type === 'block';
+        const result = isBlockSchedule
+          ? await changeScheduleViaForm(page, payload, {
+              baseUrl,
+              enableChange: enablePush,
+            })
+          : await changeBookingViaForm(page, payload, {
           baseUrl,
           enableChange: enablePush,
           genre: jobGenre,
@@ -4237,7 +4246,7 @@ async function runPushJobs({ showBrowser } = {}) {
           await postCallback({
             job_id: job.id, job_type: 'push_booking', status: 'succeeded',
             booking_id: payload.booking_id, external_booking_id: payload.external_booking_id ?? null,
-            summary: 'push_booking(変更) 完了',
+            summary: isBlockSchedule ? 'push_booking(予定変更) 完了' : 'push_booking(変更) 完了',
           });
           emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard 変更完了`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: true });

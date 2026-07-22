@@ -3131,6 +3131,30 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
 }
 
 // =====================================================================
+// 予定変更 (KIREIDOT のブロック予約=休憩/業務の時刻・所要変更)
+//
+// SalonBoard の「予定」は通常予約の reserve change 画面では変更できない。
+// 対象予定をスタッフ+開始時刻(+タイトル)で安全に削除し、KD の現在値で再登録する。
+// 削除後に登録が一時失敗しても、次回は delete が alreadyAbsent で成功するため
+// 同じ payload の再試行で必ず KD の状態へ収束する。
+// =====================================================================
+async function changeScheduleViaForm(page, payload, opts = {}) {
+  const enableChange = opts.enableChange !== false;
+  if (!enableChange) return { status: 'confirm_only' };
+
+  const deleted = await deleteScheduleViaForm(page, payload, {
+    baseUrl: opts.baseUrl,
+    enableDelete: true,
+  });
+  if (deleted.status !== 'ok') return deleted;
+
+  return pushScheduleViaForm(page, payload, {
+    baseUrl: opts.baseUrl,
+    enablePush: true,
+  });
+}
+
+// =====================================================================
 // シフト反映 (KIREIDOT shifts → SalonBoard シフト設定)
 //   毎月の受付設定 > シフト設定 (/KLP/set/shiftSetup/?date=YYYYMM) を操作する。
 //   実DOM (確認済み 2026-06-12):
@@ -11628,6 +11652,7 @@ module.exports = {
   scrapeCustomerDetails,
   pushBookingViaForm,
   pushScheduleViaForm,
+  changeScheduleViaForm,
   deleteScheduleViaForm,
   pushShiftsViaForm,
   pushWorkPatternViaForm,

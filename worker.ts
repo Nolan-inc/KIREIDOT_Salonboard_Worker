@@ -60,6 +60,7 @@ type ScraperFn = (
 type ScrapersModule = {
   cancelBookingViaForm: ScraperFn;
   pushScheduleViaForm: ScraperFn;
+  changeScheduleViaForm: ScraperFn;
   deleteScheduleViaForm: ScraperFn;
   pushShiftsViaForm: ScraperFn;
   postPhotoGalleryViaForm: ScraperFn;
@@ -1450,7 +1451,12 @@ async function handleJob(job: Job): Promise<void> {
         (payload as { action?: string }).action === "update" &&
         String(payload.external_booking_id ?? "").trim().length > 0;
       let result: PushBookingResult;
-      if (isBlockSchedule) {
+      if (isBlockSchedule && isBookingUpdate) {
+        result = await scrapers.changeScheduleViaForm(page, payload, {
+          baseUrl,
+          enableChange: ENABLE_PUSH,
+        }) as PushBookingResult;
+      } else if (isBlockSchedule) {
         result = await scrapers.pushScheduleViaForm(page, payload, {
           baseUrl,
           enablePush: ENABLE_PUSH,
