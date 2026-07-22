@@ -3168,17 +3168,22 @@ async function tryLogin(
     loc: ReturnType<typeof page.locator>,
     value: string
   ): Promise<boolean> => {
+    const current = await loc.inputValue().catch(() => "");
+    // Chromeの自動入力値や前回値の末尾へ追記すると、見た目では判別できないまま
+    // ID/PW不一致になる。PC workerと同様、期待値との厳密一致を保証する。
+    if (current === value) return true;
     try {
       await loc.click({ timeout: 8_000 }).catch(() => {});
+      if (current) await loc.fill("", { timeout: 8_000 });
       await loc.pressSequentially(value, { delay: 90, timeout: 8_000 });
       const got = await loc.inputValue().catch(() => "");
-      if (got && got.length >= Math.min(value.length, 1)) return true;
+      if (got === value) return true;
     } catch {
       /* fall through to fill */
     }
     try {
       await loc.fill(value, { timeout: 8_000 });
-      return true;
+      return (await loc.inputValue().catch(() => "")) === value;
     } catch {
       return false;
     }
@@ -3205,25 +3210,42 @@ async function tryLogin(
       'button[type="submit"]',
       'input[type="submit"]',
     ];
-    // 1) 最初に見つかったログインボタン候補をクリック。click はログイン遷移と
-    //    競合して reject することがある (locator.click が "navigation to finish"
-    //    待ちで throw) ので throw は握り潰す。成否は後段の URL/フォーム残存で判定。
+    // 1) 最初に見つかったログインボタン候補をクリック。noWaitAfter でクリック自体の
+    //    成否とナビゲーション待ちを分離する。actionabilityで弾かれた場合は公式DOMを
+    //    直接clickし、PC workerと同じ送信経路に揃える。
+    let clicked = false;
     for (const sel of submitCandidates) {
       const loc = page.locator(sel).first();
       if ((await loc.count().catch(() => 0)) === 0) continue;
-      await loc.click({ timeout: 5_000 }).catch(() => {});
-      break;
+      try {
+        await loc.click({ timeout: 5_000, noWaitAfter: true });
+        clicked = true;
+        break;
+      } catch {
+        // 次候補へ
+      }
     }
-    await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
-    // 2) クリックで遷移しなかった (まだログインフォームに居る) 場合は、password 欄で
-    //    Enter (onkeypress="enterActionLogin") を送る。両方試すことで、ボタンの
-    //    onclick が効かない / Enter が効かない どちらの環境でもログインを通す。
-    if (
-      (await pwInput.count().catch(() => 0)) > 0 &&
-      /login/i.test(page.url())
-    ) {
-      await pwInput.press("Enter").catch(() => {});
-      await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
+    if (!clicked) {
+      clicked = await page.evaluate(() => {
+        const candidates = Array.from(
+          document.querySelectorAll('a, button, input[type="submit"]'),
+        );
+        const target = candidates.find((el) => {
+          const text = String(
+            el.textContent || el.getAttribute("value") || "",
+          ).trim();
+          return (
+            el.matches("a.common-CNCcommon__primaryBtn, a.loginBtnSize") ||
+            text === "ログイン"
+          );
+        });
+        if (!target) return false;
+        (target as HTMLElement).click();
+        return true;
+      }).catch(() => false);
+    }
+    if (!clicked && (await pwInput.isVisible().catch(() => false))) {
+      await pwInput.press("Enter", { timeout: 5_000, noWaitAfter: true }).catch(() => {});
     }
   } catch (e) {
     return { status: "failed", reason: `submit: ${e instanceof Error ? e.message : e}` };
@@ -3237,7 +3259,7 @@ async function tryLogin(
   // リダイレクトする。networkidle が早期に返って doLogin の空ページで誤判定するのを
   // 防ぐため、doLogin を離れる (= リダイレクト完了) まで明示的に待つ。
   await page
-    .waitForURL((u) => !/doLogin/i.test(u.toString()), { timeout: 15_000 })
+    .waitForURL((u) => !/doLogin/i.test(u.toString()), { timeout: 25_000 })
     .catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 3_500 }).catch(() => {});
 
@@ -3257,6 +3279,7 @@ async function tryLogin(
         title: (document.title || "").slice(0, 40),
         len: txt.length,
         hasMgmt: /予約管理|掲載管理/.test(txt),
+        hasImageAuth: /画像認証|イラストを完成|パーツをドラッグ/.test(txt),
         expired: /有効期限|再度ログイン|ログインしなおし|操作されなかった/.test(
           txt.replace(/\s+/g, "")
         ),
@@ -3268,6 +3291,11 @@ async function tryLogin(
       status: "failed",
       reason: `session-expired page after login (url=${pageInfo.url})`,
     };
+  }
+  if (pageInfo?.hasImageAuth) {
+    // SalonBoard独自のドラッグ式画像認証はCloudで解けない。reCAPTCHAのように店舗を
+    // 6時間ブロックせず通常失敗として返し、規定回数後に画面操作可能なPCへ移管する。
+    return { status: "failed", reason: "[IMAGE_AUTH_REQUIRED] SalonBoard画像認証が表示されました" };
   }
   // グループアカウント(1ログイン複数サロン)はログイン後 /CNC/groupTop/ (サロン一覧) に
   // 着地する。管理ナビ(予約管理)は無いが認証自体は成功しており、対象サロンは後続フロー
@@ -3281,36 +3309,41 @@ async function tryLogin(
     return { status: "ok" };
   }
 
-  // グループアカウントでは doLogin のレスポンス/リダイレクトだけが途中で止まっても、
-  // 認証Cookie自体は発行済みで /CNC/groupTop/ を直接開けるケースがある。
-  // doLogin 停止を即ログイン失敗にせず、正規のサロン一覧を1回だけ肯定確認する。
-  // ADER は groupTop → Hコード選択 → /CLP/bt/top/ が正式な導線。
-  if (/\/CNC\/login\/doLogin/i.test(page.url())) {
+  // doLogin のレスポンス/リダイレクトだけが途中で止まっても、認証Cookie自体は発行済みで
+  // 管理TOPを直接開けるケースがある。エステ単店は /KLP/top/、グループは
+  // /CNC/groupTop/ を肯定確認する（従来はgroupTopしか見ず、心斎橋等を偽失敗にした）。
+  if (/\/CNC\/login\/doLogin/i.test(page.url()) || !pageInfo?.hasMgmt) {
     try {
-      await gotoResilient(
-        page,
-        new URL("/CNC/groupTop/", url).toString(),
-        { waitUntil: "domcontentloaded", timeout: 20_000 },
-        "post-login groupTop probe",
-        2,
-      );
-      const groupState = await page
-        .evaluate(() => {
-          const body = (document.body?.innerText || "").replace(/\s+/g, "");
-          return {
-            hasSalon: !!document.querySelector('a[id^="H"]'),
-            hasPassword: !!document.querySelector('input[type="password"]'),
-            errored: /システムエラー|サロンが選択されていません|再度ログイン/.test(body),
-          };
-        })
-        .catch(() => ({ hasSalon: false, hasPassword: true, errored: true }));
-      if (
-        /\/CNC\/groupTop/i.test(page.url()) &&
-        groupState.hasSalon &&
-        !groupState.hasPassword &&
-        !groupState.errored
-      ) {
-        return { status: "ok" };
+      for (const [label, path] of [
+        ["esthetic top", "/KLP/top/"],
+        ["groupTop", "/CNC/groupTop/"],
+        ["hair top", "/CLP/bt/top/"],
+      ] as const) {
+        await gotoResilient(
+          page,
+          new URL(path, url).toString(),
+          { waitUntil: "domcontentloaded", timeout: 20_000 },
+          `post-login ${label} probe`,
+          2,
+        );
+        const state = await page
+          .evaluate(() => {
+            const body = (document.body?.innerText || "").replace(/\s+/g, "");
+            return {
+              hasMgmt: /予約管理|掲載管理/.test(body),
+              hasSalon: !!document.querySelector('a[id^="H"]'),
+              hasPassword: !!document.querySelector('input[type="password"]'),
+              imageAuth: /画像認証|イラストを完成|パーツをドラッグ/.test(body),
+              errored: /システムエラー|サロンが選択されていません|再度ログイン/.test(body),
+            };
+          })
+          .catch(() => ({ hasMgmt: false, hasSalon: false, hasPassword: true, imageAuth: false, errored: true }));
+        if (state.imageAuth) {
+          return { status: "failed", reason: "[IMAGE_AUTH_REQUIRED] SalonBoard画像認証が表示されました" };
+        }
+        if (!state.hasPassword && !state.errored && (state.hasMgmt || state.hasSalon)) {
+          return { status: "ok" };
+        }
       }
     } catch {
       // 下の詳細付き failed に落とす。
