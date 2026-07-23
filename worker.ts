@@ -954,13 +954,13 @@ async function handleJob(job: Job): Promise<void> {
       "push_salon", "push_kodawari", "push_feature", "push_acceptance",
     ]);
     const isWriteJob = WRITE_JOBS.has(job.job_type);
-    const forceResidential = writeViaResidentialEnabled() && isWriteJob;
+    let forceResidential = writeViaResidentialEnabled() && isWriteJob;
     if (forceResidential) console.log(`[proxy] ${job.job_type} → residential 経由 (書込)`);
     // ★書込は住宅IP(cold session + 遅延 + 画像遮断)で複雑フォーム(ギャラリー/シフト等)が
     //   壊れる(2026-07-11 実証: 郡山 gallery=フォーム到達不可 / 銀座 shift=#batchSet timeout。
-    //   ISP に戻すと成功)。write-via-residential を明示 ON にした場合を除き、auto-FO 中でも
-    //   住宅を使わず ISP(定額・warm session)に固定する。住宅はあくまで読み(fetch)専用。
-    const avoidResidential = isWriteJob && !forceResidential;
+    //   ISP に戻すと成功)。通常は住宅を使わず ISP(定額・warm session)に固定する。
+    //   ただしログイン画像認証を検知した時だけ、下の完全再ログインで住宅へ退避する。
+    let avoidResidential = isWriteJob && !forceResidential;
     let { launch, realChrome } = resolveLaunchOptions(
       job.credentials.proxy,
       forceResidential,
@@ -1083,6 +1083,8 @@ async function handleJob(job: Job): Promise<void> {
       };
       const isCredentialFailure = (reason: string) =>
         /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
+      const isImageAuthFailure = (reason: string) =>
+        /IMAGE_AUTH_REQUIRED|画像認証/i.test(reason);
       let loginResult = await attemptLogin();
       // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断では、同じChrome・
       // 同じ出口を再利用しない。Cookie削除だけでは Akamai の接続/IP状態が残り、同じ失敗を
@@ -1094,6 +1096,24 @@ async function handleJob(job: Job): Promise<void> {
         lt++
       ) {
         if (isCredentialFailure(loginResult.reason ?? "")) break;
+        // 書込ジョブは通常、複雑なフォームとの相性が良い sticky ISP を使う。ただし
+        // その ISP 出口で画像認証になった場合まで residential を禁止すると、10本の
+        // ISP pool が同じ Akamai 判定を受けている間は3回とも失敗してPCへ流れてしまう。
+        // 画像認証を検知した時だけ、残りの完全再ログインを住宅回線へ切り替える。
+        // これは CAPTCHA を解く処理ではなく、別の信頼済み出口から最初から認証し直す処理。
+        if (
+          isWriteJob &&
+          !forceResidential &&
+          fallbackConfigured() &&
+          isImageAuthFailure(loginResult.reason ?? "")
+        ) {
+          noteLoginThrottle(job.shop_id);
+          forceResidential = true;
+          avoidResidential = false;
+          console.log(
+            `[proxy] ${tag} ISP画像認証を検知 → residentialでCloudログインを完全再試行`,
+          );
+        }
         console.log(
           `[job] ${tag} full browser login retry ${lt + 1}/3 (${(loginResult.reason ?? "").slice(0, 70)})`
         );

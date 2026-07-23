@@ -6095,7 +6095,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // 氏名カナが空の既存予約は「氏名 (カナ セイ)を入力してください」で保存できない。
   // KIREIDOT 側の顧客カナを優先し、無い場合だけ表示名から安全なカナを作る。
   // 既に値がある欄は上書きせず、SalonBoard 上の顧客情報を不用意に変更しない。
-  await page.evaluate((customer) => {
+  const requiredNameRepair = await page.evaluate((customer) => {
     const hiraToKata = (s) => String(s || '').replace(/[ぁ-ゖ]/g, (ch) =>
       String.fromCharCode(ch.charCodeAt(0) + 0x60));
     const cleanName = (s) => String(s || '')
@@ -6117,19 +6117,35 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       customer.firstNameKana || customer.firstName || parts.slice(1).join(''),
     ) || 'キャクサマ';
     const fillBlank = (selector, value) => {
-      const el = document.querySelector(selector);
-      if (!el || String(el.value || '').trim()) return false;
-      el.value = value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
+      let changed = 0;
+      // SalonBoardの変更画面には、同じname/idを持つhidden側フォームと表示中フォームが
+      // 共存する版がある。querySelector()で先頭1件だけ埋めると、実際にsubmitされる側が
+      // 空のまま残るため、該当する空欄をすべて補完する。
+      document.querySelectorAll(selector).forEach((el) => {
+        if (String(el.value || '').trim()) return;
+        el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        changed += 1;
+      });
+      return changed;
     };
-    return [
-      fillBlank('input#nmSei, input[name="nmSei"]', lastName),
-      fillBlank('input#nmMei, input[name="nmMei"]', firstName),
-      fillBlank('input#nmSeiKana, input[name="nmSeiKana"]', lastKana),
-      fillBlank('input#nmMeiKana, input[name="nmMeiKana"]', firstKana),
-    ].filter(Boolean).length;
+    const changed =
+      fillBlank('input#nmSei, input[name="nmSei"]', lastName) +
+      fillBlank('input#nmMei, input[name="nmMei"]', firstName) +
+      fillBlank('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i]', lastKana) +
+      fillBlank('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i]', firstKana);
+    const fields = Array.from(document.querySelectorAll(
+      'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
+      'input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="MeiKana" i], input[name*="MeiKana" i]',
+    )).map((el) => ({
+      field: el.name || el.id || '(unnamed)',
+      blank: !String(el.value || '').trim(),
+      type: el.type || 'text',
+      disabled: !!el.disabled,
+    }));
+    return { changed, fields };
   }, {
     name: p.customer_name || null,
     lastName: p.customer_last_name || null,
@@ -6137,7 +6153,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     nameKana: p.customer_name_kana || null,
     lastNameKana: p.customer_last_name_kana || null,
     firstNameKana: p.customer_first_name_kana || null,
-  }).catch(() => 0);
+  }).catch(() => ({ changed: 0, fields: [] }));
 
   // 3.5) 既存顧客情報に残った電話番号/郵便番号を SB が受け付ける形へ正規化する。
   // SalonBoard は変更対象でない既存フィールドも再検証し、電話だけでなく郵便番号等でも
@@ -6303,8 +6319,17 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         type: el.type || 'text',
         digitCount: String(el.value || '').replace(/[^\d]/g, '').length,
       })).slice(0, 20)).catch(() => []);
+    const requiredNameState = await page.evaluate(() => Array.from(document.querySelectorAll(
+      'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
+      'input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="MeiKana" i], input[name*="MeiKana" i]',
+    )).map((el) => ({
+      field: el.name || el.id || '(unnamed)',
+      blank: !String(el.value || '').trim(),
+      type: el.type || 'text',
+      disabled: !!el.disabled,
+    }))).catch(() => []);
     const validationCap = await captureScrapeDebug(page, 'change', `validation_error_${reserveId}`, {
-      diagnostics: { reserveId, normalizedHyphenFields, remainingHyphenFields: hyphenFields, url: page.url() },
+      diagnostics: { reserveId, requiredNameRepair, requiredNameState, normalizedHyphenFields, remainingHyphenFields: hyphenFields, url: page.url() },
     });
     if (validationCap) cap2 = validationCap;
     const fieldHint = hyphenFields.length
