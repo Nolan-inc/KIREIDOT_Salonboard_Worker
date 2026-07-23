@@ -6153,11 +6153,12 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const changed =
       fillBlank('input#nmSei, input[name="nmSei"]', lastName) +
       fillBlank('input#nmMei, input[name="nmMei"]', firstName) +
-      fillBlank('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i]', lastKana) +
-      fillBlank('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i]', firstKana);
+      fillBlank('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i]', lastKana) +
+      fillBlank('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i], input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]', firstKana);
     const fields = Array.from(document.querySelectorAll(
       'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
-      'input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="MeiKana" i], input[name*="MeiKana" i]',
+      'input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i], ' +
+      'input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]',
     )).map((el) => ({
       field: el.name || el.id || '(unnamed)',
       blank: !String(el.value || '').trim(),
@@ -6340,7 +6341,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       })).slice(0, 20)).catch(() => []);
     const requiredNameState = await page.evaluate(() => Array.from(document.querySelectorAll(
       'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
-      'input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="MeiKana" i], input[name*="MeiKana" i]',
+      'input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i], ' +
+      'input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]',
     )).map((el) => ({
       field: el.name || el.id || '(unnamed)',
       blank: !String(el.value || '').trim(),
