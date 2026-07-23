@@ -6189,13 +6189,14 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const firstKana = cleanKana(
       customer.firstNameKana || customer.firstName || parts.slice(1).join(''),
     ) || 'キャクサマ';
-    const fillBlank = (selector, value) => {
+    const fillRequired = (selector, value, isInvalid = (current) => !current) => {
       let changed = 0;
       // SalonBoardの変更画面には、同じname/idを持つhidden側フォームと表示中フォームが
       // 共存する版がある。querySelector()で先頭1件だけ埋めると、実際にsubmitされる側が
-      // 空のまま残るため、該当する空欄をすべて補完する。
+      // 空のまま残るため、該当する必須欄をすべて補完する。
       document.querySelectorAll(selector).forEach((el) => {
-        if (String(el.value || '').trim()) return;
+        const current = String(el.value || '').replace(/\s+/g, '').trim();
+        if (!isInvalid(current)) return;
         el.value = value;
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -6204,11 +6205,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       });
       return changed;
     };
+    // SalonBoardが外部予約へ自動設定する「シ / メイ」は見た目上は非空でも、
+    // 変更保存時のサーバ検証では未入力扱いになる実例がある。空欄だけでなく
+    // これらの仮値も、有効なKIREIDOT側カナ（無ければ安全な既定値）へ置換する。
+    const invalidLastKana = (value) => !value || /^(?:シ|セイ|姓|[-ー])$/.test(value);
+    const invalidFirstKana = (value) => !value || /^(?:メイ|名|[-ー])$/.test(value);
     const changed =
-      fillBlank('input#nmSei, input[name="nmSei"]', lastName) +
-      fillBlank('input#nmMei, input[name="nmMei"]', firstName) +
-      fillBlank('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i]', lastKana) +
-      fillBlank('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i], input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]', firstKana);
+      fillRequired('input#nmSei, input[name="nmSei"]', lastName) +
+      fillRequired('input#nmMei, input[name="nmMei"]', firstName) +
+      fillRequired('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i]', lastKana, invalidLastKana) +
+      fillRequired('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i], input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]', firstKana, invalidFirstKana);
     const fields = Array.from(document.querySelectorAll(
       'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
       'input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i], ' +

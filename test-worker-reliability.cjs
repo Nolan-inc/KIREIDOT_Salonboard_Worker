@@ -124,6 +124,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /_kd_token/,
     'rlastupdate must be fetched from a cache-busted schedule page',
   );
+  assert.match(
+    source,
+    /invalidLastKana[\s\S]*\(\?:シ\|セイ\|姓/,
+    'SalonBoard surname-kana placeholders must be replaced before booking updates',
+  );
+  assert.match(
+    source,
+    /invalidFirstKana[\s\S]*\(\?:メイ\|名/,
+    'SalonBoard first-name-kana placeholders must be replaced before booking updates',
+  );
 }
 
 (async () => {
