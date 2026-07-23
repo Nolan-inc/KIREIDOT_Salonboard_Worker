@@ -6090,6 +6090,55 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return { status: 'confirm_only' };
   }
 
+  // 3.25) 既存予約の顧客名・カナ必須欄を補完する。
+  // SalonBoard は変更対象が日時だけでもフォーム全体を再検証するため、メール取込等で
+  // 氏名カナが空の既存予約は「氏名 (カナ セイ)を入力してください」で保存できない。
+  // KIREIDOT 側の顧客カナを優先し、無い場合だけ表示名から安全なカナを作る。
+  // 既に値がある欄は上書きせず、SalonBoard 上の顧客情報を不用意に変更しない。
+  await page.evaluate((customer) => {
+    const hiraToKata = (s) => String(s || '').replace(/[ぁ-ゖ]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) + 0x60));
+    const cleanName = (s) => String(s || '')
+      .replace(/[^ぁ-ゖァ-ヿ一-龯々〆ヵヶA-Za-z0-9ー・\s]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const cleanKana = (s) => hiraToKata(s)
+      .replace(/[^ァ-ヿー・\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const rawFull = cleanName(customer.name || '') || 'ゲスト';
+    const parts = rawFull.split(/[\s　]+/).filter(Boolean);
+    const lastName = cleanName(customer.lastName || parts[0] || rawFull) || 'ゲスト';
+    const firstName = cleanName(customer.firstName || parts.slice(1).join('') || '様') || '様';
+    const lastKana = cleanKana(
+      customer.lastNameKana || customer.nameKana || customer.lastName || parts[0] || rawFull,
+    ) || 'ヨヤク';
+    const firstKana = cleanKana(
+      customer.firstNameKana || customer.firstName || parts.slice(1).join(''),
+    ) || 'キャクサマ';
+    const fillBlank = (selector, value) => {
+      const el = document.querySelector(selector);
+      if (!el || String(el.value || '').trim()) return false;
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    return [
+      fillBlank('input#nmSei, input[name="nmSei"]', lastName),
+      fillBlank('input#nmMei, input[name="nmMei"]', firstName),
+      fillBlank('input#nmSeiKana, input[name="nmSeiKana"]', lastKana),
+      fillBlank('input#nmMeiKana, input[name="nmMeiKana"]', firstKana),
+    ].filter(Boolean).length;
+  }, {
+    name: p.customer_name || null,
+    lastName: p.customer_last_name || null,
+    firstName: p.customer_first_name || null,
+    nameKana: p.customer_name_kana || null,
+    lastNameKana: p.customer_last_name_kana || null,
+    firstNameKana: p.customer_first_name_kana || null,
+  }).catch(() => 0);
+
   // 3.5) 既存顧客情報に残った電話番号/郵便番号を SB が受け付ける形へ正規化する。
   // SalonBoard は変更対象でない既存フィールドも再検証し、電話だけでなく郵便番号等でも
   // 「※ハイフンなしで入力してください」を返す。ハイフン除去に加え、電話系フィールドは

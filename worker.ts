@@ -604,6 +604,11 @@ type PushBookingPayload = {
   booking_id: string;
   action?: "create" | "update" | "cancel";
   customer_name?: string | null;
+  customer_last_name?: string | null;
+  customer_first_name?: string | null;
+  customer_name_kana?: string | null;
+  customer_last_name_kana?: string | null;
+  customer_first_name_kana?: string | null;
   customer_phone?: string | null;
   customer_email?: string | null;
   customer_code?: string | null;
