@@ -11446,10 +11446,34 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
     return false;
   }, { n: wantName, s: wantStart, e: wantEnd }).catch(() => false);
 
+  // 呼び出し側が保持する勤務パターン一覧は、SBの短縮名を取得できない店舗がある。
+  // 最終的な一意性は、登録直前にこの画面の実テーブルを正として再確認する。
+  const readUsedShortNames = () => page.evaluate(() => {
+    const out = [];
+    for (const box of document.querySelectorAll('input[name="deleteShiftIds"]')) {
+      let tr = box;
+      while (tr && tr.tagName !== 'TR') tr = tr.parentElement;
+      if (!tr) continue;
+      const cells = Array.from(tr.querySelectorAll('td'));
+      // 登録済み一覧は [シフト名称, 短縮名, 設定時間, 備考, 削除]。
+      const short = (cells[1]?.textContent || '').replace(/[\s　]+/g, '').trim();
+      if (short) out.push(short);
+    }
+    return out;
+  }).catch(() => []);
+  const allocateShortName = (used) => {
+    // SBの短縮名は半角英数記号あわせて2文字以内。01..ZZから未使用を選ぶ。
+    for (let seq = 1; seq < 36 * 36; seq++) {
+      const candidate = seq.toString(36).toUpperCase().padStart(2, '0').slice(-2);
+      if (!used.has(candidate)) return candidate;
+    }
+    return null;
+  };
+
   const results = [];
   for (const pat of patterns) {
     const name = String(pat.name || '').trim();
-    const shortName = String(pat.short_name || pat.shortName || '').trim();
+    let shortName = String(pat.short_name || pat.shortName || '').trim();
     const start = String(pat.start || pat.start_time || '').trim();
     const end = String(pat.end || pat.end_time || '').trim();
     if (!name || !/^\d{1,2}:\d{2}$/.test(start) || !/^\d{1,2}:\d{2}$/.test(end)) {
@@ -11457,6 +11481,17 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
       continue;
     }
     if (await tableHas(name, start, end)) { results.push({ name, status: 'exists' }); continue; }
+    const usedShortNames = new Set(await readUsedShortNames());
+    const requestedShortName = shortName;
+    // 空・3文字以上・既存との重複は、登録画面上で未使用の2文字へ差し替える。
+    if (!shortName || shortName.length > 2 || usedShortNames.has(shortName)) {
+      shortName = allocateShortName(usedShortNames);
+      if (!shortName) {
+        results.push({ name, status: 'failed', reason: '勤務パターン短縮名の空きがありません' });
+        continue;
+      }
+      console.log(`[SHIFT-B] short name reassigned ${requestedShortName || '(empty)'} -> ${shortName} for ${name}`);
+    }
     const [sh, sm] = start.split(':');
     const [eh, em] = end.split(':');
 
@@ -11511,7 +11546,12 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
       const cap = await captureScrapeDebug(page, 'workpattern', 'not_persisted', { diagnostics: { name, dialogAccepted, filled } });
       results.push({ name, status: 'failed', reason: `勤務パターンが登録一覧に反映されませんでした (capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true });
     } else {
-      results.push({ name, status: 'ok' });
+      results.push({
+        name,
+        status: 'ok',
+        short_name: shortName,
+        ...(requestedShortName !== shortName ? { short_name_reassigned_from: requestedShortName || null } : {}),
+      });
     }
   }
 
