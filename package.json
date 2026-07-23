@@ -19,6 +19,7 @@
     "test:push": "tsx test-push-booking.ts",
     "test:push:write": "cross-env SALONBOARD_ENABLE_PUSH=true tsx test-push-booking.ts",
     "test:rescan": "tsx test-rescan.ts",
+    "test:worker-reliability": "node test-worker-reliability.cjs",
     "playwright:install": "npx playwright install chromium chromium-headless-shell",
     "playwright:copy": "node build-resources/copy-playwright-browsers.cjs",
     "prebuild:dist": "npm run playwright:install && npm run playwright:copy",

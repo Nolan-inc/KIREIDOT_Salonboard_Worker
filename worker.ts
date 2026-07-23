@@ -5027,24 +5027,28 @@ const READ_JOB_SAFETY_TIMEOUT_MS = Number(
     process.env.SB_JOB_TIMEOUT_MS ??
     10 * 60_000,
 );
-// cloud の予約書込は、3回の「Chrome完全再起動 + 出口切替 + 全工程再実行」を
+// cloud の予約/シフト書込は、3回の「Chrome完全再起動 + 出口切替 + 全工程再実行」を
 // 6分以内で完結させる。5分30秒でハングを打ち切り、残り時間でcallback/PC移管を行う。
-const CLOUD_BOOKING_FALLBACK_TIMEOUT_MS = Number(
-  process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ?? 330_000,
+const CLOUD_WRITE_FALLBACK_TIMEOUT_MS = Number(
+  process.env.SB_CLOUD_WRITE_FALLBACK_TIMEOUT_MS ??
+    process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ??
+    330_000,
 );
 
 function isCloudWorker(): boolean {
   return WORKER_CAPABILITIES.split(",").map((v) => v.trim()).includes("playwright_cloud");
 }
 
-function isBookingWrite(job: Job): boolean {
-  return job.job_type === "push_booking" || job.job_type === "cancel_booking";
+function isPcFallbackWrite(job: Job): boolean {
+  return job.job_type === "push_booking" ||
+    job.job_type === "cancel_booking" ||
+    job.job_type === "push_shifts";
 }
 
 async function handleJobGuarded(job: Job): Promise<void> {
   const limitMs =
-    isCloudWorker() && isBookingWrite(job)
-      ? CLOUD_BOOKING_FALLBACK_TIMEOUT_MS
+    isCloudWorker() && isPcFallbackWrite(job)
+      ? CLOUD_WRITE_FALLBACK_TIMEOUT_MS
       : READ_JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeout = new Promise<"timeout">((resolve) => {

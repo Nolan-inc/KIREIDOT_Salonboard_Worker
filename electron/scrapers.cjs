@@ -2966,7 +2966,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     const verifyUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
     verifyUrl.searchParams.set('date', ymd);
     await page.goto(verifyUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 15_000 });
+    await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
   } catch (e) {
     return fail(`予定登録後のスケジュール確認画面を開けません: ${e?.message ?? e}`, 'CONFIRMATION_MISMATCH', true);
   }
@@ -3068,7 +3068,7 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     const u = new URL('/KLP/schedule/salonSchedule/', baseUrl);
     u.searchParams.set('date', when.yyyymmdd);
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 15_000 });
+    await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
@@ -3107,11 +3107,11 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   }
   try {
     await Promise.all([
-      page.waitForSelector('form#scheduleChange, a#delete', { timeout: 15_000 }).catch(() => {}),
+      page.waitForSelector('form#scheduleChange, a#delete', { state: 'attached', timeout: 15_000 }).catch(() => {}),
       changeBtn.click({ timeout: 10_000 }),
     ]);
   } catch (_e) { /* 下で到達検証 */ }
-  await page.waitForSelector('form#scheduleChange', { timeout: 10_000 }).catch(() => {});
+  await page.waitForSelector('form#scheduleChange', { state: 'attached', timeout: 10_000 }).catch(() => {});
   if ((await page.locator('form#scheduleChange').count().catch(() => 0)) === 0) {
     return fail(`予定変更画面に到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
   }
@@ -3150,18 +3150,59 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     return fail('「削除する」ボタン(a#delete)が見つかりません', 'UNKNOWN_ERROR', true);
   }
   let nativeDialogAccepted = false;
-  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  let htmlDialogAccepted = false;
+  let submitResponse = null;
+  const onDialog = async (d) => {
+    nativeDialogAccepted = true;
+    try { await d.accept(); } catch (_e) { /* noop */ }
+  };
   page.on('dialog', onDialog);
   try {
-    await delBtn.click({ timeout: 12_000 }).catch(() => {});
-    // ページ内HTMLダイアログ (「はい」.accept) が出る場合に備える
-    const yesBtn = page.locator('a.accept:visible, .buttons a.accept').first();
-    await yesBtn.waitFor({ state: 'visible', timeout: 4_000 }).catch(() => {});
-    if ((await yesBtn.count().catch(() => 0)) > 0) {
-      await yesBtn.click({ timeout: 8_000 }).catch(() => {});
+    // 削除POST/Ajaxをクリック前から監視する。以前はクリック例外を握りつぶし、
+    // 非表示の .accept を first() で掴んでもそのまま検証へ進んでいたため、実際には
+    // 未送信なのに「予定が残っている」とだけ報告していた。
+    const responsePromise = page.waitForResponse((res) => {
+      const req = res.request();
+      return req.method() !== 'GET' && /schedule|yotei|todo/i.test(res.url());
+    }, { timeout: 18_000 }).catch(() => null);
+
+    await delBtn.click({ timeout: 12_000 });
+
+    // ページ内HTMLダイアログの可視ボタンだけを選ぶ。SalonBoardの画面差分に備えて
+    // class=accept、文言「はい」「OK」「削除する」のいずれも許容する。
+    const yesButtons = page.locator([
+      'a.accept:visible',
+      'button.accept:visible',
+      '.buttons a.accept:visible',
+      '.buttons button.accept:visible',
+      'a:has-text("はい"):visible',
+      'button:has-text("はい"):visible',
+      'a:has-text("OK"):visible',
+      'button:has-text("OK"):visible',
+      'a:not(#delete):has-text("削除する"):visible',
+      'button:not(#delete):has-text("削除する"):visible',
+      'input[type="button"][value*="はい"]:visible',
+      'input[type="submit"][value*="はい"]:visible',
+    ].join(', '));
+    await yesButtons.first().waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+    const yesCount = await yesButtons.count().catch(() => 0);
+    for (let i = 0; i < yesCount; i += 1) {
+      const candidate = yesButtons.nth(i);
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      await candidate.click({ timeout: 8_000 });
+      htmlDialogAccepted = true;
+      break;
     }
-    // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大15秒ポーリング
-    const deadline = Date.now() + 15_000;
+
+    // SalonBoardの画面差分でPOST URLが監視条件に一致しなくても、ここで18秒を丸ごと
+    // 消費しない。5秒でUI完了確認へ進み、最終的な成功判定は予定の不存在で行う。
+    submitResponse = await Promise.race([
+      responsePromise,
+      page.waitForTimeout(5_000).then(() => null),
+    ]);
+
+    // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大10秒ポーリング。
+    const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       await page.waitForTimeout(400);
       if (!/scheduleChange/i.test(page.url())) break;
@@ -3179,21 +3220,51 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     return fail(`予定削除時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
   }
 
-  // (6) スケジュール画面に戻って予定が消えたことを検証
-  try {
-    const u2 = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-    u2.searchParams.set('date', when.yyyymmdd);
-    await page.goto(u2.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('.jscScheduleMainTableStaff', { timeout: 12_000 });
-    const still = await findTodo(false).catch(() => null);
-    if (still && still.ok) {
-      return fail(`削除操作後もスケジュール上に予定が残っています (dialog=${nativeDialogAccepted})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+  // (6) スケジュール画面に戻って予定が消えたことを検証。
+  // SalonBoard側の反映/キャッシュ遅延を考慮し、間隔を空けて最大3回再読込する。
+  let lastStill = null;
+  let verifyError = null;
+  for (const delayMs of [800, 1_800, 3_500]) {
+    try {
+      await page.waitForTimeout(delayMs);
+      const u2 = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+      u2.searchParams.set('date', when.yyyymmdd);
+      u2.searchParams.set('_kd_verify', String(Date.now()));
+      await page.goto(u2.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      // 全予定が消えた直後は表コンテナの高さが0になり :visible 判定を満たさない画面が
+      // ある。DOMに接続済みなら findTodo で不存在を確定できる。
+      await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 12_000 });
+      lastStill = await findTodo(false).catch(() => null);
+      if (lastStill && !lastStill.ok && (!staffExt || lastStill.staffColFound)) {
+        return { status: 'ok', externalId: null };
+      }
+    } catch (e) {
+      verifyError = e;
     }
-  } catch (_e) {
-    // 検証用の再読込に失敗しただけなら、(5) の完了サインを信用して成功扱い。
   }
 
-  return { status: 'ok', externalId: null };
+  const responseStatus = submitResponse ? submitResponse.status() : 'none';
+  const diagnostic = {
+    nativeDialogAccepted,
+    htmlDialogAccepted,
+    responseStatus,
+    verifyError: verifyError?.message ?? null,
+    lastStill,
+  };
+  const capture = await captureScrapeDebug(page, 'schedule-delete', 'not_confirmed', {
+    diagnostics: diagnostic,
+  }).catch(() => null);
+
+  if (lastStill && lastStill.ok) {
+    return fail(
+      `削除操作後もスケジュール上に予定が残っています (nativeDialog=${nativeDialogAccepted}, htmlDialog=${htmlDialogAccepted}, response=${responseStatus}${capture ? `, capture=${capture}` : ''})。自動で再試行します。`,
+      'DELETE_NOT_CONFIRMED', false,
+    );
+  }
+  return fail(
+    `予定削除後の再確認に失敗しました (response=${responseStatus}, error=${verifyError?.message ?? 'unknown'}${capture ? `, capture=${capture}` : ''})。自動で再試行します。`,
+    'DELETE_VERIFY_FAILED', false,
+  );
 }
 
 // =====================================================================
@@ -5628,6 +5699,18 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   }
 
   if (!reserveId) {
+    // DB enqueue 時に「外部IDなし + 過去の push_booking 成功なし」を確認済みなら、
+    // SalonBoard に登録されたことがない予約の取消である。検索でも見つからないため、
+    // 何も消すものがない冪等成功として収束させる。単に ID が欠損しただけの予約は
+    // この明示フラグを持たないので、従来どおり手動確認に止める。
+    if (p.assume_absent_if_never_synced === true) {
+      return {
+        status: 'ok',
+        externalId: null,
+        alreadyAbsent: true,
+        summary: 'cancel_booking: SalonBoard未登録の予約のため取消済みとして確定',
+      };
+    }
     // reserveId が無いと SalonBoard 上の予約を一意に特定できない。
     // (一覧検索でも見つからない = SalonBoard 上に該当予約が無い可能性が高い)
     return fail('external_booking_id (SalonBoard 予約ID) が無く、予約一覧でも該当予約を特定できませんでした。SalonBoard 上に既に無いか、予約日時/担当が一致しません。', 'RESERVE_NOT_FOUND', true);
