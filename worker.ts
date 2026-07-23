@@ -705,7 +705,12 @@ async function report(body: CallbackBody, capturePage?: unknown): Promise<void> 
   const reportJobId = String((body as { job_id?: string }).job_id ?? "");
   const reportError = String((body as { error?: string }).error ?? "");
   const guardTimedOutAt = _guardTimedOutJobs.get(reportJobId);
-  const isGuardTimeoutReport = reportError.includes("[CLOUD_PC_FALLBACK] cloud処理が");
+  // guard 自身が送るタイムアウト通知は必ず通し、その後に遅れて返る
+  // scraper 側コールバックだけを抑止する。以前は [JOB_TIMEOUT] も抑止され、
+  // DB が running のまま残ってPCフォールバックへ進めなかった。
+  const isGuardTimeoutReport =
+    reportError.includes("[CLOUD_PC_FALLBACK] cloud処理が") ||
+    reportError.includes("[JOB_TIMEOUT]");
   if (guardTimedOutAt && !isGuardTimeoutReport) {
     console.warn(
       `[callback] suppress late callback after guard timeout job=${reportJobId.slice(0, 8)} error=${reportError.slice(0, 120)}`,

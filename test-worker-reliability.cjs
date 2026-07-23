@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
 const { chromium } = require('playwright');
 const {
   deleteScheduleViaForm,
@@ -92,9 +93,19 @@ async function testNeverSyncedCancelIsIdempotent() {
   assert.equal(result.alreadyAbsent, true);
 }
 
+function testGuardTimeoutCallbackIsNotSuppressed() {
+  const source = readFileSync(require.resolve('./worker.ts'), 'utf8');
+  assert.match(
+    source,
+    /isGuardTimeoutReport[\s\S]*reportError\.includes\("\[JOB_TIMEOUT\]"\)/,
+    'the guard timeout callback must pass through late-callback suppression',
+  );
+}
+
 (async () => {
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
+  testGuardTimeoutCallbackIsNotSuppressed();
   console.log('worker reliability tests: ok');
 })().catch((error) => {
   console.error(error);
