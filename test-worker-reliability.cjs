@@ -29,7 +29,7 @@ async function testHtmlDeleteConfirmation() {
           <p class="scheduleTimeZoneSetting">["18:00", "19:30"]</p>
         </div>`;
       await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: `
-        <div class="scheduleMainHead" id="STAFF_W001_20260728"></div>
+        <div class="scheduleMainHead" id="STAFF_W009_20260728">minori</div>
         <div class="jscScheduleMainTableStaff">
           <div class="scheduleMainTableLine">${block}</div>
         </div>
@@ -52,7 +52,7 @@ async function testHtmlDeleteConfirmation() {
           <input id="jsiSchDate" value="20260728">
           <select id="jsiStartTimeHour"><option selected>18</option></select>
           <select id="jsiStartTimeMinute"><option selected>00</option></select>
-          <select name="staffId"><option selected>W001</option></select>
+          <select name="staffId"><option selected>W009</option></select>
           <a id="delete" href="javascript:void(0)">削除する</a>
         </form>
         <div class="buttons" id="old-hidden" style="display:none"><a class="accept">はい</a></div>
@@ -74,6 +74,8 @@ async function testHtmlDeleteConfirmation() {
   const result = await deleteScheduleViaForm(page, {
     scheduled_at: '2026-07-28T09:00:00.000Z',
     block_reason: '店舗MTG',
+    staff_name: 'minori',
+    // KD側に古いexternal_idが残っていても、一意な表示名から現在の列を復元する。
     salonboard_staff_external_id: 'W001',
   }, { baseUrl: 'http://sb.test/', enableDelete: true });
 
@@ -105,10 +107,30 @@ function testGuardTimeoutCallbackIsNotSuppressed() {
   );
 }
 
+function testKnownSalonBoardRecoveryBranchesStayEnabled() {
+  const source = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
+  assert.match(
+    source,
+    /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
+    'merged schedule blocks must count as confirmed when they contain the requested interval',
+  );
+  assert.match(
+    source,
+    /extReserveDetail\/\?reserveId=/,
+    'booking changes must fall back through the reservation detail page',
+  );
+  assert.match(
+    source,
+    /_kd_token/,
+    'rlastupdate must be fetched from a cache-busted schedule page',
+  );
+}
+
 (async () => {
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
   testGuardTimeoutCallbackIsNotSuppressed();
+  testKnownSalonBoardRecoveryBranchesStayEnabled();
   console.log('worker reliability tests: ok');
 })().catch((error) => {
   console.error(error);

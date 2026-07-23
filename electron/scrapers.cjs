@@ -2712,7 +2712,11 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
     const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
     blocks.push({ start, end, title: actualTitle });
-    if (start === startTotal && end === endTotal && actualTitle === norm(title)) found = true;
+    // SalonBoard は同じタイトルの連続・隣接予定を1つの表示ブロックへ結合する。
+    // そのため登録した区間が既存の「予定あり」に包含された場合も実在している。
+    // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した
+    // 12:30-13:30 を未登録と誤判定するため、同タイトルの包含も成功にする。
+    if (start <= startTotal && end >= endTotal && actualTitle === norm(title)) found = true;
   }
   return found ? { ok: true, reason: null, blocks } : { ok: false, reason: 'exact_schedule_not_found', blocks };
 }
@@ -2766,6 +2770,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   try {
     const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
     schedUrl.searchParams.set('date', when.yyyymmdd);
+    schedUrl.searchParams.set('_kd_token', String(Date.now()));
     await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
     rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
@@ -2947,6 +2952,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const stillOnForm = /scheduleRegist/i.test(afterUrl);
   const doneText = await page.locator('text=/登録しました|完了しました|受け付けました/').count().catch(() => 0);
   const looksDone = !stillOnForm || doneText > 0 || afterUrl !== beforeUrl;
+  let completionWarning = '';
   if (!looksDone) {
     const visibleMessage = await page.locator(
       '.mod_box_warning:visible, #warningMessageArea:visible, .error:visible, .errorMessage:visible, #dragDialog:visible, .mod_dialog:visible',
@@ -2955,7 +2961,9 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     const capA = await captureScrapeDebug(page, 'schedule', `no_complete_${ymd}_${staffExt}`, {
       diagnostics: { dialogAccepted, afterUrl, formState, detail },
     });
-    return fail(`予定の登録完了を確認できませんでした (dialog=${dialogAccepted}, url=${afterUrl}${detail ? `, message=${detail}` : ''}${capA ? `, capture=${capA}` : ''})`, 'UNKNOWN_ERROR', true);
+    // 完了サインが出ない画面差分があるため、この時点では失敗にしない。
+    // 下のスケジュール実在確認を真実源にし、実在すれば成功として扱う。
+    completionWarning = `完了サインなし(dialog=${dialogAccepted}, url=${afterUrl}${detail ? `, message=${detail}` : ''}${capA ? `, capture=${capA}` : ''})`;
   }
 
   // 完了画面の一般文言だけでは成功としない。実際のスケジュールへ戻り、
@@ -2981,7 +2989,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     const blocks = Array.isArray(verified?.blocks)
       ? verified.blocks.slice(0, 8).map((b) => `${b.start}-${b.end}:${b.title}`).join(',')
       : '';
-    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''})`, 'CONFIRMATION_MISMATCH', true);
+    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''}${completionWarning ? `, ${completionWarning}` : ''})`, 'CONFIRMATION_MISMATCH', false);
   }
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
 }
@@ -3014,23 +3022,39 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMin = when.hour * 60 + when.minute;
   const title = String(p.block_reason || '').trim().slice(0, 30) || null;
-  const staffExt = String(p.salonboard_staff_external_id || '').toUpperCase() || null;
+  let staffExt = String(p.salonboard_staff_external_id || '').toUpperCase() || null;
+  const staffName = String(p.staff_name || '').normalize('NFKC').replace(/\s+/g, '').trim() || null;
 
   // スケジュール画面上で対象の予定ブロックを探す共通ロジック。
   // mark=true なら見つかった要素に data-kireidot-del 属性を付ける。
   const findTodo = (mark) => page.evaluate(
-    ({ staffExt, startMin, title, mark }) => {
-      const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
+    ({ staffExt, staffName, startMin, title, mark }) => {
+      const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, '').trim().toLowerCase();
+      const headEls = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]'));
+      const heads = headEls.map((el) => {
         const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
         return m ? m[1].toUpperCase() : null;
       });
       const staffTable = document.querySelector('.jscScheduleMainTableStaff');
       if (!staffTable) return { error: 'no_staff_table' };
-      const staffColFound = !staffExt || heads.includes(staffExt);
+      let selectedStaffExt = staffExt;
+      let selectedIndex = staffExt ? heads.indexOf(staffExt) : -1;
+      // KD側のexternal_idが古い/列に出ない場合でも、表示名が一意なら対象列を
+      // 安全に復元する。曖昧な同名スタッフは選ばず従来どおり停止する。
+      if (selectedIndex < 0 && staffName) {
+        const nameMatches = headEls
+          .map((el, i) => ({ i, name: norm(el.textContent) }))
+          .filter((x) => x.name && (x.name === norm(staffName) || x.name.includes(norm(staffName))));
+        if (nameMatches.length === 1) {
+          selectedIndex = nameMatches[0].i;
+          selectedStaffExt = heads[selectedIndex] || null;
+        }
+      }
+      const staffColFound = !staffExt || selectedIndex >= 0;
       const lines = Array.from(staffTable.querySelectorAll('.scheduleMainTableLine'));
       const items = [];
       lines.forEach((line, i) => {
-        if (staffExt && heads[i] !== staffExt) return;
+        if (staffExt && i !== selectedIndex) return;
         for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
           if (el.classList.contains('isDayOff')) continue; // シフトの休日は対象外
           const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
@@ -3056,17 +3080,18 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
       }
       if (cands.length === 1) {
         if (mark) cands[0].el.setAttribute('data-kireidot-del', '1');
-        return { ok: true, matched: 1, staffColFound, title: cands[0].title, start: cands[0].start, end: cands[0].end };
+        return { ok: true, matched: 1, staffColFound, staffExt: selectedStaffExt, title: cands[0].title, start: cands[0].start, end: cands[0].end };
       }
-      return { ok: false, matched: cands.length, staffColFound, total: items.length };
+      return { ok: false, matched: cands.length, staffColFound, staffExt: selectedStaffExt, total: items.length };
     },
-    { staffExt, startMin, title, mark: !!mark },
+    { staffExt, staffName, startMin, title, mark: !!mark },
   );
 
   // (1) スケジュール画面を開く
   try {
     const u = new URL('/KLP/schedule/salonSchedule/', baseUrl);
     u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('_kd', String(Date.now()));
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
   } catch (e) {
@@ -3091,6 +3116,7 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     // 該当の予定が無い = 既に削除済み (冪等成功)
     return { status: 'ok', externalId: null, alreadyAbsent: true };
   }
+  if (found.staffExt) staffExt = found.staffExt;
 
   // (3) 予定ブロックをクリック → ポップアップの「予定変更」をクリック
   const target = page.locator('.jscScheduleToDo[data-kireidot-del="1"]').first();
@@ -4659,6 +4685,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
         const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
         schedUrl.searchParams.set('date', when.yyyymmdd);
+        // rlastupdate は画面更新の楽観ロック値。Chrome HTTP cache から古いHTMLを
+        // 再利用すると、取得直後でも KPCL017V01 になるため毎回固有URLで取得する。
+        schedUrl.searchParams.set('_kd_token', String(Date.now()));
         await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       }
       // #rlastupdate が出現したら即取得 (networkidle は待たない)。
@@ -4716,6 +4745,17 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       { timeout: 15_000 },
     ).catch(() => {});
   } catch (e) {
+    const message = String(e?.message ?? e);
+    // SalonBoard側の遷移が同時更新で中断された場合は、古いrlastupdateを握ったまま
+    // 続行せず、スケジュールから最新トークンを取り直して登録工程を再実行する。
+    if (/ERR_ABORTED|frame (?:was )?detached|Target page, context or browser has been closed/i.test(message)
+      && staleTokenRetry < 2) {
+      await page.waitForTimeout(500 + staleTokenRetry * 500).catch(() => {});
+      return pushBookingViaForm(page, payload, {
+        ...opts,
+        staleTokenRetry: staleTokenRetry + 1,
+      });
+    }
     return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
@@ -5941,9 +5981,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const isNetReserve = /^(BF|BE)/i.test(reserveId);
   const extChangePath = `${ROOT}/reserve/ext/extReserveChange/?reserveId=${reserveId}`;
   const netChangePath = `${ROOT}/reserve/net/reserveChange/?reserveId=${reserveId}`;
+  const extDetailPath = `${ROOT}/reserve/ext/extReserveDetail/?reserveId=${reserveId}`;
+  const netDetailPath = `${ROOT}/reserve/net/reserveDetail/?reserveId=${reserveId}`;
   const candidates = isNetReserve
-    ? [netChangePath, extChangePath]
-    : [extChangePath, netChangePath];
+    ? [netChangePath, netDetailPath, extChangePath, extDetailPath]
+    : [extChangePath, extDetailPath, netChangePath, netDetailPath];
   // 詳細画面にも存在する #rlastupdate / a#change / a#regist は到達判定に使わない。
   // 実際に編集できる時刻・所要フィールドがある場合だけ変更フォームとみなす。
   const formSel = [
@@ -5962,7 +6004,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     if ((await page.locator(formSel).count().catch(() => 0)) > 0) return true;
     const changeCta = page.locator([
       'a#change:visible',
+      'a#fnc_change:visible',
+      'a[href*="ReserveChange"]:visible',
+      'a[href*="reserveChange"]:visible',
       'a:has-text("変更する"):visible',
+      'a:has-text("予約を変更"):visible',
       'button:has-text("変更する"):visible',
       'input[type="submit"][value*="変更"]:visible',
       'input[type="button"][value*="変更"]:visible',
@@ -5977,9 +6023,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return (await page.locator(formSel).count().catch(() => 0)) > 0;
   };
   let onForm = false;
-  for (let openTry = 1; openTry <= 2 && !onForm; openTry++) {
+  for (let openTry = 1; openTry <= 3 && !onForm; openTry++) {
     for (const path of candidates) {
-      await page.goto(new URL(path, baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      const candidateUrl = new URL(path, baseUrl);
+      candidateUrl.searchParams.set('_kd', `${Date.now()}_${openTry}`);
+      await page.goto(candidateUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
       // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
       await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
       onForm = (await page.locator(formSel).count().catch(() => 0)) > 0;
@@ -5987,10 +6035,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       if (onForm) break;
     }
     if (onForm) break;
-    const expired = await page.evaluate(() =>
-      /有効期限|再度ログイン|操作されなかった/.test(((document.body && document.body.innerText) || '').replace(/\s+/g, '')),
-    ).catch(() => false);
-    if (openTry === 1 && expired && typeof opts.relogin === 'function') {
+    const pageState = await page.evaluate(() => {
+      const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+      return {
+        expired: /有効期限|再度ログイン|操作されなかった/.test(body),
+        transient: /システムエラー|エラーが発生しました|再度操作しなおしてください|サロンが選択されていません/.test(body),
+      };
+    }).catch(() => ({ expired: false, transient: false }));
+    // セッション失効だけでなく、SBが一時エラー/サロン未選択へ戻した場合も
+    // fresh login→店舗文脈再確立からやり直す。
+    if (openTry < 3 && (pageState.expired || pageState.transient) && typeof opts.relogin === 'function') {
       const ok = await opts.relogin().catch(() => false);
       if (ok) { await ensureReserveSalonContext(page, baseUrl, opts); continue; }
     }
