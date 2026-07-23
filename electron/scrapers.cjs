@@ -4481,6 +4481,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const p = payload || {};
+  const staleTokenRetry = Number(opts.staleTokenRetry || 0);
   const fail = async (reason, errorCode, manualRequired) => {
     // 失敗した「まさにその画面」を撮って result に載せる(per-job=店舗レーン並行でも混線しない)。
     // Slack 通知に添付するため base64 で返す。best-effort(撮影失敗しても登録失敗の返却は継続)。
@@ -4729,6 +4730,24 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       const body = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 200);
       return { url: location.href, title: document.title, forms, body };
     }).catch(() => ({ url: page.url(), title: '?', forms: [], body: '?' }));
+    // SalonBoardのrlastupdateはスケジュール変更のたびに失効する。同じ店舗で受付操作や
+    // 別ジョブが直前に走ると、取得から登録フォーム遷移までの数秒でもKPCL017V01
+    // (「他のユーザによって変更」)になる。手動対応へ落とさず、最新トークン取得を含む
+    // 登録工程を最初から最大2回やり直す。先頭の既存予約チェックも再実行するため、
+    // 直前の試行が実は登録済みだった場合でも二重登録しない。
+    const staleToken = /他のユーザによって変更|最新情報を確認|KPCL017V01/i.test(
+      `${diag.body || ''} ${diag.url || ''}`,
+    );
+    if (staleToken && staleTokenRetry < 2) {
+      console.log(
+        `[pushstep] ${(p.booking_id || '').slice(0, 8)} stale rlastupdate → 全工程再試行 ${staleTokenRetry + 1}/2`,
+      );
+      await page.waitForTimeout(500 + staleTokenRetry * 500);
+      return pushBookingViaForm(page, payload, {
+        ...opts,
+        staleTokenRetry: staleTokenRetry + 1,
+      });
+    }
     return fail(
       `予約登録フォームに到達できませんでした (rlastupdate=${rlastupdate || 'なし'})。url=${diag.url} title="${diag.title}" forms=[${(diag.forms || []).join(',')}] body="${diag.body}"`,
       'CONFIRMATION_MISMATCH',

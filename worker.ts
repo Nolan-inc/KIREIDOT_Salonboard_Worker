@@ -1083,8 +1083,8 @@ async function handleJob(job: Job): Promise<void> {
       };
       const isCredentialFailure = (reason: string) =>
         /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
-      const isImageAuthFailure = (reason: string) =>
-        /IMAGE_AUTH_REQUIRED|画像認証/i.test(reason);
+      const shouldRetryLoginViaResidential = (reason: string) =>
+        /IMAGE_AUTH_REQUIRED|画像認証|ERR_HTTP_RESPONSE_CODE_FAILURE|login did not complete|navigation: page\.goto/i.test(reason);
       let loginResult = await attemptLogin();
       // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断では、同じChrome・
       // 同じ出口を再利用しない。Cookie削除だけでは Akamai の接続/IP状態が残り、同じ失敗を
@@ -1097,21 +1097,22 @@ async function handleJob(job: Job): Promise<void> {
       ) {
         if (isCredentialFailure(loginResult.reason ?? "")) break;
         // 書込ジョブは通常、複雑なフォームとの相性が良い sticky ISP を使う。ただし
-        // その ISP 出口で画像認証になった場合まで residential を禁止すると、10本の
-        // ISP pool が同じ Akamai 判定を受けている間は3回とも失敗してPCへ流れてしまう。
-        // 画像認証を検知した時だけ、残りの完全再ログインを住宅回線へ切り替える。
-        // これは CAPTCHA を解く処理ではなく、別の信頼済み出口から最初から認証し直す処理。
+        // その ISP 出口で画像認証・HTTP応答拒否・ログイン未完了になった場合まで
+        // residential を禁止すると、10本のISP poolが同じAkamai判定を受けている間は
+        // 3回とも失敗してPCへ流れてしまう。ログイン基盤障害を検知した時だけ、残りの
+        // 完全再ログインを住宅回線へ切り替える。CAPTCHAを解くのではなく、別の信頼済み
+        // 出口から認証工程を最初からやり直す。
         if (
           isWriteJob &&
           !forceResidential &&
           fallbackConfigured() &&
-          isImageAuthFailure(loginResult.reason ?? "")
+          shouldRetryLoginViaResidential(loginResult.reason ?? "")
         ) {
           noteLoginThrottle(job.shop_id);
           forceResidential = true;
           avoidResidential = false;
           console.log(
-            `[proxy] ${tag} ISP画像認証を検知 → residentialでCloudログインを完全再試行`,
+            `[proxy] ${tag} ISPログイン障害を検知 → residentialでCloudログインを完全再試行`,
           );
         }
         console.log(
