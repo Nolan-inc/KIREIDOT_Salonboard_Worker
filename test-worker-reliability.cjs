@@ -33,6 +33,9 @@ async function testHtmlDeleteConfirmation() {
         <div class="jscScheduleMainTableStaff">
           <div class="scheduleMainTableLine">${block}</div>
         </div>
+        <div class="scheduleReservation" style="position:fixed;inset:0;z-index:100">
+          <ul class="scheduleReserveIconList"><li>予約overlay</li></ul>
+        </div>
         <div class="mod_popup_02 js_yotei" style="display:none">
           <a id="change" href="/KLP/set/scheduleChange/">予定変更</a>
         </div>

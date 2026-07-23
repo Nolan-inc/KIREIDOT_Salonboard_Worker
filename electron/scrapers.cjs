@@ -3096,9 +3096,12 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   const target = page.locator('.jscScheduleToDo[data-kireidot-del="1"]').first();
   try {
     await target.scrollIntoViewIfNeeded().catch(() => {});
-    await target.click({ timeout: 10_000 });
+    // 同じセルの予約アイコンが予定ブロック上へ重なるSalonBoardレイアウトがある。
+    // 対象はスタッフ・開始時刻・タイトルで一意に絞り込み済みなので、座標上の
+    // overlayに左右されないDOMクリックを許可する。
+    await target.evaluate((el) => el.click());
   } catch (e) {
-    return fail(`予定ブロックをクリックできませんでした: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
+    return fail(`予定ブロックをクリックできませんでした: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
   const changeBtn = page.locator('.mod_popup_02.js_yotei a:has-text("予定変更")').first();
   await changeBtn.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
@@ -3108,7 +3111,9 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   try {
     await Promise.all([
       page.waitForSelector('form#scheduleChange, a#delete', { state: 'attached', timeout: 15_000 }).catch(() => {}),
-      changeBtn.click({ timeout: 10_000 }),
+      // ポップアップ背面の予約overlayがpointer eventを保持する画面差分でも、
+      // 一意に特定した「予定変更」リンクを確実に開く。
+      changeBtn.evaluate((el) => el.click()),
     ]);
   } catch (_e) { /* 下で到達検証 */ }
   await page.waitForSelector('form#scheduleChange', { state: 'attached', timeout: 10_000 }).catch(() => {});
