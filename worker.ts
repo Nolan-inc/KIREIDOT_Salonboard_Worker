@@ -443,6 +443,7 @@ function buildAuthHeaders(): Record<string, string> {
 // ------------------------------------------------------------
 type JobType =
   | "fetch_bookings"
+  | "fetch_booking_detail"
   | "fetch_sales"
   | "push_booking"
   | "cancel_booking"
@@ -922,7 +923,10 @@ async function handleJob(job: Job): Promise<void> {
       job_id: job.id,
       status: "succeeded",
       summary: `[DRY_RUN] ${job.job_type} skipped`,
-      ...(job.job_type === "fetch_bookings" ? { bookings: [] } : {}),
+      ...(job.job_type === "fetch_bookings" ||
+      job.job_type === "fetch_booking_detail"
+        ? { bookings: [] }
+        : {}),
       ...(job.job_type === "fetch_sales"
         ? { sales: { target_date: todayJst(), total_sales: 0, raw: { dry_run: true } } }
         : {}),
@@ -1953,7 +1957,28 @@ async function handleJob(job: Job): Promise<void> {
       return;
     }
 
-    if (job.job_type === "fetch_bookings") {
+    if (
+      job.job_type === "fetch_bookings" ||
+      job.job_type === "fetch_booking_detail"
+    ) {
+      const isBookingDetail = job.job_type === "fetch_booking_detail";
+      const targetReserveId = isBookingDetail
+        ? String(job.payload?.reserve_id ?? "").trim()
+        : "";
+      const targetDate = isBookingDetail
+        ? jstDateFromIso(job.payload?.scheduled_at)
+        : null;
+      if (isBookingDetail && (!targetReserveId || !targetDate)) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "non_retryable_failed",
+          error:
+            "fetch_booking_detail requires payload.reserve_id and a valid payload.scheduled_at",
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (invalid detail payload)`);
+        return;
+      }
       // genre / shop_name は Admin がジョブ top-level に同梱済み (jobs/route.ts)。
       // 'hair' は専用フロー、それ以外は 'esthetic' に正規化 (Admin 側と同じ)。
       const genre =
@@ -2019,6 +2044,9 @@ async function handleJob(job: Job): Promise<void> {
           // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
           relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
           abortSignal: _fetchAc.signal,
+          ...(targetDate
+            ? { range: { fromStr: targetDate, toStr: targetDate } }
+            : {}),
         })) as { rows: unknown[]; debug?: unknown; acceptance?: unknown[] });
       } catch (e) {
         if (
@@ -2030,11 +2058,11 @@ async function handleJob(job: Job): Promise<void> {
           // 予約書込にレーンを譲るため fetch を中断。requeue して次回取得に回す。
           await report({
             job_id: job.id,
-            job_type: "fetch_bookings",
+            job_type: job.job_type,
             status: "retryable_failed",
             error: "preempted by booking write (requeue)",
           } as unknown as CallbackBody);
-          console.log(`[job] done  ${tag} (fetch_bookings preempted -> requeue)`);
+          console.log(`[job] done  ${tag} (${job.job_type} preempted -> requeue)`);
           return;
         }
         throw e;
@@ -2047,7 +2075,7 @@ async function handleJob(job: Job): Promise<void> {
         await report(
           {
             job_id: job.id,
-            job_type: "fetch_bookings",
+            job_type: job.job_type,
             status: "retryable_failed",
             error: `session lost during bookings scrape (landedOn=${
               (debug as { landedOn?: string })?.landedOn ?? "?"
@@ -2055,23 +2083,62 @@ async function handleJob(job: Job): Promise<void> {
           } as unknown as CallbackBody,
           page,
         );
-        console.log(`[job] done  ${tag} (fetch_bookings session lost -> retryable)`);
+        console.log(`[job] done  ${tag} (${job.job_type} session lost -> retryable)`);
         return;
       }
-      const bookings = rows ?? [];
+      const scrapedBookings = Array.isArray(rows)
+        ? (rows as ScrapedBooking[])
+        : [];
+      const bookings = isBookingDetail
+        ? scrapedBookings.filter(
+            (booking) =>
+              String(booking?.external_id ?? "").trim() === targetReserveId,
+          )
+        : scrapedBookings;
+      if (isBookingDetail && bookings.length === 0) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "retryable_failed",
+          error: `予約番号 ${targetReserveId} がSBの対象日一覧にまだ見つかりません`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (target booking not found -> retryable)`);
+        return;
+      }
+      if (
+        isBookingDetail &&
+        !bookings.some(
+          (booking) =>
+            String(booking?.staff_external_id ?? "").trim() ||
+            String(booking?.staff_name ?? "").trim(),
+        )
+      ) {
+        await report({
+          job_id: job.id,
+          job_type: job.job_type,
+          status: "retryable_failed",
+          error: `予約番号 ${targetReserveId} の担当者がSB側でまだ確定していません`,
+        } as unknown as CallbackBody);
+        console.log(`[job] done  ${tag} (target staff not ready -> retryable)`);
+        return;
+      }
       // Admin callback (job_type=fetch_bookings) が bookings[] を
       // salonboard_bulk_upsert_bookings RPC で upsert する。PC の定期ループと同 RPC。
       const acceptanceRows = Array.isArray(acceptance) ? acceptance : [];
       await report({
         job_id: job.id,
-        job_type: "fetch_bookings",
+        job_type: job.job_type,
         status: "succeeded",
         bookings,
         // SB「残り受付可能数」スナップショット (表示用)。Admin callback が対応時に取込む。
         acceptance: acceptanceRows,
-        summary: `fetch_bookings: ${bookings.length}件取得 (genre=${genre})${acceptanceRows.length ? ` / 受付可能数${acceptanceRows.length}枠` : ""}`,
+        summary: isBookingDetail
+          ? `fetch_booking_detail: ${targetReserveId} の担当者情報を取得`
+          : `fetch_bookings: ${bookings.length}件取得 (genre=${genre})${acceptanceRows.length ? ` / 受付可能数${acceptanceRows.length}枠` : ""}`,
       } as unknown as CallbackBody);
-      console.log(`[job] done  ${tag} (fetch_bookings ${bookings.length}件, 受付可能数${acceptanceRows.length}枠)`);
+      console.log(
+        `[job] done  ${tag} (${job.job_type} ${bookings.length}件, 受付可能数${acceptanceRows.length}枠)`,
+      );
       return;
     }
 
@@ -3659,6 +3726,13 @@ function todayJst(): string {
   const d = new Date();
   const jst = new Date(d.getTime() + 9 * 3600_000);
   return jst.toISOString().slice(0, 10);
+}
+
+function jstDateFromIso(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return new Date(timestamp + 9 * 3600_000).toISOString().slice(0, 10);
 }
 
 // ------------------------------------------------------------
