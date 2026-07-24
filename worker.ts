@@ -604,6 +604,8 @@ type SalonboardErrorCode =
 type PushBookingPayload = {
   booking_id: string;
   action?: "create" | "update" | "cancel";
+  external_booking_id?: string | null;
+  preflight_required?: boolean;
   customer_name?: string | null;
   customer_last_name?: string | null;
   customer_first_name?: string | null;
@@ -1548,7 +1550,29 @@ async function handleJob(job: Job): Promise<void> {
           shopName: chShopName,
           relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
         });
-        if (cr.status === "ok") {
+        if (
+          cr.status === "failed" &&
+          cr.reason.startsWith("[TARGET_CANCELLED]")
+        ) {
+          // KD は有効予約だが、紐付いている旧 reserveId が SB 側でキャンセル済み。
+          // 変更を再試行しても永久に成功しないため、同じ booking_id の有効予約が
+          // 既に無いことを proven preflight で確認してから新規登録し直す。
+          // 成功 callback で新しい reserveId を bookings.external_booking_id へ焼き直す。
+          console.log(
+            `[job] ${tag} target reserveId=${payload.external_booking_id} is cancelled; recreate with preflight`,
+          );
+          result = await pushBookingViaProvenForm(
+            page,
+            job,
+            {
+              ...payload,
+              action: "create",
+              external_booking_id: null,
+              preflight_required: true,
+            },
+            launch.proxy?.server ?? "direct",
+          );
+        } else if (cr.status === "ok") {
           cr.externalId = payload.external_booking_id ?? null;
           const chRoot = chGenre === "hair" ? "/CLP/bt" : "/KLP";
           const detailKind = /^(BF|BE)/i.test(String(payload.external_booking_id ?? ""))
@@ -1556,8 +1580,10 @@ async function handleJob(job: Job): Promise<void> {
             : "ext/extReserveDetail";
           cr.detailUrl = `${new URL(baseUrl).origin}${chRoot}/reserve/${detailKind}/?reserveId=${payload.external_booking_id}`;
           cr.alreadyExists = false;
+          result = cr;
+        } else {
+          result = cr;
         }
-        result = cr;
       } else {
         // Cloud -> PC fallback / 同一ジョブ内リトライでは、Admin 側の payload に
         // preflight_required が付かなかった場合でも必ず既存予約を照合する。

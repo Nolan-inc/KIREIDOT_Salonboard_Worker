@@ -6013,12 +6013,21 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     'select#rsvTermId:visible',
     'select[name="rsvTerm"]:visible',
   ].join(', ');
+  let targetWasCancelled = false;
   // SalonBoard は URL を直接開いても、予約種別や画面状態によっては変更フォームではなく
   // 予約詳細へ着地する。その場合は画面最下部の青い「変更する」を押してから編集フォームへ
   // 進む必要がある（実画面 2026-07-23: BF36648303）。hidden の時刻 select をフォームと
   // 誤認しないよう、上の formSel は可視要素だけを対象にする。
   const openChangeFormFromDetail = async () => {
     if ((await page.locator(formSel).count().catch(() => 0)) > 0) return true;
+    const cancelledDetail = await page.evaluate(() => {
+      const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+      return /この予約はキャンセルされました|ステータス(?:サロン)?キャンセル|ステータス取消/.test(body);
+    }).catch(() => false);
+    if (cancelledDetail) {
+      targetWasCancelled = true;
+      return false;
+    }
     const changeCta = page.locator([
       'a#change:visible',
       'a#fnc_change:visible',
@@ -6128,6 +6137,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     };
 
     if (await searchAndOpen({ fromStr: day, toStr: day }, 'target-day')) return true;
+    if (targetWasCancelled) return false;
 
     // 変更後の日付とSalonBoard上の現在日付が異なる更新では、KDの scheduled_at
     // だけに絞ると元予約を一覧から見つけられない。昨日〜3か月後の範囲でもう一度
@@ -6138,6 +6148,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     }).catch(() => {});
     const broadRange = defaultBookingDateRange(3);
     if (await searchAndOpen(broadRange, 'broad-range')) return true;
+    if (targetWasCancelled) return false;
 
     await captureScrapeDebug(page, 'change', `list_miss_${reserveId}`, {
       diagnostics: { reserveId, day, diag, url: page.url() },
@@ -6150,6 +6161,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     await establishChangeContext();
     onForm = await openChangeFormViaReserveList();
     if (onForm) break;
+    if (targetWasCancelled) break;
     for (const path of candidates) {
       const candidateUrl = new URL(path, baseUrl);
       await page.goto(candidateUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
@@ -6193,6 +6205,14 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if (targetWasCancelled) {
+    return fail(
+      `[TARGET_CANCELLED] SalonBoard側の予約 ${reserveId} は既にキャンセル済みです。` +
+      'KIREIDOT側が有効予約のため、重複確認後に新規予約として再登録します。',
+      'BOOKING_ID_NOT_FOUND',
+      false,
+    );
   }
   const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, genre, url: page.url() } });
   if (!onForm) {
