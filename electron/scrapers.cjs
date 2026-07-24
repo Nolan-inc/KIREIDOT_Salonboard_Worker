@@ -3085,9 +3085,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     const text = document.body?.innerText?.replace(/\s+/g, ' ').trim() || '';
     return {
       stale: /KPCL017V01|他のユーザによって変更されているため|最新情報を確認のうえ/.test(text),
+      explicitFailure: /システムエラー|エラーが発生しました|登録できません|変更できません|情報が一部失われています|入力内容に誤り/.test(text),
       text: text.slice(0, 500),
     };
-  }).catch(() => ({ stale: false, text: '' }));
+  }).catch(() => ({ stale: false, explicitFailure: false, text: '' }));
   if (postSubmitState.stale) {
     if (scheduleWriteAttempt < 3) {
       await page.waitForTimeout(300 * scheduleWriteAttempt);
@@ -3114,6 +3115,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const stillOnForm = /scheduleRegist/i.test(afterUrl);
   const doneText = await page.locator('text=/登録しました|完了しました|受け付けました/').count().catch(() => 0);
   const looksDone = !stillOnForm || doneText > 0 || afterUrl !== beforeUrl;
+  // SalonBoardのPOST後に登録フォームを離れ、かつ明示的なエラーが無い場合は
+  // サーバーが登録を受理した完了サイン。スケジュールAjaxへの表示だけが遅れても
+  // この事実は保持し、下の実在確認が時間切れになった際の成功判定に利用する。
+  const serverAccepted = looksDone && !postSubmitState.explicitFailure;
   let completionWarning = '';
   if (!looksDone) {
     const visibleMessage = await page.locator(
@@ -3165,10 +3170,28 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail(`予定登録後のスケジュール確認画面を開けません: ${verifyNavigationError}`, 'CONFIRMATION_MISMATCH', false);
   }
   if (!verified?.ok) {
+    if (serverAccepted) {
+      return {
+        status: 'ok',
+        externalId: null,
+        verificationPending: true,
+        warning: `SalonBoardは予定登録POSTを受理しましたが、スケジュール一覧への反映確認は時間内に完了しませんでした (${verified?.reason ?? 'unknown'})`,
+        confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
+      };
+    }
     const blocks = Array.isArray(verified?.blocks)
       ? verified.blocks.slice(0, 8).map((b) => `${b.start}-${b.end}:${b.title}`).join(',')
       : '';
-    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''}${completionWarning ? `, ${completionWarning}` : ''})`, 'CONFIRMATION_MISMATCH', false);
+    const cap = await captureScrapeDebug(page, 'schedule', `verify_mismatch_${ymd}_${staffExt}`, {
+      diagnostics: {
+        expected: { staffExt, startTotal, endTotal, title },
+        verified,
+        postSubmitState,
+        afterUrl,
+        completionWarning,
+      },
+    });
+    return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''}${completionWarning ? `, ${completionWarning}` : ''}${cap ? `, capture=${cap}` : ''})`, 'CONFIRMATION_MISMATCH', false);
   }
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
 }
