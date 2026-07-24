@@ -2738,9 +2738,9 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
   const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min))) ? Number(p.duration_min) : 60;
   const startTotal = when.hour * 60 + when.minute;
-  const endTotal = startTotal + durMin;
-  const endHour = Math.floor(endTotal / 60);
-  const endMin = endTotal % 60;
+  let endTotal = startTotal + durMin;
+  let endHour = Math.floor(endTotal / 60);
+  let endMin = endTotal % 60;
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
   const endHH = String(endHour).padStart(2, '0');
@@ -2993,8 +2993,31 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     mm: document.querySelector('#jsiRsvMinute')?.value || '',
     eh: document.querySelector('#jsiSchEndHour')?.value || '',
     em: document.querySelector('#jsiSchEndMinute')?.value || '',
+    salonEnd: document.querySelector('#jsiSalonEndTime')?.value || '',
     title: document.querySelector('input[name="schTitle"]')?.value || '',
   })).catch(() => null);
+  // KIREIDOTの予定がSalonBoard側の営業終了後まで続く場合、終了時刻のoption自体が
+  // 存在せず、SBは営業終了時刻を選択した状態に戻す。この営業時間外部分は予約枠へ
+  // 影響しないため、実フォームが示す営業終了時刻までに丸めて同期する。
+  // それ以外の時刻差分は誤登録防止のため従来どおり停止する。
+  const parseHmTotal = (value) => {
+    const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  };
+  const selectedEndTotal = formState
+    ? Number(formState.eh) * 60 + Number(formState.em)
+    : null;
+  const salonEndTotal = formState ? parseHmTotal(formState.salonEnd) : null;
+  const clampedAtSalonClose = Number.isFinite(selectedEndTotal)
+    && Number.isFinite(salonEndTotal)
+    && endTotal > salonEndTotal
+    && selectedEndTotal === salonEndTotal
+    && selectedEndTotal > startTotal;
+  if (clampedAtSalonClose) {
+    endTotal = selectedEndTotal;
+    endHour = Math.floor(endTotal / 60);
+    endMin = endTotal % 60;
+  }
   const timeMismatch = formState && (
     Number(formState.hh) !== when.hour || Number(formState.mm) !== when.minute
     || Number(formState.eh) !== endHour || Number(formState.em) !== endMin
@@ -3154,7 +3177,14 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     ).allInnerTexts().catch(() => []);
     const detail = visibleMessage.map((s) => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ').slice(0, 300);
     const capA = await captureScrapeDebug(page, 'schedule', `no_complete_${ymd}_${staffExt}`, {
-      diagnostics: { dialogAccepted, nativeSubmitFallbackUsed, afterUrl, formState, detail },
+      diagnostics: {
+        dialogAccepted,
+        nativeSubmitFallbackUsed,
+        clampedAtSalonClose,
+        afterUrl,
+        formState,
+        detail,
+      },
     });
     // 完了サインが出ない画面差分があるため、この時点では失敗にしない。
     // 下のスケジュール実在確認を真実源にし、実在すれば成功として扱う。

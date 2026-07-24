@@ -157,6 +157,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /clampedAtSalonClose[\s\S]{0,700}endTotal = selectedEndTotal/,
+    'schedule blocks extending past SalonBoard closing time must clamp to the representable closing boundary',
+  );
+  assert.match(
+    source,
     /preSubmitNameRepair[\s\S]*orgNmSeiKana[\s\S]*orgNmMeiKana/,
     'required customer names must be repaired again immediately before submit',
   );
