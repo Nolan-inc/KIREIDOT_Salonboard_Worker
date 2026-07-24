@@ -6044,17 +6044,105 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const openChangeFormViaReserveList = async () => {
     if (genre === 'hair') return false;
     const day = `${when.yyyymmdd.slice(0, 4)}-${when.yyyymmdd.slice(4, 6)}-${when.yyyymmdd.slice(6, 8)}`;
-    await applyBookingDateFilter(page, { fromStr: day, toStr: day }, {}).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-    const reserveLink = page.locator(
-      `a[href*="reserveId=${reserveId}"], a[href*="${reserveId}"]`,
-    ).first();
-    if ((await reserveLink.count().catch(() => 0)) === 0) return false;
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
-      reserveLink.click({ timeout: 10_000 }).catch(() => {}),
-    ]);
-    return openChangeFormFromDetail();
+    const diag = [];
+
+    // SalonBoard の予約番号は href だけでなく onclick / hidden input / 行テキストに
+    // 入る画面がある。対象予約を含む要素から「実際に押せる詳細リンク」を特定して
+    // 一時属性を付け、Playwright から通常クリックする。直URLへ遷移すると
+    // KPCL009V01 になるため page.goto は使わない。
+    const markReserveLink = async () => page.evaluate((wantId) => {
+      document.querySelectorAll('[data-kireidot-reserve-target]')
+        .forEach((el) => el.removeAttribute('data-kireidot-reserve-target'));
+      const norm = (s) => String(s || '').replace(/\s+/g, '');
+      const hasId = (el) => {
+        if (!el) return false;
+        const attrs = Array.from(el.attributes || [])
+          .map((a) => `${a.name}=${a.value}`)
+          .join(' ');
+        return norm(attrs).includes(wantId) || norm(el.textContent).includes(wantId);
+      };
+      const clickables = Array.from(document.querySelectorAll('a, button, input[type="button"], input[type="submit"], input[type="image"]'));
+      let target = clickables.find(hasId) || null;
+      if (!target) {
+        const carrier = Array.from(document.querySelectorAll('tr, li, div, input, span, td'))
+          .find(hasId);
+        const row = carrier?.closest?.('tr, li, [class*="reserve" i]') || carrier?.parentElement;
+        if (row) {
+          target = Array.from(row.querySelectorAll('a, button, input[type="button"], input[type="submit"], input[type="image"]'))
+            .find((el) => /詳細|予約|変更/.test(el.textContent || el.value || el.alt || ''))
+            || row.querySelector('a[href], a[onclick], button, input[type="button"], input[type="submit"], input[type="image"]');
+        }
+      }
+      if (!target) {
+        return {
+          found: false,
+          url: location.href,
+          idOccurrences: (document.documentElement.innerHTML.match(new RegExp(wantId, 'g')) || []).length,
+          resultRows: document.querySelectorAll('#reserveListArea tr, #resultList tbody tr').length,
+        };
+      }
+      target.setAttribute('data-kireidot-reserve-target', '1');
+      return {
+        found: true,
+        tag: target.tagName,
+        href: target.getAttribute('href') || '',
+        onclick: (target.getAttribute('onclick') || '').slice(0, 240),
+        text: (target.textContent || target.value || target.alt || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        resultRows: document.querySelectorAll('#reserveListArea tr, #resultList tbody tr').length,
+      };
+    }, reserveId).catch(() => ({ found: false, evaluateFailed: true }));
+
+    const searchAndOpen = async (range, label) => {
+      diag.push(`${label}: ${range.fromStr}..${range.toStr}`);
+      const searched = await applyBookingDateFilter(page, range, { diag }).catch(() => false);
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      for (let pageNo = 1; pageNo <= 20; pageNo++) {
+        const marked = await markReserveLink();
+        diag.push(`${label}[${pageNo}]: searched=${searched} marked=${JSON.stringify(marked)}`);
+        if (marked?.found) {
+          const reserveLink = page.locator('[data-kireidot-reserve-target="1"]:visible').first();
+          if ((await reserveLink.count().catch(() => 0)) > 0) {
+            await Promise.all([
+              page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+              reserveLink.click({ timeout: 10_000 }).catch(() => {}),
+            ]);
+            return openChangeFormFromDetail();
+          }
+        }
+        const next = page.locator([
+          '.paging .next a[href]:visible',
+          'a[rel="next"]:visible',
+          '#resultList + * a:has-text("次へ"):visible',
+          'a:has-text("次へ"):visible',
+        ].join(', ')).first();
+        if ((await next.count().catch(() => 0)) === 0) break;
+        const beforeUrl = page.url();
+        await Promise.all([
+          page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+          next.click({ timeout: 8_000 }).catch(() => {}),
+        ]);
+        await page.waitForURL((url) => url.toString() !== beforeUrl, { timeout: 8_000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      }
+      return false;
+    };
+
+    if (await searchAndOpen({ fromStr: day, toStr: day }, 'target-day')) return true;
+
+    // 変更後の日付とSalonBoard上の現在日付が異なる更新では、KDの scheduled_at
+    // だけに絞ると元予約を一覧から見つけられない。昨日〜3か月後の範囲でもう一度
+    // 予約番号を探す。検索フォームを初期化してから行い、古い検索状態を持ち越さない。
+    await page.goto(new URL('/KLP/reserve/reserveList/init', baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 20_000,
+    }).catch(() => {});
+    const broadRange = defaultBookingDateRange(3);
+    if (await searchAndOpen(broadRange, 'broad-range')) return true;
+
+    await captureScrapeDebug(page, 'change', `list_miss_${reserveId}`, {
+      diagnostics: { reserveId, day, diag, url: page.url() },
+    });
+    return false;
   };
   let onForm = false;
   let loginRecoveryFailed = false;
