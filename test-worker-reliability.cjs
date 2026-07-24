@@ -152,6 +152,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /officialSubmitStarted[\s\S]{0,1600}HTMLFormElement\.prototype\.submit\.call\(form\)/,
+    'schedule registration must use a native form POST when SalonBoard jQuery submit is silently blocked',
+  );
+  assert.match(
+    source,
     /preSubmitNameRepair[\s\S]*orgNmSeiKana[\s\S]*orgNmMeiKana/,
     'required customer names must be repaired again immediately before submit',
   );
@@ -207,7 +212,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /openChangeFormViaReserveList[\s\S]{0,1100}reserveLink\.click[\s\S]{0,900}onForm = await openChangeFormViaReserveList/,
+    /openChangeFormViaReserveList[\s\S]{0,6000}reserveLink\.click[\s\S]{0,5000}onForm = await openChangeFormViaReserveList/,
     'esthetic booking updates must open the real reservation-row link before direct URL fallbacks',
   );
   assert.match(

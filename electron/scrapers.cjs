@@ -3020,6 +3020,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail('予定の登録ボタンが見つかりません', 'UNKNOWN_ERROR', true);
   }
   let dialogAccepted = false;
+  let nativeSubmitFallbackUsed = false;
   const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) {} };
   page.on('dialog', onDialog);
   const beforeUrl = page.url();
@@ -3042,6 +3043,33 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       });
     } else {
       await registerBtn.click({ timeout: 15_000 });
+    }
+    // jQuery.formSubmit は内部で $(form).submit() を使うため、SalonBoard側の
+    // submit handler が false を返す画面状態では、例外もメッセージも出ないまま
+    // scheduleRegist に留まる。入力値は上で全項目を読み戻し済みなので、
+    // 公式送信が2.5秒以内に始まらなかった場合に限り、同じフォーム/CSRF tokenを
+    // native submit で doComplete へ送る。これで「登録するを押しても無反応」を
+    // Cloud内で完結させ、再試行時の二重登録は冒頭の実在チェックで防止する。
+    const officialSubmitStarted = await page.waitForFunction(
+      ({ originalUrl }) => (
+        location.href !== originalUrl
+        || !document.getElementById('jsiScheduleRegist')
+        || /KPCL017V01|他のユーザによって変更されているため|登録しました|完了しました/.test(
+          document.body?.innerText || '',
+        )
+      ),
+      { originalUrl: beforeUrl },
+      { timeout: 2_500 },
+    ).then(() => true).catch(() => false);
+    if (!officialSubmitStarted && /scheduleRegist/i.test(page.url())) {
+      nativeSubmitFallbackUsed = await page.evaluate(() => {
+        const form = document.getElementById('jsiScheduleRegist');
+        if (!(form instanceof HTMLFormElement)) return false;
+        const currentAction = String(form.getAttribute('action') || '/KLP/set/scheduleRegist/');
+        form.setAttribute('action', `${currentAction.replace(/\/?(?:doComplete)?$/, '/')}doComplete`);
+        HTMLFormElement.prototype.submit.call(form);
+        return true;
+      }).catch(() => false);
     }
     // 店舗/画面状態によっては native confirm ではなくHTMLダイアログで
     // 「はい」を要求される。これを押さないと scheduleRegist に残ったまま未登録になる。
@@ -3126,7 +3154,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     ).allInnerTexts().catch(() => []);
     const detail = visibleMessage.map((s) => String(s).replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ').slice(0, 300);
     const capA = await captureScrapeDebug(page, 'schedule', `no_complete_${ymd}_${staffExt}`, {
-      diagnostics: { dialogAccepted, afterUrl, formState, detail },
+      diagnostics: { dialogAccepted, nativeSubmitFallbackUsed, afterUrl, formState, detail },
     });
     // 完了サインが出ない画面差分があるため、この時点では失敗にしない。
     // 下のスケジュール実在確認を真実源にし、実在すれば成功として扱う。
