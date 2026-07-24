@@ -2724,6 +2724,7 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
 async function pushScheduleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
+  const scheduleWriteAttempt = Number(opts._scheduleWriteAttempt || 1);
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
@@ -3024,7 +3025,24 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const beforeUrl = page.url();
   try {
     await registerBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await registerBtn.click({ timeout: 15_000 });
+    // KPCL020V01.js は DOM ready 後に #regist へイベントを bind し、その中で
+    // $.shuhari.formSubmit("jsiScheduleRegist", "doComplete") を呼ぶ。
+    // 外部JSの読込前に locator.click() するとリンクの javascript:void(0) だけが
+    // 実行され、画面に留まったまま未登録になる。ページ自身と同じ submit 関数を
+    // JS準備後に直接呼び、準備できない場合だけ従来クリックへフォールバックする。
+    const submitReady = await page.waitForFunction(() => (
+      !!window.jQuery
+      && !!window.jQuery.shuhari
+      && typeof window.jQuery.shuhari.formSubmit === 'function'
+      && !!document.getElementById('jsiScheduleRegist')
+    ), null, { timeout: 12_000 }).then(() => true).catch(() => false);
+    if (submitReady) {
+      await page.evaluate(() => {
+        window.jQuery.shuhari.formSubmit('jsiScheduleRegist', 'doComplete');
+      });
+    } else {
+      await registerBtn.click({ timeout: 15_000 });
+    }
     // 店舗/画面状態によっては native confirm ではなくHTMLダイアログで
     // 「はい」を要求される。これを押さないと scheduleRegist に残ったまま未登録になる。
     await page.waitForTimeout(500);
@@ -3059,6 +3077,35 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     page.off('dialog', onDialog);
   }
 
+  // 登録POSTの瞬間にもSalonBoardの楽観ロックが更新されることがある。
+  // 「他のユーザによって変更」画面を手動対応にせず、最新トークン取得を含む全工程を
+  // 同じCloud処理内で最大3回やり直す。前回POSTが実は成功していた場合は、再実行冒頭の
+  // 既存予定チェックが拾うため二重登録にはならない。
+  const postSubmitState = await page.evaluate(() => {
+    const text = document.body?.innerText?.replace(/\s+/g, ' ').trim() || '';
+    return {
+      stale: /KPCL017V01|他のユーザによって変更されているため|最新情報を確認のうえ/.test(text),
+      text: text.slice(0, 500),
+    };
+  }).catch(() => ({ stale: false, text: '' }));
+  if (postSubmitState.stale) {
+    if (scheduleWriteAttempt < 3) {
+      await page.waitForTimeout(300 * scheduleWriteAttempt);
+      return pushScheduleViaForm(page, payload, {
+        ...opts,
+        _scheduleWriteAttempt: scheduleWriteAttempt + 1,
+      });
+    }
+    const cap = await captureScrapeDebug(page, 'schedule', `stale_submit_${ymd}_${staffExt}`, {
+      diagnostics: { scheduleWriteAttempt, postSubmitState },
+    });
+    return fail(
+      `SalonBoardの予定登録更新競合(KPCL017V01)が3回続きました${cap ? ` (capture=${cap})` : ''}`,
+      'CONFIRMATION_MISMATCH',
+      false,
+    );
+  }
+
   const errText = await page.locator('.mod_box_warning, #warningMessageArea, .error, .errorMessage').first().innerText().catch(() => '');
   if (errText && /エラー|失敗|できません|重複|登録できません/.test(errText)) {
     return fail(`予定登録時にエラー: ${errText.slice(0, 80)}`, 'UNKNOWN_ERROR', true);
@@ -3085,21 +3132,38 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 対象スタッフ列に「開始・終了・タイトル」が一致する予定が存在することを確認する。
   // 以前は画面内の「スケジュール」という見出しだけでも成功になり、未登録を synced と
   // 誤判定するケースがあった。
-  try {
-    const verifyUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-    verifyUrl.searchParams.set('date', ymd);
-    await page.goto(verifyUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
-  } catch (e) {
-    return fail(`予定登録後のスケジュール確認画面を開けません: ${e?.message ?? e}`, 'CONFIRMATION_MISMATCH', true);
+  let verified = null;
+  let verifyNavigationError = '';
+  // SalonBoard側のスケジュールAjax反映がPOST完了から数十秒遅れる場合がある。
+  // 1回だけ確認して失敗にせず、最大45秒の間に5秒間隔で最新画面を読み直す。
+  // 実際に初回確認では見えず、約2分後のジョブ再試行で既存予定として見つかった
+  // WAO新宿店のケースを同一処理内で完結させる。
+  const verifyDeadline = Date.now() + 45_000;
+  do {
+    try {
+      const verifyUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+      verifyUrl.searchParams.set('date', ymd);
+      verifyUrl.searchParams.set('_kd_verify', String(Date.now()));
+      await page.goto(verifyUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
+      if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+        return fail('予定登録後の確認時にreCAPTCHAが表示されました', 'RECAPTCHA_REQUIRED', true);
+      }
+      verified = await page.evaluate(
+        findScheduleBlockInPage,
+        { staffExt, startTotal, endTotal, title },
+      ).catch((e) => ({ ok: false, reason: `verify_exception:${e?.message ?? e}` }));
+      verifyNavigationError = '';
+      if (verified?.ok) break;
+    } catch (e) {
+      verifyNavigationError = e?.message ?? String(e);
+    }
+    if (Date.now() >= verifyDeadline) break;
+    await page.waitForTimeout(5_000);
+  } while (Date.now() < verifyDeadline);
+  if (!verified && verifyNavigationError) {
+    return fail(`予定登録後のスケジュール確認画面を開けません: ${verifyNavigationError}`, 'CONFIRMATION_MISMATCH', false);
   }
-  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
-    return fail('予定登録後の確認時にreCAPTCHAが表示されました', 'RECAPTCHA_REQUIRED', true);
-  }
-  const verified = await page.evaluate(
-    findScheduleBlockInPage,
-    { staffExt, startTotal, endTotal, title },
-  ).catch((e) => ({ ok: false, reason: `verify_exception:${e?.message ?? e}` }));
   if (!verified?.ok) {
     const blocks = Array.isArray(verified?.blocks)
       ? verified.blocks.slice(0, 8).map((b) => `${b.start}-${b.end}:${b.title}`).join(',')
