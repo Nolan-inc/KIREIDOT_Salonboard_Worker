@@ -191,6 +191,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'a booking update redirected to the SalonBoard login/image-auth page must retry in a fresh Cloud context',
   );
   assert.match(
+    source,
+    /establishChangeContext[\s\S]{0,700}\/KLP\/reserve\/reserveList\/init[\s\S]{0,2600}for \(const path of candidates\)/,
+    'booking updates must establish SalonBoard list context before opening deep change/detail URLs',
+  );
+  assert.doesNotMatch(
+    source,
+    /candidateUrl\.searchParams\.set\('_kd'/,
+    'booking change URLs must not include unknown cache-busting query parameters rejected by SalonBoard',
+  );
+  assert.match(
     cloudSource,
     /INFRA_TRANSIENT_ERROR_CODES[\s\S]{0,220}SESSION_EXPIRED/,
     'session expiry during a Cloud write must remain retryable instead of becoming manual_required',

@@ -5986,6 +5986,23 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const candidates = isNetReserve
     ? [netChangePath, netDetailPath, extChangePath, extDetailPath]
     : [extChangePath, extDetailPath, netChangePath, netDetailPath];
+  // SalonBoard は予約詳細/変更URLへの素の直リンクを KPCL009V01 で拒否することがある。
+  // 先に一覧（hair はスケジュール）を開いて操作文脈/KMAGICを確立してから遷移する。
+  // キャンセル処理と同じ動線に揃え、未知のクエリ(_kd等)も付加しない。
+  const establishChangeContext = async () => {
+    await ensureSalonSelected(page, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+    }).catch(() => {});
+    const ctxUrl = genre === 'hair'
+      ? new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString()
+      : new URL('/KLP/reserve/reserveList/init', baseUrl).toString();
+    await page.goto(ctxUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 20_000,
+    }).catch(() => {});
+    await page.waitForTimeout(600);
+  };
   // 詳細画面にも存在する #rlastupdate / a#change / a#regist は到達判定に使わない。
   // 実際に編集できる時刻・所要フィールドがある場合だけ変更フォームとみなす。
   const formSel = [
@@ -6025,9 +6042,9 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let onForm = false;
   let loginRecoveryFailed = false;
   for (let openTry = 1; openTry <= 3 && !onForm; openTry++) {
+    await establishChangeContext();
     for (const path of candidates) {
       const candidateUrl = new URL(path, baseUrl);
-      candidateUrl.searchParams.set('_kd', `${Date.now()}_${openTry}`);
       await page.goto(candidateUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
       // ★高速化: networkidleを待たず、変更フォーム要素が出たら即進む。
       await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
