@@ -146,6 +146,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /formSubmit\('extReserveChange', 'doComplete'\)/,
+    'KLP booking updates must submit synchronously before placeholder blur restores empty names',
+  );
+  assert.match(
+    source,
     /preSubmitNameRepair[\s\S]*orgNmSeiKana[\s\S]*orgNmMeiKana/,
     'required customer names must be repaired again immediately before submit',
   );

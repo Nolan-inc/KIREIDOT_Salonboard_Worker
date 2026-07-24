@@ -6415,23 +6415,66 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let confirmClicked = false;
   let primaryClicked = false;
   let primaryClickError = '';
+  let directFormSubmitted = false;
   try {
-    await submitBtn.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
-    try {
-      await submitBtn.click({ timeout: 12_000 });
-      primaryClicked = true;
-    } catch (e1) {
-      primaryClickError = e1?.message || String(e1);
+    // KLP の #change は click 後50ms待ってから doSubmit() を呼ぶ。この待機中に
+    // 顧客欄の blur handler が placeholder を復元し、正しいカナが空として送られる。
+    // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
+    // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
+    const directSubmitResult = await page.evaluate(() => {
+      const form = document.getElementById('extReserveChange');
+      const jq = window.jQuery;
+      if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') {
+        return { submitted: false, reason: 'helper_or_form_missing' };
+      }
+      const mappings = [
+        ['nmSeiKana', 'orgNmSeiKana', 'ヨヤク'],
+        ['nmMeiKana', 'orgNmMeiKana', 'キャクサマ'],
+        ['nmSei', 'orgNmSei', 'ゲスト'],
+        ['nmMei', 'orgNmMei', '様'],
+      ];
+      for (const [inputId, orgId, fallback] of mappings) {
+        const el = document.getElementById(inputId);
+        if (!el) continue;
+        const orgValue = String(document.getElementById(orgId)?.textContent || '').trim();
+        const current = String(el.value || '').trim();
+        const placeholder = el.classList.contains('mod_color_999999');
+        if (placeholder || !current) el.value = orgValue || fallback;
+        el.classList.remove('mod_color_999999');
+        el.removeAttribute('data-empty');
+        try { jq(el).removeData('empty'); } catch (_e) { /* noop */ }
+      }
+      jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');
+      jq('#extCouponArea select').each(function normalizeUndefinedCoupon() {
+        if (jq(this).val() === undefined) jq(this).val('');
+      });
+      jq.shuhari.formSubmit('extReserveChange', 'doComplete');
+      return { submitted: true };
+    }).catch((e) => ({
+      submitted: false,
+      reason: e?.message || String(e),
+    }));
+    directFormSubmitted = directSubmitResult.submitted === true;
+    primaryClicked = directFormSubmitted;
+
+    if (!directFormSubmitted) {
+      await submitBtn.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
       try {
-        await submitBtn.click({ timeout: 8_000, force: true });
+        await submitBtn.click({ timeout: 12_000 });
         primaryClicked = true;
-      } catch (e2) {
-        primaryClickError = `${primaryClickError} / force=${e2?.message || String(e2)}`;
+      } catch (e1) {
+        primaryClickError = e1?.message || String(e1);
         try {
-          await submitBtn.evaluate((el) => el.click());
+          await submitBtn.click({ timeout: 8_000, force: true });
           primaryClicked = true;
-        } catch (e3) {
-          primaryClickError = `${primaryClickError} / dom=${e3?.message || String(e3)}`;
+        } catch (e2) {
+          primaryClickError = `${primaryClickError} / force=${e2?.message || String(e2)}`;
+          try {
+            await submitBtn.evaluate((el) => el.click());
+            primaryClicked = true;
+          } catch (e3) {
+            primaryClickError = `${primaryClickError} / dom=${e3?.message || String(e3)}`;
+          }
         }
       }
     }
@@ -6475,6 +6518,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       primaryClickError,
       confirmClicked,
       nativeDialogAccepted,
+      directFormSubmitted,
       requiredNameRepair,
       preSubmitNameRepair,
       normalizedHyphenFields,
@@ -6516,6 +6560,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         reserveId,
         requiredNameRepair,
         preSubmitNameRepair,
+        directFormSubmitted,
         requiredNameState,
         normalizedHyphenFields,
         remainingHyphenFields: hyphenFields,
