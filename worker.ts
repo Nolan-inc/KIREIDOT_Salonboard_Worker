@@ -2665,8 +2665,18 @@ function pickProxy(
     }
   }
   const shopOverride = proxyShopOverride(shopId);
+  const accountHasRotated =
+    !!stickyKey && (accountProxyRotation.get(stickyKey) ?? 0) > 0;
   // "residential"/"res" は上で処理済み。それ以外(ISPサーバ文字列)のみ ISP override として使う。
-  if (shopOverride && shopOverride !== "residential" && shopOverride !== "res") {
+  // ログイン障害後の完全再試行では、障害元に固定していた店舗overrideを意図的に無視し、
+  // accountProxyRotation が選ぶ次のstatic ISPへ進める。従来はここで常にoverrideを返したため、
+  // ログに「出口切替」と出ても実際には3回とも同じ :10003 等を再利用していた。
+  if (
+    !accountHasRotated &&
+    shopOverride &&
+    shopOverride !== "residential" &&
+    shopOverride !== "res"
+  ) {
     return {
       server: shopOverride,
       username: process.env.SB_PROXY_USERNAME || undefined,

@@ -225,6 +225,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /shouldRotateLoginEndpoint[\s\S]{0,900}avoidResidential\s*=\s*false/,
     'Cloud write login recovery must keep residential fallback disabled',
   );
+  assert.match(
+    cloudSource,
+    /accountHasRotated[\s\S]{0,420}!accountHasRotated[\s\S]{0,220}shopOverride/,
+    'a rotated account login must bypass the failing shop-level static proxy override',
+  );
   const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
   assert.match(
     pcWorkerSource,
