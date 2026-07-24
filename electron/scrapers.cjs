@@ -2828,17 +2828,19 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   let staleFormError = '';
   let formOpened = false;
   for (let formAttempt = 1; formAttempt <= 3; formAttempt += 1) {
-    if (formAttempt > 1) {
-      try {
-        const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
-        refreshUrl.searchParams.set('date', when.yyyymmdd);
-        refreshUrl.searchParams.set('_kd_token', `${Date.now()}_${formAttempt}`);
-        await page.goto(refreshUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-        rlastupdate = await readStableRlastupdate();
-        await page.waitForTimeout(150 + formAttempt * 100);
-      } catch (e) {
-        return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
-      }
+    try {
+      const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+      refreshUrl.searchParams.set('date', when.yyyymmdd);
+      refreshUrl.searchParams.set('_kd_token', `${Date.now()}_${formAttempt}`);
+      // #rlastupdate はHTML本体に埋め込まれている。DOMContentLoadedまで待つと
+      // 大きなスケジュール/外部スクリプトの読込で10秒以上経ち、その間の受付操作で
+      // 取得直後のトークンが失効する。commit後に要素が解析された瞬間に読み、
+      // 他の描画完了を待たず登録フォームへ進む。
+      await page.goto(refreshUrl.toString(), { waitUntil: 'commit', timeout: 25_000 });
+      await page.waitForSelector('#rlastupdate', { state: 'attached', timeout: 8_000 });
+      rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+    } catch (e) {
+      return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
     }
 
     const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
