@@ -960,7 +960,7 @@ async function handleJob(job: Job): Promise<void> {
     // ★書込は住宅IP(cold session + 遅延 + 画像遮断)で複雑フォーム(ギャラリー/シフト等)が
     //   壊れる(2026-07-11 実証: 郡山 gallery=フォーム到達不可 / 銀座 shift=#batchSet timeout。
     //   ISP に戻すと成功)。通常は住宅を使わず ISP(定額・warm session)に固定する。
-    //   ただしログイン画像認証を検知した時だけ、下の完全再ログインで住宅へ退避する。
+    //   ログイン画像認証/HTTP拒否を検知した場合も、下の完全再ログインで別ISPへ切り替える。
     let avoidResidential = isWriteJob && !forceResidential;
     let { launch, realChrome } = resolveLaunchOptions(
       job.credentials.proxy,
@@ -1084,7 +1084,7 @@ async function handleJob(job: Job): Promise<void> {
       };
       const isCredentialFailure = (reason: string) =>
         /invalid credentials|incorrect password|ID.?または.?パスワード|認証情報.*不正|ログインID.*不正/i.test(reason);
-      const shouldRetryLoginViaResidential = (reason: string) =>
+      const shouldRotateLoginEndpoint = (reason: string) =>
         /IMAGE_AUTH_REQUIRED|画像認証|ERR_HTTP_RESPONSE_CODE_FAILURE|login did not complete|navigation: page\.goto/i.test(reason);
       let loginResult = await attemptLogin();
       // ログイン画面へ戻った/doLogin が完了しない/ネットワーク瞬断では、同じChrome・
@@ -1097,23 +1097,19 @@ async function handleJob(job: Job): Promise<void> {
         lt++
       ) {
         if (isCredentialFailure(loginResult.reason ?? "")) break;
-        // 書込ジョブは通常、複雑なフォームとの相性が良い sticky ISP を使う。ただし
-        // その ISP 出口で画像認証・HTTP応答拒否・ログイン未完了になった場合まで
-        // residential を禁止すると、10本のISP poolが同じAkamai判定を受けている間は
-        // 3回とも失敗してPCへ流れてしまう。ログイン基盤障害を検知した時だけ、残りの
-        // 完全再ログインを住宅回線へ切り替える。CAPTCHAを解くのではなく、別の信頼済み
-        // 出口から認証工程を最初からやり直す。
+        // 書込ジョブのログイン失敗時は、別の static ISP 出口へ切り替える。
+        // 住宅回線 jp.decodo.com:30001-30010 は全ポートで SalonBoard /login/ を
+        // HTTP 応答段階から拒否することを本番で確認済み。住宅へ退避すると
+        // ERR_HTTP_RESPONSE_CODE_FAILURE が確定するため、書込ログインでは使わない。
+        // 明示的な SB_WRITE_VIA_RESIDENTIAL=1 の場合だけ forceResidential を維持する。
         if (
           isWriteJob &&
           !forceResidential &&
-          fallbackConfigured() &&
-          shouldRetryLoginViaResidential(loginResult.reason ?? "")
+          shouldRotateLoginEndpoint(loginResult.reason ?? "")
         ) {
           noteLoginThrottle(job.shop_id);
-          forceResidential = true;
-          avoidResidential = false;
           console.log(
-            `[proxy] ${tag} ISPログイン障害を検知 → residentialでCloudログインを完全再試行`,
+            `[proxy] ${tag} ISPログイン障害を検知 → 次のstatic ISPでCloudログインを完全再試行`,
           );
         }
         console.log(
@@ -1185,8 +1181,8 @@ async function handleJob(job: Job): Promise<void> {
         // 戻り/doLogin未完了は一時失敗としてジョブ全体を再試行する。
         const isAuthLike = isCredentialFailure(reason);
         if (!isAuthLike) {
-          // 各試行ですでに出口を切替済み。読み取りジョブでは既存のResidential自動退避も
-          // 次ジョブから有効になる。固定待機はしない。
+          // 各試行ですでに出口を切替済み。書込ジョブは次ジョブでもstatic ISPを使い、
+          // 読み取りジョブだけ既存のResidential自動退避対象になり得る。固定待機はしない。
           noteLoginThrottle(job.shop_id);
         }
         await report(

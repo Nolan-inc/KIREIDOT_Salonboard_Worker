@@ -210,6 +210,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /residentialProxyFor[\s\S]{0,620}hashShop\(shopId\) \+ rotation/,
     'residential sticky-port selection must incorporate the per-account retry rotation',
   );
+  assert.match(
+    cloudSource,
+    /ISPログイン障害を検知 → 次のstatic ISPでCloudログインを完全再試行/,
+    'Cloud write login failures must retry on another static ISP endpoint',
+  );
+  assert.doesNotMatch(
+    cloudSource,
+    /shouldRotateLoginEndpoint[\s\S]{0,900}forceResidential\s*=\s*true/,
+    'Cloud write login recovery must not switch to residential exits rejected by SalonBoard',
+  );
+  assert.doesNotMatch(
+    cloudSource,
+    /shouldRotateLoginEndpoint[\s\S]{0,900}avoidResidential\s*=\s*false/,
+    'Cloud write login recovery must keep residential fallback disabled',
+  );
   const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
   assert.match(
     pcWorkerSource,
