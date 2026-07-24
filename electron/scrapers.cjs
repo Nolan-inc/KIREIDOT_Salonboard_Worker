@@ -2759,6 +2759,32 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return `${y}年${mo}月${d}日（${wd}）`;
   })();
 
+  // SalonBoard のスケジュールは DOMContentLoaded 後にスタッフ列/予定をAjax反映し、
+  // その完了時に #rlastupdate も更新する。要素が最初に現れた瞬間の値を読むと、
+  // Ajax更新直前の古いトークンになり KPCL017V01 を誘発する店舗がある。
+  // スタッフ列の描画後、値が連続して安定した時点のトークンを使う。
+  const readStableRlastupdate = async () => {
+    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
+    await page.waitForSelector(
+      `.scheduleMainHead[id^="STAFF_"], .jscScheduleMainTableStaff`,
+      { state: 'attached', timeout: 12_000 },
+    ).catch(() => {});
+    let previous = '';
+    let stableReads = 0;
+    for (let i = 0; i < 12; i += 1) {
+      const current = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+      if (current && current === previous) {
+        stableReads += 1;
+        if (stableReads >= 2) return current;
+      } else {
+        previous = current;
+        stableReads = 0;
+      }
+      await page.waitForTimeout(250);
+    }
+    return previous;
+  };
+
   // ★予定登録画面は単独URL(/KLP/set/scheduleRegist/)に直接遷移できない
   //   (「情報が一部失われています」エラーになる)。予約登録と同じ手順で
   //   予約登録フォーム(extReserveRegist)を開き、そこの「予定を登録する」ボタン
@@ -2772,8 +2798,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     schedUrl.searchParams.set('date', when.yyyymmdd);
     schedUrl.searchParams.set('_kd_token', String(Date.now()));
     await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-    rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+    rlastupdate = await readStableRlastupdate();
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
@@ -2809,9 +2834,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
         refreshUrl.searchParams.set('date', when.yyyymmdd);
         refreshUrl.searchParams.set('_kd_token', `${Date.now()}_${formAttempt}`);
         await page.goto(refreshUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-        await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-        rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
-        await page.waitForTimeout(250 + formAttempt * 150);
+        rlastupdate = await readStableRlastupdate();
+        await page.waitForTimeout(150 + formAttempt * 100);
       } catch (e) {
         return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
       }
@@ -3183,6 +3207,7 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     u.searchParams.set('_kd', String(Date.now()));
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     await page.waitForSelector('.jscScheduleMainTableStaff', { state: 'attached', timeout: 15_000 });
+    await page.waitForSelector('.scheduleMainHead[id^="STAFF_"]', { state: 'attached', timeout: 12_000 }).catch(() => {});
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
