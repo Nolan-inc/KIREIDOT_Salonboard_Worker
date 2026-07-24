@@ -200,6 +200,22 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /\[relogin\] endpoint cooldown \([\s\S]{0,120}-> skip/,
     'deep-page session recovery must not wait for the obsolete endpoint cooldown',
   );
+  assert.match(
+    cloudSource,
+    /const residentialSpan = residential[\s\S]{0,420}rotationSpan = Math\.max\(pool\.length, residentialSpan\)/,
+    'Cloud login retries must rotate residential exits as well as ISP exits',
+  );
+  assert.match(
+    cloudSource,
+    /residentialProxyFor[\s\S]{0,620}hashShop\(shopId\) \+ rotation/,
+    'residential sticky-port selection must incorporate the per-account retry rotation',
+  );
+  const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
+  assert.match(
+    pcWorkerSource,
+    /ensureSalonSelected\(page,[\s\S]{0,240}genre:\s*jobGenre[\s\S]{0,120}baseUrl/,
+    'PC photo/style jobs must use the same resilient group-salon selection as Cloud',
+  );
   assert.doesNotMatch(
     source,
     /remainingHyphenFields[\s\S]{0,1200}\[-‐‑‒–—―ー−\]/,

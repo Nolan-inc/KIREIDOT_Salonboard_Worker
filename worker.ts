@@ -2278,10 +2278,22 @@ let _proxyRrCounter = 0;
 const accountProxyRotation = new Map<string, number>();
 function rotateAccountProxy(sessionKey: string): void {
   const pool = proxyPoolList();
-  if (pool.length <= 1) return;
-  const next = ((accountProxyRotation.get(sessionKey) ?? 0) + 1) % pool.length;
+  const residential = residentialConfig();
+  const residentialSpan = residential
+    ? Math.max(1, residential.portMax - residential.portMin + 1)
+    : 0;
+  // ISP から residential へ退避した後も、再試行ごとに別の sticky port
+  // (= 別住宅出口)へ進める。従来は ISP の index だけ進み residentialProxyFor()
+  // が店舗ハッシュだけを見ていたため、3回とも同じ壊れた住宅出口を再利用していた。
+  const rotationSpan = Math.max(pool.length, residentialSpan);
+  if (rotationSpan <= 1) return;
+  const next =
+    ((accountProxyRotation.get(sessionKey) ?? 0) + 1) % rotationSpan;
   accountProxyRotation.set(sessionKey, next);
-  console.log(`[proxy] account=${sessionKey.slice(0, 12)} static ISPを次の出口へ切替 (${next + 1}/${pool.length})`);
+  console.log(
+    `[proxy] account=${sessionKey.slice(0, 12)} 次のCloud出口へ切替 ` +
+      `(${next + 1}/${rotationSpan}, ISP=${pool.length}, residential=${residentialSpan})`,
+  );
 }
 // IP プール ヘルスチェック結果 (フラグ/到達不可IPを使わないためのバックオフ)。
 let _healthyProxies: string[] | null = null;
@@ -2561,7 +2573,10 @@ function residentialProxyFor(shopId?: string): { server: string; username?: stri
   const c = residentialConfig();
   if (!c) return null;
   const span = Math.max(1, c.portMax - c.portMin + 1);
-  const port = shopId ? c.portMin + (hashShop(shopId) % span) : c.portMin;
+  const rotation = shopId ? accountProxyRotation.get(shopId) ?? 0 : 0;
+  const port = shopId
+    ? c.portMin + ((hashShop(shopId) + rotation) % span)
+    : c.portMin + (rotation % span);
   return { server: `${c.host}:${port}`, username: c.username, password: c.password };
 }
 function fallbackConfigured(): boolean {

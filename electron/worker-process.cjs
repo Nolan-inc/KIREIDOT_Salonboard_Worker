@@ -55,6 +55,7 @@ const {
   scrapePhotoGallery,
   getLastErrorShot,
   resetLastErrorShot,
+  ensureSalonSelected,
 } = require('./scrapers.cjs');
 
 // 一過性のインフラ由来失敗コード (SalonBoard/Akamai の一時的な書込ブロック)。
@@ -3812,16 +3813,23 @@ async function runPushJobs({ showBrowser } = {}) {
       // グループ店舗(1ログイン複数サロン): /(CNC|KLP)/groupTop/ に着地したら対象サロンを選択。
       // 単一店舗ログインなら no-op。失敗時は誤店舗への書き込みを避けて manual_required。
       try {
-        const sel = await ensureStoreSelected(page, {
+        // Cloud worker と同じ堅牢なグループ店舗選択を使う。
+        // 旧 ensureStoreSelected は groupTop のAJAX読込を待たず、リンクを1回クリック
+        // した直後に still_on_group_top を返していたため、正しいHコードが登録済みの
+        // ADER開発/郡山でもフォト投稿だけ失敗していた。共通実装はリンク待機・再読込・
+        // force再クリック・hair管理TOPの肯定確認まで行う。
+        const sel = await ensureSalonSelected(page, {
           salonId: creds.salon_id ?? null,
           shopName: job.shop_name ?? null,
+          genre: jobGenre,
+          baseUrl,
         });
         if (!sel.ok) {
           await postCallback({
             job_id: job.id, job_type: job.job_type, status: 'manual_required',
             booking_id: payload.booking_id, content_post_id: payload.content_post_id ?? null,
             error_code: 'STORE_SELECT_REQUIRED',
-            error: `グループ店舗のサロン選択に失敗 (${sel.reason ?? 'unknown'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`,
+            error: `グループ店舗のサロン選択に失敗 (${sel.reason ?? 'unknown'})。`,
             manual_required: true,
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 サロン選択失敗: ${sel.reason}`, at: new Date().toISOString() });

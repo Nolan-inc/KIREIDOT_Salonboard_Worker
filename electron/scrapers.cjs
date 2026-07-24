@@ -12642,6 +12642,7 @@ module.exports = {
   resetLastErrorShot,
   captureScrapeDebug,
   findReserveIdForBooking,
+  ensureSalonSelected,
   // テスト用にエクスポート
   _internal: {
     parseJstDateTime,
