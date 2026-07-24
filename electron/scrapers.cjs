@@ -6215,12 +6215,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         else el.value = value;
         el.defaultValue = value;
         // SalonBoard の placeholder 実装は value だけを書き換えても、
-        // mod_color_999999 が残っていると確定時に「シ/メイ」「氏/名」へ戻す。
-        // 実入力として扱わせるため、値と placeholder 状態をセットで解除する。
+        // mod_color_999999 または jQuery data("empty") が残っていると、
+        // 確定ボタンへフォーカスが移る際の blur で「シ/メイ」「氏/名」へ戻す。
+        // 実入力として扱わせるため、値・class・jQuery内部フラグをセットで解除する。
         el.classList.remove('mod_color_999999');
+        el.removeAttribute('data-empty');
+        try {
+          if (window.jQuery) window.jQuery(el).removeData('empty');
+        } catch (_e) { /* noop */ }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
         changed += 1;
       });
       return changed;
@@ -6379,10 +6383,20 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         else el.value = next;
         el.defaultValue = next;
         el.classList.remove('mod_color_999999');
+        el.removeAttribute('data-empty');
+        try {
+          if (window.jQuery) window.jQuery(el).removeData('empty');
+        } catch (_e) { /* noop */ }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         repaired.push(mapping.input);
       }
+      // 値/class が既に正常でも、WebKit向けに jQuery.data("empty") だけが
+      // 残る場合がある。次の blur で値を空扱いに戻されないよう常に解除する。
+      el.removeAttribute('data-empty');
+      try {
+        if (window.jQuery) window.jQuery(el).removeData('empty');
+      } catch (_e) { /* noop */ }
       state.push({
         field: mapping.input,
         blank: !String(el.value || '').trim(),
