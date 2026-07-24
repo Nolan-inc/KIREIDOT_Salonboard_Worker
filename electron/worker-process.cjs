@@ -1457,13 +1457,14 @@ function startHeartbeat() {
   if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
 }
 
-// ---- push_booking ジョブの Realtime 購読 (即時 push トリガー) ----
+// ---- PC 専用フォト/スタイルジョブの Realtime 購読 ----
 let pushJobChannel = null;
 let pushTriggerTimer = null;
 
 /**
- * salonboard_sync_jobs の INSERT を購読し、push_booking / cancel_booking ジョブが
+ * salonboard_sync_jobs の INSERT を購読し、PC 専用の push_photo_gallery が
  * 積まれたら runPushJobs を (デバウンスして) 起動する。
+ * 予約/シフト等は Cloud authoritative のため、店舗PCでは反応もclaimもしない。
  * 連続作成に備え 1.5 秒デバウンス。実行中(running)なら runPushJobs 側でスキップされる。
  */
 function subscribeToPushJobs() {
@@ -1480,7 +1481,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_booking' && jt !== 'cancel_booking' && jt !== 'push_blog' && jt !== 'delete_blog' && jt !== 'push_photo_gallery' && jt !== 'push_review_reply' && jt !== 'push_shifts' && jt !== 'fetch_shift_patterns' && jt !== 'fetch_staff' && jt !== 'fetch_equipment' && jt !== 'fetch_reviews') return;
+          if (jt !== 'push_photo_gallery') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -1511,7 +1512,7 @@ function subscribeToPushJobs() {
   }
 
   // Realtime が (RLS/接続の都合で) 効かないケースに備えた保険ポーリング。
-  // queued の push/cancel ジョブが残っていれば runPushJobs で消化する。
+  // queued のPC専用フォト/スタイルジョブが残っていれば runPushJobs で消化する。
   // (Admin API claim 任せだとアプリ側で件数を見られないので、DB を直接 count する)
   startPushJobPoller();
 }
@@ -1528,7 +1529,8 @@ function startPushJobPoller() {
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .in('job_type', ['push_booking', 'cancel_booking', 'push_blog', 'delete_blog', 'push_photo_gallery', 'push_review_reply', 'push_shifts', 'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment', 'fetch_reviews'])
+        .eq('job_type', 'push_photo_gallery')
+        .eq('executor', 'playwright')
         .eq('status', 'queued');
       if (error) return;
       if ((count ?? 0) > 0) {
@@ -4421,21 +4423,20 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 扱わない種別は整理して除外。
-    // push_booking / cancel_booking / push_blog / delete_blog / push_photo_gallery /
-    // push_review_reply(口コミ返信投稿) / push_shifts / fetch_shift_patterns /
-    // fetch_staff / fetch_equipment を処理する。
-    // ★ push_review_reply / fetch_staff / fetch_equipment がこのリストから漏れていたため、
-    //   claim したジョブが「処理しません」で cancelled になり、口コミ返信が投稿されなかった。
-    const HANDLED_JOB_TYPES = new Set([
-      'push_booking', 'cancel_booking', 'push_blog', 'delete_blog',
-      'push_photo_gallery', 'push_review_reply', 'push_shifts',
-      'fetch_shift_patterns', 'fetch_staff', 'fetch_equipment', 'fetch_reviews',
-    ]);
+    // 店舗PCはフォト/スタイル反映専用。予約・シフト・ブログ等がAPIの不具合や
+    // 古いキューで返ってきても実行せず、Cloud authoritative を崩さない。
+    const HANDLED_JOB_TYPES = new Set(['push_photo_gallery']);
     const handled = [];
     for (const j of claimedJobs) {
       if (!HANDLED_JOB_TYPES.has(j.job_type)) {
-        await postCallback({ job_id: j.id, status: 'cancelled', error: `worker (desktop) は ${j.job_type} を処理しません` });
+        await postCallback({
+          job_id: j.id,
+          job_type: j.job_type,
+          status: 'retryable_failed',
+          error_code: 'PC_EXECUTOR_GUARD',
+          error: `[PC_EXECUTOR_GUARD] 店舗PCでは ${j.job_type} を実行しません。Cloud workerへ戻します。`,
+          manual_required: false,
+        });
         drainedOther++;
       } else {
         handled.push(j);

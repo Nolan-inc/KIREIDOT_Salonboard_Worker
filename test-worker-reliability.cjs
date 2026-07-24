@@ -216,6 +216,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /ensureSalonSelected\(page,[\s\S]{0,240}genre:\s*jobGenre[\s\S]{0,120}baseUrl/,
     'PC photo/style jobs must use the same resilient group-salon selection as Cloud',
   );
+  assert.match(
+    pcWorkerSource,
+    /const HANDLED_JOB_TYPES = new Set\(\['push_photo_gallery'\]\)/,
+    'the desktop worker must only execute the PC-specific photo/style write flow',
+  );
+  assert.match(
+    pcWorkerSource,
+    /\.eq\('job_type', 'push_photo_gallery'\)[\s\S]{0,120}\.eq\('executor', 'playwright'\)/,
+    'the desktop fallback poller must ignore all Cloud-authoritative jobs',
+  );
+  assert.match(
+    pcWorkerSource,
+    /PC_EXECUTOR_GUARD[\s\S]{0,260}Cloud workerへ戻します/,
+    'an unexpected non-photo desktop claim must be returned to Cloud instead of cancelled',
+  );
   assert.doesNotMatch(
     source,
     /remainingHyphenFields[\s\S]{0,1200}\[-‐‑‒–—―ー−\]/,
