@@ -6179,15 +6179,24 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       .replace(/[^ァ-ヿー・\s]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
-    const rawFull = cleanName(customer.name || '') || 'ゲスト';
+    const textOf = (id) => cleanName(document.getElementById(id)?.textContent || '');
+    const kanaOf = (id) => cleanKana(document.getElementById(id)?.textContent || '');
+    const orgLastName = textOf('orgNmSei');
+    const orgFirstName = textOf('orgNmMei');
+    const orgLastKana = kanaOf('orgNmSeiKana');
+    const orgFirstKana = kanaOf('orgNmMeiKana');
+    const rawFull = cleanName(customer.name || '')
+      || cleanName(`${orgLastName} ${orgFirstName}`)
+      || 'ゲスト';
     const parts = rawFull.split(/[\s　]+/).filter(Boolean);
-    const lastName = cleanName(customer.lastName || parts[0] || rawFull) || 'ゲスト';
-    const firstName = cleanName(customer.firstName || parts.slice(1).join('') || '様') || '様';
+    const lastName = cleanName(customer.lastName || orgLastName || parts[0] || rawFull) || 'ゲスト';
+    const firstName = cleanName(customer.firstName || orgFirstName || parts.slice(1).join('') || '様') || '様';
     const lastKana = cleanKana(
-      customer.lastNameKana || customer.nameKana || customer.lastName || parts[0] || rawFull,
+      customer.lastNameKana || customer.nameKana || orgLastKana
+        || customer.lastName || parts[0] || rawFull,
     ) || 'ヨヤク';
     const firstKana = cleanKana(
-      customer.firstNameKana || customer.firstName || parts.slice(1).join(''),
+      customer.firstNameKana || orgFirstKana || customer.firstName || parts.slice(1).join(''),
     ) || 'キャクサマ';
     const fillRequired = (selector, value, isInvalid = (current) => !current) => {
       let changed = 0;
@@ -6196,8 +6205,19 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       // 空のまま残るため、該当する必須欄をすべて補完する。
       document.querySelectorAll(selector).forEach((el) => {
         const current = String(el.value || '').replace(/\s+/g, '').trim();
-        if (!isInvalid(current)) return;
-        el.value = value;
+        const isSalonBoardPlaceholder = el.classList.contains('mod_color_999999');
+        if (!isSalonBoardPlaceholder && !isInvalid(current)) return;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )?.set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+        el.defaultValue = value;
+        // SalonBoard の placeholder 実装は value だけを書き換えても、
+        // mod_color_999999 が残っていると確定時に「シ/メイ」「氏/名」へ戻す。
+        // 実入力として扱わせるため、値と placeholder 状態をセットで解除する。
+        el.classList.remove('mod_color_999999');
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         el.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -6210,9 +6230,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // これらの仮値も、有効なKIREIDOT側カナ（無ければ安全な既定値）へ置換する。
     const invalidLastKana = (value) => !value || /^(?:シ|セイ|姓|[-ー])$/.test(value);
     const invalidFirstKana = (value) => !value || /^(?:メイ|名|[-ー])$/.test(value);
+    const invalidLastName = (value) => !value || /^(?:氏|姓|[-ー])$/.test(value);
+    const invalidFirstName = (value) => !value || /^(?:名|[-ー])$/.test(value);
     const changed =
-      fillRequired('input#nmSei, input[name="nmSei"]', lastName) +
-      fillRequired('input#nmMei, input[name="nmMei"]', firstName) +
+      fillRequired('input#nmSei, input[name="nmSei"]', lastName, invalidLastName) +
+      fillRequired('input#nmMei, input[name="nmMei"]', firstName, invalidFirstName) +
       fillRequired('input#nmSeiKana, input[name="nmSeiKana"], input[id*="SeiKana" i], input[name*="SeiKana" i], input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i]', lastKana, invalidLastKana) +
       fillRequired('input#nmMeiKana, input[name="nmMeiKana"], input[id*="MeiKana" i], input[name*="MeiKana" i], input[id*="Kana" i][id*="Mei" i], input[name*="Kana" i][name*="Mei" i]', firstKana, invalidFirstKana);
     const fields = Array.from(document.querySelectorAll(
@@ -6224,6 +6246,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       blank: !String(el.value || '').trim(),
       type: el.type || 'text',
       disabled: !!el.disabled,
+      placeholderStyle: el.classList.contains('mod_color_999999'),
     }));
     return { changed, fields };
   }, {
@@ -6321,6 +6344,57 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     );
   }
 
+  // SalonBoard のスクリプトが入力後に placeholder class/value を復元する版がある。
+  // 確定クリックの直前にも、画面内の元顧客情報を使って必須4欄を実入力状態へ戻す。
+  const preSubmitNameRepair = await page.evaluate(() => {
+    const mappings = [
+      { input: 'nmSeiKana', org: 'orgNmSeiKana', placeholders: /^(?:シ|セイ|姓|[-ー])$/ },
+      { input: 'nmMeiKana', org: 'orgNmMeiKana', placeholders: /^(?:メイ|名|[-ー])$/ },
+      { input: 'nmSei', org: 'orgNmSei', placeholders: /^(?:氏|姓|[-ー])$/ },
+      { input: 'nmMei', org: 'orgNmMei', placeholders: /^(?:名|[-ー])$/ },
+    ];
+    const fallback = {
+      nmSeiKana: 'ヨヤク',
+      nmMeiKana: 'キャクサマ',
+      nmSei: 'ゲスト',
+      nmMei: '様',
+    };
+    const repaired = [];
+    const state = [];
+    for (const mapping of mappings) {
+      const el = document.getElementById(mapping.input);
+      if (!el) continue;
+      const before = String(el.value || '').replace(/\s+/g, '').trim();
+      const placeholderStyle = el.classList.contains('mod_color_999999');
+      if (placeholderStyle || !before || mapping.placeholders.test(before)) {
+        const orgValue = String(document.getElementById(mapping.org)?.textContent || '').trim();
+        const next = orgValue && !mapping.placeholders.test(orgValue)
+          ? orgValue
+          : fallback[mapping.input];
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )?.set;
+        if (setter) setter.call(el, next);
+        else el.value = next;
+        el.defaultValue = next;
+        el.classList.remove('mod_color_999999');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        repaired.push(mapping.input);
+      }
+      state.push({
+        field: mapping.input,
+        blank: !String(el.value || '').trim(),
+        placeholderStyle: el.classList.contains('mod_color_999999'),
+        placeholderValue: mapping.placeholders.test(
+          String(el.value || '').replace(/\s+/g, '').trim(),
+        ),
+      });
+    }
+    return { repaired, state };
+  }).catch(() => ({ repaired: [], state: [] }));
+
   let nativeDialogAccepted = false;
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
@@ -6381,7 +6455,17 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   }
 
   let cap2 = await captureScrapeDebug(page, 'change', `after_${reserveId}`, {
-    diagnostics: { reserveId, primaryClicked, primaryClickError, confirmClicked, nativeDialogAccepted, normalizedHyphenFields, url: page.url() },
+    diagnostics: {
+      reserveId,
+      primaryClicked,
+      primaryClickError,
+      confirmClicked,
+      nativeDialogAccepted,
+      requiredNameRepair,
+      preSubmitNameRepair,
+      normalizedHyphenFields,
+      url: page.url(),
+    },
   });
 
   // 5) 検証
@@ -6393,7 +6477,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const errorLocator = page.getByText(/ハイフンなし|エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
     await errorLocator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => {});
     const hyphenFields = await page.evaluate(() => Array.from(document.querySelectorAll('input'))
-      .filter((el) => /[-‐‑‒–—―ー−]/.test(String(el.value || '')))
+      .filter((el) => {
+        const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''}`;
+        return /(tel|phone|mobile|zip|post|postal|郵便|電話)/i.test(key)
+          && /[-‐‑‒–—―−]/.test(String(el.value || ''));
+      })
       .map((el) => ({
         field: el.name || el.id || '(unnamed)',
         type: el.type || 'text',
@@ -6410,7 +6498,15 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       disabled: !!el.disabled,
     }))).catch(() => []);
     const validationCap = await captureScrapeDebug(page, 'change', `validation_error_${reserveId}`, {
-      diagnostics: { reserveId, requiredNameRepair, requiredNameState, normalizedHyphenFields, remainingHyphenFields: hyphenFields, url: page.url() },
+      diagnostics: {
+        reserveId,
+        requiredNameRepair,
+        preSubmitNameRepair,
+        requiredNameState,
+        normalizedHyphenFields,
+        remainingHyphenFields: hyphenFields,
+        url: page.url(),
+      },
     });
     if (validationCap) cap2 = validationCap;
     const fieldHint = hyphenFields.length

@@ -134,6 +134,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /invalidFirstKana[\s\S]*\(\?:メイ\|名/,
     'SalonBoard first-name-kana placeholders must be replaced before booking updates',
   );
+  assert.match(
+    source,
+    /classList\.remove\('mod_color_999999'\)/,
+    'SalonBoard placeholder styling must be removed together with placeholder values',
+  );
+  assert.match(
+    source,
+    /preSubmitNameRepair[\s\S]*orgNmSeiKana[\s\S]*orgNmMeiKana/,
+    'required customer names must be repaired again immediately before submit',
+  );
+  assert.doesNotMatch(
+    source,
+    /remainingHyphenFields[\s\S]{0,1200}\[-‐‑‒–—―ー−\]/,
+    'Japanese long-vowel marks must not be reported as contact-field hyphens',
+  );
 }
 
 (async () => {
