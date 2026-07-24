@@ -154,6 +154,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /preSubmitNameRepair[\s\S]*orgNmSeiKana[\s\S]*orgNmMeiKana/,
     'required customer names must be repaired again immediately before submit',
   );
+  assert.match(
+    source,
+    /warningResubmitted[\s\S]*warnArea[\s\S]*formSubmit\('extReserveChange', 'doComplete'\)/,
+    'SalonBoard equipment warnings must resubmit synchronously without restoring name placeholders',
+  );
+  assert.match(
+    source,
+    /warning_not_confirmed_/,
+    'an unconfirmed SalonBoard warning must not be reported as a successful booking update',
+  );
   assert.doesNotMatch(
     source,
     /remainingHyphenFields[\s\S]{0,1200}\[-‐‑‒–—―ー−\]/,

@@ -6492,6 +6492,43 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     for (let round = 0; round < 3; round++) {
       const bodyNow = (await page.locator('body').innerText().catch(() => '')) || '';
       if (/変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyNow)) break;
+      // 設備数超過等の警告画面で OK をクリックすると、SalonBoard は再び50ms待って
+      // doSubmit()する。その間に顧客placeholderが戻るため、警告受諾後の2回目も
+      // 値補正とformSubmitを同一JSターンで実行する。
+      const warningResubmitted = await page.evaluate(() => {
+        const warn = document.getElementById('warnArea');
+        if (!warn || getComputedStyle(warn).display === 'none') return false;
+        const jq = window.jQuery;
+        const form = document.getElementById('extReserveChange');
+        if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') return false;
+        const mappings = [
+          ['nmSeiKana', 'orgNmSeiKana', 'ヨヤク'],
+          ['nmMeiKana', 'orgNmMeiKana', 'キャクサマ'],
+          ['nmSei', 'orgNmSei', 'ゲスト'],
+          ['nmMei', 'orgNmMei', '様'],
+        ];
+        for (const [inputId, orgId, fallback] of mappings) {
+          const el = document.getElementById(inputId);
+          if (!el) continue;
+          const orgValue = String(document.getElementById(orgId)?.textContent || '').trim();
+          const current = String(el.value || '').trim();
+          if (el.classList.contains('mod_color_999999') || !current) {
+            el.value = orgValue || fallback;
+          }
+          el.classList.remove('mod_color_999999');
+          el.removeAttribute('data-empty');
+          try { jq(el).removeData('empty'); } catch (_e) { /* noop */ }
+        }
+        warn.style.display = 'none';
+        jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');
+        jq.shuhari.formSubmit('extReserveChange', 'doComplete');
+        return true;
+      }).catch(() => false);
+      if (warningResubmitted) {
+        confirmClicked = true;
+        await page.waitForTimeout(2500);
+        continue;
+      }
       const finalBtn = page
         .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a#change:visible')
         .first();
@@ -6529,7 +6566,24 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // 5) 検証
   const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
   const looksDone = /変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyText);
-  const looksError = /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(bodyText) && !looksDone;
+  const bodyHead = bodyText.slice(0, 1400);
+  const looksError = /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(bodyHead) && !looksDone;
+  const warningStillOpen = await page.locator('#warnArea:visible').count().catch(() => 0);
+  if (!looksDone && warningStillOpen > 0) {
+    const warningCap = await captureScrapeDebug(page, 'change', `warning_not_confirmed_${reserveId}`, {
+      diagnostics: {
+        reserveId,
+        directFormSubmitted,
+        confirmClicked,
+        url: page.url(),
+      },
+    });
+    return fail(
+      `SalonBoardの警告確認を完了できませんでした${warningCap ? ` (capture=${warningCap})` : ''}`,
+      'UNKNOWN_ERROR',
+      false,
+    );
+  }
   if (looksError) {
     // 通知画像が画面上部だけにならないよう、実際のvalidation文言へスクロールして撮り直す。
     const errorLocator = page.getByText(/ハイフンなし|エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
@@ -6571,7 +6625,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const fieldHint = hyphenFields.length
       ? `, ハイフン残存field=${hyphenFields.map((x) => `${x.field}(${x.digitCount}桁)`).join(',')}`
       : '';
-    return fail(`変更時にエラー表示 (${(bodyText.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+    return fail(`変更時にエラー表示 (${(bodyHead.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
   }
   if (!looksDone && !confirmClicked && !nativeDialogAccepted) {
     // SalonBoard は保存後も完了文言を出さず詳細画面へ戻る場合がある。曖昧成功にせず、
