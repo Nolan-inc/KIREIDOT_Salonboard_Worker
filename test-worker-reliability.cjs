@@ -192,13 +192,23 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /establishChangeContext[\s\S]{0,700}\/KLP\/reserve\/reserveList\/init[\s\S]{0,2600}for \(const path of candidates\)/,
+    /const establishChangeContext[\s\S]{0,700}\/KLP\/reserve\/reserveList\/init/,
     'booking updates must establish SalonBoard list context before opening deep change/detail URLs',
+  );
+  assert.match(
+    source,
+    /for \(let openTry[\s\S]{0,300}await establishChangeContext\(\)[\s\S]{0,500}for \(const path of candidates\)/,
+    'each booking-change navigation attempt must establish context before direct URL fallbacks',
   );
   assert.doesNotMatch(
     source,
     /candidateUrl\.searchParams\.set\('_kd'/,
     'booking change URLs must not include unknown cache-busting query parameters rejected by SalonBoard',
+  );
+  assert.match(
+    source,
+    /openChangeFormViaReserveList[\s\S]{0,1100}reserveLink\.click[\s\S]{0,900}onForm = await openChangeFormViaReserveList/,
+    'esthetic booking updates must open the real reservation-row link before direct URL fallbacks',
   );
   assert.match(
     cloudSource,

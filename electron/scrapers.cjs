@@ -6039,10 +6039,29 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     await page.waitForSelector(formSel, { timeout: 12_000 }).catch(() => {});
     return (await page.locator(formSel).count().catch(() => 0)) > 0;
   };
+  // エステ系は予約一覧で対象日を検索し、実際の予約行リンクをクリックする経路を最優先する。
+  // これによりKMAGIC等の画面文脈を保ったまま詳細へ進め、直リンクのKPCL009V01を回避する。
+  const openChangeFormViaReserveList = async () => {
+    if (genre === 'hair') return false;
+    const day = `${when.yyyymmdd.slice(0, 4)}-${when.yyyymmdd.slice(4, 6)}-${when.yyyymmdd.slice(6, 8)}`;
+    await applyBookingDateFilter(page, { fromStr: day, toStr: day }, {}).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const reserveLink = page.locator(
+      `a[href*="reserveId=${reserveId}"], a[href*="${reserveId}"]`,
+    ).first();
+    if ((await reserveLink.count().catch(() => 0)) === 0) return false;
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+      reserveLink.click({ timeout: 10_000 }).catch(() => {}),
+    ]);
+    return openChangeFormFromDetail();
+  };
   let onForm = false;
   let loginRecoveryFailed = false;
   for (let openTry = 1; openTry <= 3 && !onForm; openTry++) {
     await establishChangeContext();
+    onForm = await openChangeFormViaReserveList();
+    if (onForm) break;
     for (const path of candidates) {
       const candidateUrl = new URL(path, baseUrl);
       await page.goto(candidateUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
