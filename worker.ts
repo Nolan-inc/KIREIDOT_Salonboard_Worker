@@ -1961,7 +1961,12 @@ async function handleJob(job: Job): Promise<void> {
       job.job_type === "fetch_bookings" ||
       job.job_type === "fetch_booking_detail"
     ) {
-      const isBookingDetail = job.job_type === "fetch_booking_detail";
+      // 本番Admin callbackの段階デプロイ中も既存 fetch_bookings として取込可能にする。
+      // メール起点ジョブは payload.kind/source で対象予約1件モードを識別する。
+      const isBookingDetail =
+        job.job_type === "fetch_booking_detail" ||
+        job.payload?.kind === "staff_resolution" ||
+        job.payload?.source === "salonboard_email_unassigned_staff";
       const targetReserveId = isBookingDetail
         ? String(job.payload?.reserve_id ?? "").trim()
         : "";
