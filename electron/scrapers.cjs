@@ -2812,10 +2812,49 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail('reCAPTCHA on register form', 'RECAPTCHA_REQUIRED', true);
   }
 
-  // (3) 「予定を登録する」ボタン(a#fnc_schedule)を押して予定登録画面へ遷移。
-  const schedBtn = page.locator('a#fnc_schedule').first();
+  // (3) 「予定を登録する」ボタンを押して予定登録画面へ遷移。
+  // SalonBoard の店舗契約/画面版によって a#fnc_schedule ではなく
+  // button/input、または「予定を追加する」表記になるため、文言でも救済する。
+  const schedBtn = page.locator([
+    'a#fnc_schedule',
+    'button#fnc_schedule',
+    'input#fnc_schedule',
+    'a:has-text("予定を登録する")',
+    'button:has-text("予定を登録する")',
+    'input[type="button"][value*="予定"][value*="登録"]',
+    'input[type="submit"][value*="予定"][value*="登録"]',
+    'a:has-text("予定を追加する")',
+    'button:has-text("予定を追加する")',
+    'input[type="button"][value*="予定"][value*="追加"]',
+  ].join(', ')).first();
   if ((await schedBtn.count().catch(() => 0)) === 0) {
-    return fail('「予定を登録する」ボタンが見つかりません (予約登録画面に到達できていない可能性)', 'CONFIRMATION_MISMATCH', true);
+    const diagnostics = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      heading: Array.from(document.querySelectorAll('h1,h2,h3,.mod_heading')).map((el) => el.textContent?.trim()).filter(Boolean).slice(0, 12),
+      forms: Array.from(document.forms).map((form) => ({ id: form.id, name: form.name, action: form.action })).slice(0, 12),
+      controls: Array.from(document.querySelectorAll('a,button,input[type="button"],input[type="submit"]'))
+        .map((el) => ({
+          tag: el.tagName,
+          id: el.id,
+          name: el.getAttribute('name'),
+          value: el.getAttribute('value'),
+          text: el.textContent?.replace(/\s+/g, ' ').trim(),
+          href: el.getAttribute('href'),
+        }))
+        .filter((x) => x.id || x.name || x.value || x.text)
+        .slice(0, 80),
+      bodyText: document.body?.innerText?.replace(/\s+/g, ' ').trim().slice(0, 1200) || '',
+    })).catch(() => null);
+    const cap = await captureScrapeDebug(page, 'schedule', `no_schedule_button_${ymd}_${p.salonboard_staff_external_id}`, {
+      diagnostics,
+    });
+    const currentUrl = page.url();
+    return fail(
+      `「予定を登録する」ボタンが見つかりません (url=${currentUrl}${cap ? `, capture=${cap}` : ''})`,
+      'CONFIRMATION_MISMATCH',
+      true,
+    );
   }
   try {
     await Promise.all([
