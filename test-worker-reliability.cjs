@@ -291,6 +291,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /remainingHyphenFields[\s\S]{0,1200}\[-‐‑‒–—―ー−\]/,
     'Japanese long-vowel marks must not be reported as contact-field hyphens',
   );
+  assert.match(
+    source,
+    /replace\(\/\[０-９\]\/g/,
+    'SalonBoard contact normalization must convert full-width digits before validation',
+  );
+  assert.match(
+    source,
+    /digits\.length < 3/,
+    'SalonBoard split phone and postal fields must also be normalized',
+  );
 }
 
 (async () => {

@@ -4751,7 +4751,9 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
 // 数字だけ残すと「817014551257」(12桁・0始まりでない)のまま送られ、SalonBoard の
 // validation(「※ハイフンなしで入力してください」)に弾かれる(2026-07-22 YG97547036)。
 function normalizeJpPhoneDigits(raw) {
-  const digits = String(raw || '').replace(/[^\d]/g, '');
+  const ascii = String(raw || '').replace(/[０-９]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+  const digits = ascii.replace(/[^\d]/g, '');
   if (!digits) return '';
   if (digits.startsWith('0') && digits.length <= 11) return digits;
   // 01081/0081 = 国際プレフィックス経由、81 = 国番号のみ。国内 0 始まりへ戻す。
@@ -6719,6 +6721,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const contactHint = /(tel|phone|mobile|zip|post|postal|郵便|電話)/i;
     const telHint = /(tel|phone|mobile|電話)/i;
     const dateHint = /(date|time|year|month|day|日時|年月日)/i;
+    const toAsciiDigits = (value) => String(value || '').replace(/[０-９]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
     // normalizeJpPhoneDigits と同ロジック (page.evaluate 内は Node 側関数を参照できない)
     const toDomestic = (digits) => {
       if (!digits || (digits.startsWith('0') && digits.length <= 11)) return digits;
@@ -6732,10 +6736,15 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     };
     document.querySelectorAll('input').forEach((el) => {
       const value = String(el.value || '');
-      const digits = value.replace(/[^\d]/g, '');
-      const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''}`;
+      const asciiValue = toAsciiDigits(value);
+      const digits = asciiValue.replace(/[^\d]/g, '');
+      const label = el.id
+        ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent || ''
+        : '';
+      const nearby = el.closest('th,td,li,div')?.textContent?.slice(0, 120) || '';
+      const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''} ${label} ${nearby}`;
       const type = String(el.type || 'text').toLowerCase();
-      if (!value || digits.length < 7 || digits.length > 15) return;
+      if (!value || digits.length < 3 || digits.length > 15) return;
       if (type === 'date' || type === 'datetime-local' || dateHint.test(key)) return;
       if (!contactHint.test(key) && type !== 'tel') return;
       const isTel = telHint.test(key) || type === 'tel';
@@ -7035,16 +7044,21 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const errorLocator = page.getByText(/ハイフンなし|エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
     await errorLocator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => {});
     const hyphenFields = await page.evaluate(() => Array.from(document.querySelectorAll('input'))
-      .filter((el) => {
-        const key = `${el.id || ''} ${el.name || ''} ${el.getAttribute('aria-label') || ''}`;
-        return /(tel|phone|mobile|zip|post|postal|郵便|電話)/i.test(key)
-          && /[-‐‑‒–—―−]/.test(String(el.value || ''));
-      })
-      .map((el) => ({
-        field: el.name || el.id || '(unnamed)',
-        type: el.type || 'text',
-        digitCount: String(el.value || '').replace(/[^\d]/g, '').length,
-      })).slice(0, 20)).catch(() => []);
+      .filter((el) => /[-‐‑‒–—―−]/.test(String(el.value || '')))
+      .map((el) => {
+        const label = el.id
+          ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent || ''
+          : '';
+        return {
+          field: el.name || el.id || '(unnamed)',
+          type: el.type || 'text',
+          label: label.trim().slice(0, 60),
+          visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+          digitCount: String(el.value || '')
+            .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+            .replace(/[^\d]/g, '').length,
+        };
+      }).slice(0, 30)).catch(() => []);
     const requiredNameState = await page.evaluate(() => Array.from(document.querySelectorAll(
       'input#nmSei, input[name="nmSei"], input#nmMei, input[name="nmMei"], ' +
       'input[id*="Kana" i][id*="Sei" i], input[name*="Kana" i][name*="Sei" i], ' +
