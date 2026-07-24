@@ -210,6 +210,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /for \(let openTry[\s\S]{0,300}await establishChangeContext\(\)[\s\S]{0,500}for \(const path of candidates\)/,
     'each booking-change navigation attempt must establish context before direct URL fallbacks',
   );
+  assert.match(
+    source,
+    /if \(staleToken\)[\s\S]{0,700}KPCL017V01[\s\S]{0,300}'SB_SERVER_ERROR'[\s\S]{0,80}false/,
+    'exhausted KPCL017V01 optimistic-lock conflicts must remain retryable in Cloud',
+  );
   assert.doesNotMatch(
     source,
     /candidateUrl\.searchParams\.set\('_kd'/,

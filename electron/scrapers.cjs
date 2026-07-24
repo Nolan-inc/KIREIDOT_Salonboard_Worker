@@ -5049,6 +5049,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         staleTokenRetry: staleTokenRetry + 1,
       });
     }
+    if (staleToken) {
+      // KPCL017V01 は入力内容やスタッフ紐付けの不整合ではなく、SalonBoard の
+      // rlastupdate（楽観ロック）が別操作で更新された一時競合。Cloud 内の即時再試行を
+      // 使い切っても manual_required に固定せず、fresh browser/proxy を使う次 attempt へ
+      // 渡す。pushBookingViaForm 冒頭の既存予約確認により、直前の試行が実は成功して
+      // いた場合も二重登録にはならない。
+      return fail(
+        `SalonBoardの更新競合(KPCL017V01)が3回続きました。最新情報からCloudで全工程を再試行します。`,
+        'SB_SERVER_ERROR',
+        false,
+      );
+    }
     return fail(
       `予約登録フォームに到達できませんでした (rlastupdate=${rlastupdate || 'なし'})。url=${diag.url} title="${diag.title}" forms=[${(diag.forms || []).join(',')}] body="${diag.body}"`,
       'CONFIRMATION_MISMATCH',
