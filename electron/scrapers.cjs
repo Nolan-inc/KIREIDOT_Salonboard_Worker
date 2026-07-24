@@ -2796,17 +2796,67 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   }
 
   // (2) 予約登録フォームを開く (予約と同じ URL + パラメータ)。
-  const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
-  u.searchParams.set('staffId', p.salonboard_staff_external_id);
-  u.searchParams.set('date', when.yyyymmdd);
-  u.searchParams.set('rsvHour', startHH);
-  u.searchParams.set('rsvMinute', startMM);
-  if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
-  try {
-    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
-    await page.waitForSelector('form#extReserveRegist, #fnc_schedule, #regist', { timeout: 15_000 }).catch(() => {});
-  } catch (e) {
-    return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+  // SalonBoard はスケジュールを表示した瞬間の rlastupdate を楽観ロックとして使う。
+  // 別タブ/別利用者/SalonBoard側処理で更新されると KPCL017V01 のエラー画面へ遷移し、
+  // 本来の #fnc_schedule が存在しなくなる。ここで単に「ボタン無し」として落とさず、
+  // 最新スケジュールへ戻って rlastupdate を取り直し、同じCloud処理内で再試行する。
+  let staleFormError = '';
+  let formOpened = false;
+  for (let formAttempt = 1; formAttempt <= 3; formAttempt += 1) {
+    if (formAttempt > 1) {
+      try {
+        const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+        refreshUrl.searchParams.set('date', when.yyyymmdd);
+        refreshUrl.searchParams.set('_kd_token', `${Date.now()}_${formAttempt}`);
+        await page.goto(refreshUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+        await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
+        rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+        await page.waitForTimeout(250 + formAttempt * 150);
+      } catch (e) {
+        return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+      }
+    }
+
+    const u = new URL('/KLP/reserve/ext/extReserveRegist/', baseUrl);
+    u.searchParams.set('staffId', p.salonboard_staff_external_id);
+    u.searchParams.set('date', when.yyyymmdd);
+    u.searchParams.set('rsvHour', startHH);
+    u.searchParams.set('rsvMinute', startMM);
+    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
+    try {
+      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      await page.waitForSelector('form#extReserveRegist, #fnc_schedule, #regist', { timeout: 15_000 }).catch(() => {});
+    } catch (e) {
+      return fail(`予約登録フォームを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
+    }
+
+    const formPageState = await page.evaluate(() => {
+      const text = document.body?.innerText?.replace(/\s+/g, ' ').trim() || '';
+      return {
+        ready: !!document.querySelector('form#extReserveRegist, #fnc_schedule, #regist'),
+        stale: /KPCL017V01|他のユーザによって変更されているため/.test(text),
+        text: text.slice(0, 500),
+      };
+    }).catch(() => ({ ready: false, stale: false, text: '' }));
+    if (formPageState.ready) {
+      formOpened = true;
+      break;
+    }
+    if (formPageState.stale) {
+      staleFormError = formPageState.text;
+      continue;
+    }
+    break;
+  }
+  if (!formOpened && staleFormError) {
+    const cap = await captureScrapeDebug(page, 'schedule', `stale_form_${ymd}_${p.salonboard_staff_external_id}`, {
+      diagnostics: { staleFormError, rlastupdate },
+    });
+    return fail(
+      `SalonBoardの更新競合(KPCL017V01)が3回続きました${cap ? ` (capture=${cap})` : ''}`,
+      'CONFIRMATION_MISMATCH',
+      false,
+    );
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA on register form', 'RECAPTCHA_REQUIRED', true);
