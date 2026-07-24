@@ -283,6 +283,7 @@ const MAX_PUSH_ATTEMPTS = 3;
 const INFRA_TRANSIENT_ERROR_CODES = new Set<string>([
   "SB_SERVER_ERROR",
   "SB_REGISTER_INCOMPLETE",
+  "SESSION_EXPIRED",
 ]);
 function isInfraTransientError(code?: string | null, reason?: string | null): boolean {
   if (code && INFRA_TRANSIENT_ERROR_CODES.has(code)) return true;
@@ -3088,13 +3089,11 @@ function makeRelogin(
           timeout: 20_000,
         })
         .catch(() => {});
-      const remaining = loginThrottleRemainingMs(endpoint, creds.login_id);
-      if (remaining > 0) {
-        console.log(
-          `[relogin] endpoint cooldown (${Math.ceil(remaining / 1000)}s remaining) -> skip`,
-        );
-        return false;
-      }
+      // 深い画面への遷移中にセッションが失効した場合は、その場でfresh loginを
+      // 試す。従来のendpoint cooldown待ちは有効なジョブまで数分止め、しかも
+      // 画像認証画面を「フォームなし」に誤分類していたため使用しない。
+      // ここで再ログインできなければ scraper が SESSION_EXPIRED を返し、ジョブ全体を
+      // 新しいCloudコンテキスト/出口で直ちに再実行する。
       const r = await withLoginPacing(endpoint, shopId, creds.login_id, () =>
         tryLogin(page, new URL("/login/", baseUrl).toString(), {
           loginId: creds.login_id,

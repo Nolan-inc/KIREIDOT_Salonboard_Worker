@@ -6023,6 +6023,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return (await page.locator(formSel).count().catch(() => 0)) > 0;
   };
   let onForm = false;
+  let loginRecoveryFailed = false;
   for (let openTry = 1; openTry <= 3 && !onForm; openTry++) {
     for (const path of candidates) {
       const candidateUrl = new URL(path, baseUrl);
@@ -6040,13 +6041,29 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       return {
         expired: /有効期限|再度ログイン|操作されなかった/.test(body),
         transient: /システムエラー|エラーが発生しました|再度操作しなおしてください|サロンが選択されていません/.test(body),
+        // 深い予約画面への遷移時だけセッションが失効すると、SalonBoard は
+        // /CNC/login/doLogin/ の画像認証画面へ戻す。従来はこれを単なる
+        // 「変更フォームなし」と誤分類して manual_required にしていた。
+        // ログイン画面はセッション失効として扱い、同一ジョブ内の再ログイン、
+        // 失敗時は新しいCloudコンテキスト/出口でのジョブ再試行へ戻す。
+        needsLogin:
+          /\/CNC\/login\/|\/login\//i.test(location.pathname)
+          || !!document.querySelector(
+            'input[name="userId"], input[name="loginId"], input[name="password"], input[type="password"], input[name="captchaLogin"]',
+          )
+          || /画像認証|イラストを完成|パーツをドラッグ/.test(body),
       };
-    }).catch(() => ({ expired: false, transient: false }));
+    }).catch(() => ({ expired: false, transient: false, needsLogin: false }));
     // セッション失効だけでなく、SBが一時エラー/サロン未選択へ戻した場合も
     // fresh login→店舗文脈再確立からやり直す。
-    if (openTry < 3 && (pageState.expired || pageState.transient) && typeof opts.relogin === 'function') {
+    if (
+      openTry < 3
+      && (pageState.expired || pageState.transient || pageState.needsLogin)
+      && typeof opts.relogin === 'function'
+    ) {
       const ok = await opts.relogin().catch(() => false);
       if (ok) { await ensureReserveSalonContext(page, baseUrl, opts); continue; }
+      if (pageState.needsLogin) loginRecoveryFailed = true;
     }
     break;
   }
@@ -6055,6 +6072,18 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   }
   const cap1 = await captureScrapeDebug(page, 'change', `form_${reserveId}`, { diagnostics: { reserveId, onForm, genre, url: page.url() } });
   if (!onForm) {
+    if (
+      loginRecoveryFailed
+      || /\/CNC\/login\/|\/login\//i.test(page.url())
+    ) {
+      return fail(
+        `[SESSION_EXPIRED] 予約変更中にSalonBoardログイン画面へ戻りました ` +
+        `(reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})。` +
+        '新しいCloudブラウザと出口で全工程を再試行します。',
+        'SESSION_EXPIRED',
+        false,
+      );
+    }
     // ★原因を切り分けて報告する: SalonBoard 側で「変更できない予約」の場合、
     //   確定ボタンが hidden/disabled な状態で置かれている。これを検出して、
     //   リトライしても無駄な手動対応案件であることを明示する。

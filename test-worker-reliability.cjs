@@ -109,6 +109,7 @@ function testGuardTimeoutCallbackIsNotSuppressed() {
 
 function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   const source = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
+  const cloudSource = readFileSync(require.resolve('./worker.ts'), 'utf8');
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -163,6 +164,41 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     source,
     /warning_not_confirmed_/,
     'an unconfirmed SalonBoard warning must not be reported as a successful booking update',
+  );
+  assert.match(
+    source,
+    /idUnverified:\s*true[\s\S]{0,240}登録完了を確認済み/,
+    'PC scraper must treat a confirmed registration without reserveId as success',
+  );
+  assert.match(
+    cloudSource,
+    /idUnverified:\s*true[\s\S]{0,240}登録完了を確認済み/,
+    'Cloud worker must treat a confirmed registration without reserveId as success',
+  );
+  assert.doesNotMatch(
+    `${source}\n${cloudSource}`,
+    /登録の完了サインは出ましたが\s*reserveId\s*を確認できませんでした/,
+    'the legacy false-failure message must not return from either worker implementation',
+  );
+  assert.match(
+    source,
+    /needsLogin:[\s\S]{0,800}画像認証/,
+    'the booking-change flow must detect SalonBoard login and image-auth pages',
+  );
+  assert.match(
+    source,
+    /\[SESSION_EXPIRED\][\s\S]{0,500}新しいCloudブラウザと出口で全工程を再試行/,
+    'a booking update redirected to the SalonBoard login/image-auth page must retry in a fresh Cloud context',
+  );
+  assert.match(
+    cloudSource,
+    /INFRA_TRANSIENT_ERROR_CODES[\s\S]{0,220}SESSION_EXPIRED/,
+    'session expiry during a Cloud write must remain retryable instead of becoming manual_required',
+  );
+  assert.doesNotMatch(
+    cloudSource,
+    /\[relogin\] endpoint cooldown \([\s\S]{0,120}-> skip/,
+    'deep-page session recovery must not wait for the obsolete endpoint cooldown',
   );
   assert.doesNotMatch(
     source,
