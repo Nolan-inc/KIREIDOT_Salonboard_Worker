@@ -7047,6 +7047,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let primaryClicked = false;
   let primaryClickError = '';
   let directFormSubmitted = false;
+  let equipmentSubmitTrace = null;
   try {
     // KLP の #change は click 後50ms待ってから doSubmit() を呼ぶ。この待機中に
     // 顧客欄の blur handler が placeholder を復元し、正しいカナが空として送られる。
@@ -7097,12 +7098,20 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           return { submitted: false, reason: 'equipment_value_mismatch_at_submit' };
         }
       }
+      const equipmentFields = equipmentValue
+        ? Array.from(new FormData(form).entries())
+          .filter(([name]) => /^equip/i.test(String(name)))
+          .map(([name, value]) => [String(name), String(value)])
+        : [];
       jq.shuhari.formSubmit('extReserveChange', 'doComplete');
-      return { submitted: true };
+      return { submitted: true, equipmentFields };
     }, selectedEquipmentValue).catch((e) => ({
       submitted: false,
       reason: e?.message || String(e),
     }));
+    equipmentSubmitTrace = Array.isArray(directSubmitResult.equipmentFields)
+      ? directSubmitResult.equipmentFields
+      : null;
     if (
       selectedEquipmentValue &&
       /^equipment_/.test(String(directSubmitResult.reason || ''))
@@ -7228,6 +7237,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       confirmClicked,
       nativeDialogAccepted,
       directFormSubmitted,
+      equipmentSubmitTrace,
       requiredNameRepair,
       preSubmitNameRepair,
       normalizedHyphenFields,
@@ -7361,11 +7371,15 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           reserveId,
           expectedEquipName: expectedPersistedEquipName,
           actualEquipName,
+          equipmentSubmitTrace,
           url: page.url(),
         },
       });
+      const equipmentTraceText = equipmentSubmitTrace
+        ? `, 送信設備=${JSON.stringify(equipmentSubmitTrace)}`
+        : '';
       return fail(
-        `設備の保存をSalonBoard予約詳細で確認できませんでした (期待=${expectedPersistedEquipName}, 実際=${actualEquipName || '未割り当て'}${verifyCap ? `, capture=${verifyCap}` : ''})`,
+        `設備の保存をSalonBoard予約詳細で確認できませんでした (期待=${expectedPersistedEquipName}, 実際=${actualEquipName || '未割り当て'}${equipmentTraceText}${verifyCap ? `, capture=${verifyCap}` : ''})`,
         'UNKNOWN_ERROR',
         false,
       );
