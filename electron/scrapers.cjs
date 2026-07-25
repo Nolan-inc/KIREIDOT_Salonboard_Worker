@@ -5235,6 +5235,33 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
   }
 
+  // 指名予約。担当スタッフが選ばれているだけでは、SB 側の自動振り分け予約と
+  // 区別できないため、payload の明示フラグが true の場合だけチェックする。
+  if (p.is_designated === true) {
+    const designationApplied = await page.evaluate(() => {
+      const checkbox = document.querySelector(
+        'input[type="checkbox"][name="rsvType"][value="1"], input[type="checkbox"].jscStaffCheckBox',
+      );
+      if (!checkbox) return { found: false, checked: false };
+      if (!checkbox.checked) checkbox.click();
+      checkbox.dispatchEvent(new Event('input', { bubbles: true }));
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelectorAll('input[name="rsvTypeList"]').forEach((input) => {
+        input.value = '1';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      return { found: true, checked: checkbox.checked };
+    }).catch(() => ({ found: false, checked: false }));
+    if (!designationApplied.found || !designationApplied.checked) {
+      return fail(
+        'SalonBoardの予約登録フォームで「指名予約」を有効にできませんでした。指名属性を落とさないため自動登録を中止します。',
+        'CONFIRMATION_MISMATCH',
+        true,
+      );
+    }
+  }
+
   // メニュー = ネット予約クーポン (任意)。menuTarget があれば label 完全一致 →
   // 部分一致で選ぶ。見つからなくても予約自体は続行する (メニュー無しで登録)。
   if (menuTarget) {

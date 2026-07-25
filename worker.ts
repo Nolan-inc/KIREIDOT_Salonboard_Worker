@@ -622,6 +622,7 @@ type PushBookingPayload = {
   staff_id?: string | null;
   salonboard_staff_external_id?: string | null;
   staff_name?: string | null;
+  is_designated?: boolean;
   menu_id?: string | null;
   menu_name?: string | null;
   salonboard_menu_name?: string | null;
@@ -4433,6 +4434,39 @@ async function pushBooking(
       "STAFF_MAPPING_NOT_FOUND",
       true,
     );
+  }
+
+  // 指名予約。KIREIDOT 側で明示された予約だけ SalonBoard の「指名予約」を有効にする。
+  // 担当スタッフが設定されているだけでは、SB の自動振り分け予約と区別できないため、
+  // staff_id の有無から推測せず is_designated=true の場合に限る。
+  if (p.is_designated === true) {
+    const designationApplied = await page
+      .evaluate(() => {
+        const checkbox = document.querySelector(
+          'input[type="checkbox"][name="rsvType"][value="1"], input[type="checkbox"].jscStaffCheckBox',
+        ) as HTMLInputElement | null;
+        if (!checkbox) return { found: false, checked: false };
+        if (!checkbox.checked) checkbox.click();
+        checkbox.dispatchEvent(new Event("input", { bubbles: true }));
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+        document
+          .querySelectorAll<HTMLInputElement>('input[name="rsvTypeList"]')
+          .forEach((input) => {
+            input.value = "1";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+        return { found: true, checked: checkbox.checked };
+      })
+      .catch(() => ({ found: false, checked: false }));
+    if (!designationApplied.found || !designationApplied.checked) {
+      await captureRegisterDebug(page, job, "designation_not_applied");
+      return fail(
+        "SalonBoardの予約登録フォームで「指名予約」を有効にできませんでした。指名属性を落とさないため自動登録を中止します。",
+        "CONFIRMATION_MISMATCH",
+        true,
+      );
+    }
   }
 
   // 開始 時/分 (URL でも入るが明示)
