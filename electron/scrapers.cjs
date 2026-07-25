@@ -12747,6 +12747,11 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
     return null;
   };
 
+  // sync_names=true (KD→SB名称同期): 時間一致するSB行をKDパターン名・短縮名へ収束させる。
+  // SBに改名UIが無いため「旧行を削除→KD名で再登録」。時間一致しないSB独自行は触らない
+  // (それらはfetch経由でKD側の仮登録候補になる)。
+  const syncNames = p.sync_names === true;
+
   const results = [];
   for (const pat of patterns) {
     const name = String(pat.name || '').trim();
@@ -12757,7 +12762,52 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
       results.push({ name, status: 'skipped', reason: 'name/start/end(HH:MM) 不足' });
       continue;
     }
-    if (await tableHas(name, start, end)) { results.push({ name, status: 'exists' }); continue; }
+    let renamedFrom = null;
+    if (syncNames) {
+      const rowsNow = await readTableRows();
+      const normName = (s) => String(s || '').replace(/[\s　]+/g, '');
+      const timeMatch = rowsNow.find((r) => r.start === start.padStart(5, '0') && r.end === end.padStart(5, '0'));
+      const wantShort = shortName && Array.from(shortName).length <= 2 ? shortName : null;
+      if (timeMatch) {
+        const sameName = normName(timeMatch.name) === normName(name);
+        const sameShort = !wantShort || timeMatch.short === wantShort;
+        if (sameName && sameShort) { results.push({ name, status: 'exists' }); continue; }
+        if (!enablePush) {
+          results.push({ name, status: 'confirm_only', planned_rename: `${timeMatch.name}/${timeMatch.short || '-'} -> ${name}/${wantShort ?? '(auto)'}` });
+          continue;
+        }
+        const del = await deleteRowByValue(timeMatch.value);
+        if (!del.ok) {
+          const cap = await captureScrapeDebug(page, 'workpattern', `rename_delete_failed_${start.replace(':', '')}`, {
+            diagnostics: { target: timeMatch, want: { name, shortName }, del },
+          });
+          results.push({ name, status: 'failed', reason: `改名のための旧パターン「${timeMatch.name}」削除に失敗しました (${del.reason ?? 'unknown'}${cap ? `, capture=${cap}` : ''})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true });
+          continue;
+        }
+        renamedFrom = timeMatch.name;
+      }
+      // 同名で時間が異なる行 (KD側で時間変更されたパターンの旧行) も削除して重複名を防ぐ。
+      const nameDup = (await readTableRows()).find(
+        (r) => normName(r.name) === normName(name) && !(r.start === start.padStart(5, '0') && r.end === end.padStart(5, '0')),
+      );
+      if (nameDup) {
+        if (!enablePush) {
+          results.push({ name, status: 'confirm_only', planned_rename: `時間違いの同名行 ${nameDup.name} ${nameDup.start}-${nameDup.end} を削除予定` });
+          continue;
+        }
+        const delDup = await deleteRowByValue(nameDup.value);
+        if (!delDup.ok) {
+          results.push({ name, status: 'failed', reason: `同名旧パターン (${nameDup.start}〜${nameDup.end}) の削除に失敗しました`, errorCode: 'UNKNOWN_ERROR', manualRequired: true });
+          continue;
+        }
+        if (!renamedFrom) renamedFrom = `${nameDup.name} (${nameDup.start}-${nameDup.end})`;
+      }
+      if (timeMatch == null && nameDup == null && await tableHas(name, start, end)) {
+        // 照合できない表構造の保険 (時間セルが読めない店舗など) は従来同様スキップ。
+        results.push({ name, status: 'exists' });
+        continue;
+      }
+    } else if (await tableHas(name, start, end)) { results.push({ name, status: 'exists' }); continue; }
     const usedShortNames = new Set(await readUsedShortNames());
     const requestedShortName = shortName;
     // 空・3文字以上・既存との重複は、登録画面上で未使用の2文字へ差し替える。
@@ -12827,6 +12877,7 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
         name,
         status: 'ok',
         short_name: shortName,
+        ...(renamedFrom ? { renamed_from: renamedFrom } : {}),
         ...(requestedShortName !== shortName ? { short_name_reassigned_from: requestedShortName || null } : {}),
       });
     }
