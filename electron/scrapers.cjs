@@ -3229,15 +3229,11 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail(`予定登録後のスケジュール確認画面を開けません: ${verifyNavigationError}`, 'CONFIRMATION_MISMATCH', false);
   }
   if (!verified?.ok) {
-    if (serverAccepted) {
-      return {
-        status: 'ok',
-        externalId: null,
-        verificationPending: true,
-        warning: `SalonBoardは予定登録POSTを受理しましたが、スケジュール一覧への反映確認は時間内に完了しませんでした (${verified?.reason ?? 'unknown'})`,
-        confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
-      };
-    }
+    // POST受理(serverAccepted)でも実在確認が取れるまでは成功にしない。
+    // SalonBoardは既存予定と重複する予定登録などをPOST受理後に破棄することがあり
+    // (2026-07-25 中目黒: 既存「なつき面談」と重複した予定が消えたのに synced 扱いの偽成功)、
+    // 「受理=登録」ではない。実際に登録済みで表示だけ遅れていた場合の再試行は、
+    // 冒頭の既存予定チェックが alreadyExists で冪等成功にするため二重登録にならない。
     const blocks = Array.isArray(verified?.blocks)
       ? verified.blocks.slice(0, 8).map((b) => `${b.start}-${b.end}:${b.title}`).join(',')
       : '';
@@ -3245,11 +3241,19 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       diagnostics: {
         expected: { staffExt, startTotal, endTotal, title },
         verified,
+        serverAccepted,
         postSubmitState,
         afterUrl,
         completionWarning,
       },
     });
+    if (serverAccepted) {
+      // ★文言注意: worker.ts isInfraTransientError は「予定登録後の実在確認に失敗」を
+      //   一過性(無限リトライ)扱いにする。POST受理済みで実在しないのはデータ起因
+      //   (SB側破棄)の可能性が高いため、別文言にして試行上限で manual_required に
+      //   昇格させ、失敗としてSlack通知・sync_status=error に表面化させる。
+      return fail(`予定登録POSTは受理されましたが、スケジュール上に予定の実在を確認できません。SalonBoard側で破棄された可能性があります (既存予定との重複など。${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''}${completionWarning ? `, ${completionWarning}` : ''}${cap ? `, capture=${cap}` : ''})`, 'CONFIRMATION_MISMATCH', false);
+    }
     return fail(`予定登録後の実在確認に失敗しました (${verified?.reason ?? 'unknown'}${blocks ? `, observed=${blocks}` : ''}${completionWarning ? `, ${completionWarning}` : ''}${cap ? `, capture=${cap}` : ''})`, 'CONFIRMATION_MISMATCH', false);
   }
   return { status: 'ok', externalId: null, confirmed: { title, confirmed_scheduled_at: p.scheduled_at } };
