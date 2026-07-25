@@ -4198,7 +4198,7 @@ async function runPushJobs({ showBrowser } = {}) {
         const isBlockSchedule = payload.booking_type === 'block';
         const result = isBlockSchedule
           ? await deleteScheduleViaForm(page, payload, { baseUrl, enableDelete: enablePush })
-          : await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
+          : await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null, genre: jobGenre });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking', status: 'succeeded',

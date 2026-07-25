@@ -2717,7 +2717,13 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     // そのため登録した区間が既存の「予定あり」に包含された場合も実在している。
     // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した
     // 12:30-13:30 を未登録と誤判定するため、同タイトルの包含も成功にする。
-    if (start <= startTotal && end >= endTotal && actualTitle === norm(title)) found = true;
+    const covered = start <= startTotal && end >= endTotal;
+    if (covered && actualTitle === norm(title)) found = true;
+    // SB はタイトル未設定の予定を「予定あり」と表示し、同枠を完全被覆する既存予定が
+    // あると重複POSTを黙って破棄する。枠として目的(受付停止)は実現済みなので
+    // 冪等成功として扱う (2026-07-26 WAO新宿 休憩/閉め)。部分重複は従来どおり失敗
+    // (別予定との衝突検知を維持)。
+    else if (covered && actualTitle === '予定あり') found = true;
   }
   return found ? { ok: true, reason: null, blocks } : { ok: false, reason: 'exact_schedule_not_found', blocks };
 }
@@ -5385,12 +5391,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // 「追加する」(#equipAdd) を押すと equipIdList セレクトを持つ行が生成される。
     const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList';
     const hasEquipArea =
-      (await page.locator('#equipArea, #equipAdd').first().count().catch(() => 0)) > 0;
+      (await page.locator('#equipArea, #equipAdd, a.equipAdd, select[name="equipIdList"]').first().count().catch(() => 0)) > 0;
     if (hasEquipArea) {
       // 設備行が無ければ「追加する」を押して 1 行作る
       const rowCount = await page.locator(equipSelector).count().catch(() => 0);
       if (rowCount === 0) {
-        const addBtn = page.locator('#equipAdd, a[id="equipAdd"]').first();
+        const addBtn = page.locator('#equipAdd, a[id="equipAdd"], a.equipAdd').first();
         if ((await addBtn.count().catch(() => 0)) > 0) {
           await addBtn.click().catch(() => {});
           await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
@@ -6719,8 +6725,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   let selectedEquipmentValue = null;
   if (wantedEquipExtId || wantedEquipName) {
     const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList';
+    // 設備UIの目印は予約系統で異なる: 電話/ext系は id (#equipArea/#equipAdd)、
+    // ネット/BF系の変更フォームは class のみ (a.equipAdd / select[name=equipIdList])。
+    // id だけ見ると BF 予約の変更が全て「設備欄なし」で誤failする (2026-07-25 銀座/代官山)。
     const hasEquipArea =
-      (await page.locator('#equipArea, #equipAdd').first().count().catch(() => 0)) > 0;
+      (await page.locator('#equipArea, #equipAdd, a.equipAdd, select[name="equipIdList"]').first().count().catch(() => 0)) > 0;
     if (!hasEquipArea) {
       const cap = await captureScrapeDebug(page, 'change', `equipment_area_missing_${reserveId}`, {
         diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, url: page.url() },
@@ -6733,7 +6742,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     }
 
     if ((await page.locator(equipSelector).count().catch(() => 0)) === 0) {
-      const addBtn = page.locator('#equipAdd, a[id="equipAdd"]').first();
+      const addBtn = page.locator('#equipAdd, a[id="equipAdd"], a.equipAdd').first();
       if ((await addBtn.count().catch(() => 0)) > 0) {
         await addBtn.click({ timeout: 5_000 }).catch(() => {});
         await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
