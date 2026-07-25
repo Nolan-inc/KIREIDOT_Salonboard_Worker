@@ -13410,6 +13410,7 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
         value,
         sendEnabled: !!send?.checked,
         authenticated: /認証済み|認証済/.test(rowText),
+        statusText: rowText.slice(0, 240),
       });
     }
     return {
@@ -13428,6 +13429,21 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
       errorCode: 'NOTICE_MAIL_FORM_NOT_FOUND',
       reason: `予約お知らせメール一覧を開けませんでした (${page.url()})`,
       manualRequired: true,
+    };
+  }
+
+  if (payload.audit_only === true && pageState.target) {
+    return {
+      status: 'ok',
+      summary:
+        `予約メール状態: ${email} (slot ${pageState.target.index}, ` +
+        `${pageState.target.sendEnabled ? '配信する' : '停止'}, ` +
+        `${pageState.target.authenticated ? '認証済み' : '未認証'}) ` +
+        `[${pageState.target.statusText}]`,
+      email,
+      slot: pageState.target.index,
+      changed: false,
+      authenticated: pageState.target.authenticated,
     };
   }
 
@@ -13530,6 +13546,7 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
         String(input?.value || '').trim().toLowerCase() === String(targetEmail).toLowerCase(),
       sendEnabled: !!send?.checked,
       authenticated: /認証済み|認証済/.test(rowText),
+      statusText: rowText.slice(0, 240),
     };
   }, { targetEmail: email, slotIndex: slot });
 
@@ -13544,7 +13561,10 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
 
   return {
     status: 'ok',
-    summary: `予約メール配信を有効化: ${email} (slot ${slot}${persisted.authenticated ? ', 認証済み' : ', 認証待ち'})`,
+    summary:
+      `予約メール配信を有効化: ${email} ` +
+      `(slot ${slot}${persisted.authenticated ? ', 認証済み' : ', 認証待ち'}) ` +
+      `[${persisted.statusText}]`,
     email,
     slot,
     changed: true,
