@@ -12672,6 +12672,57 @@ async function pushWorkPatternViaForm(page, payload, opts = {}) {
     return false;
   }, { n: wantName, s: wantStart, e: wantEnd }).catch(() => false);
 
+  // 登録済み一覧の全行 (削除checkbox値・名称・短縮名・設定時間) を読む。
+  // sync_names の時間一致照合と削除対象特定に使う。
+  const readTableRows = () => page.evaluate(() => {
+    const out = [];
+    for (const box of document.querySelectorAll('input[name="deleteShiftIds"]')) {
+      let tr = box;
+      while (tr && tr.tagName !== 'TR') tr = tr.parentElement;
+      if (!tr) continue;
+      const cells = Array.from(tr.querySelectorAll('td'));
+      const name = (cells[0]?.textContent || '').trim();
+      const short = (cells[1]?.textContent || '').replace(/[\s　]+/g, '').trim();
+      const timeText = (cells[2]?.textContent || '').replace(/\s+/g, '');
+      const m = /(\d{1,2}:\d{2})[～〜~\-－]+(\d{1,2}:\d{2})/.exec(timeText);
+      out.push({
+        value: box.value || '',
+        name,
+        short,
+        start: m ? m[1].padStart(5, '0') : null,
+        end: m ? m[2].padStart(5, '0') : null,
+      });
+    }
+    return out;
+  }).catch(() => []);
+
+  // 指定行を削除する (checkboxをチェック→「削除」→confirm承認)。SBの勤務パターンに
+  // 改名UIは無いため、KD名への統一は削除→再登録で行う。対象checkboxだけを触る。
+  const deleteRowByValue = async (value) => {
+    const box = page.locator(`input[name="deleteShiftIds"][value="${value}"]`);
+    if ((await box.count().catch(() => 0)) === 0) return { ok: false, reason: 'row_not_found' };
+    await box.check({ timeout: 5_000 }).catch(() => box.click({ timeout: 5_000 }).catch(() => {}));
+    let dialogAccepted = false;
+    const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+    page.on('dialog', onDialog);
+    try {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {}),
+        page.locator('a:has-text("削除"):visible, input[type="submit"][value*="削除"], input[type="button"][value*="削除"], input[type="image"][alt*="削除"], button:has-text("削除")').last().click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1_500);
+      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("削除する"):visible, a:has-text("OK"):visible').first();
+      if ((await yes.count().catch(() => 0)) > 0) {
+        await yes.click({ timeout: 8_000 }).catch(() => {});
+        await page.waitForTimeout(1_200);
+      }
+    } finally {
+      page.off('dialog', onDialog);
+    }
+    const still = (await page.locator(`input[name="deleteShiftIds"][value="${value}"]`).count().catch(() => 1)) > 0;
+    return { ok: !still, dialogAccepted };
+  };
+
   // 呼び出し側が保持する勤務パターン一覧は、SBの短縮名を取得できない店舗がある。
   // 最終的な一意性は、登録直前にこの画面の実テーブルを正として再確認する。
   const readUsedShortNames = () => page.evaluate(() => {
@@ -13352,7 +13403,11 @@ async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
  * 配信状況が「停止」へ変わると予約メールは届かない。画面を直接監査し、
  * 対象アドレスが存在すれば「配信する」へ戻し、未登録なら空き枠へ追加する。
  *
- * payload: { email: "ingest+...@inbound.kireidot.jp" }
+ * payload: {
+ *   email: "ingest+...@inbound.kireidot.jp",
+ *   audit_only?: boolean,
+ *   force_reregister?: boolean,
+ * }
  * opts: { baseUrl, enablePost, salonId?, shopName?, genre? }
  */
 async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
@@ -13482,12 +13537,73 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
     };
   }
 
+  const shouldReregister =
+    payload.force_reregister === true &&
+    !!pageState.target &&
+    !pageState.target.authenticated;
+  if (shouldReregister) {
+    const clearSlot = pageState.target.index;
+    const clearEmailInput = page.locator(
+      `form#noticeMail input[name="storeEmail${clearSlot}"]`,
+    ).first();
+    const clearConfirmInput = page.locator(
+      `form#noticeMail input[name="storeEmail${clearSlot}Confirm"]`,
+    ).first();
+    const stopRadio = page.locator(
+      `form#noticeMail input[name="storeEmail${clearSlot}SendFlg"][value="0"]`,
+    ).first();
+    await clearEmailInput.fill('');
+    await clearConfirmInput.fill('');
+    await stopRadio.check({ force: true });
+
+    const clearConfirmButton = page.locator('form#noticeMail a#confirm').first();
+    if ((await clearConfirmButton.count().catch(() => 0)) === 0) {
+      return {
+        status: 'failed',
+        errorCode: 'NOTICE_MAIL_REREGISTER_CONFIRM_NOT_FOUND',
+        reason: '未認証アドレス再登録時の「確認する」ボタンが見つかりません',
+        manualRequired: true,
+      };
+    }
+    await clearConfirmButton.click({ timeout: 8_000 });
+    await page.waitForURL(/\/noticeMail\/confirm/i, { timeout: 12_000 }).catch(() => {});
+
+    const clearCompleteButton = page.locator('form#noticeMail a#complete').first();
+    if ((await clearCompleteButton.count().catch(() => 0)) === 0) {
+      return {
+        status: 'failed',
+        errorCode: 'NOTICE_MAIL_REREGISTER_COMPLETE_NOT_FOUND',
+        reason: '未認証アドレス再登録時の「設定する」ボタンが見つかりません',
+        manualRequired: true,
+      };
+    }
+    await clearCompleteButton.click({ timeout: 8_000 });
+    await page.waitForTimeout(1_200);
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForSelector('form#noticeMail', { timeout: 12_000 }).catch(() => {});
+
+    const cleared = await page.evaluate((slotIndex) => {
+      const input = document.querySelector(
+        `form#noticeMail input[name="storeEmail${slotIndex}"]`,
+      );
+      return !String(input?.value || '').trim();
+    }, clearSlot).catch(() => false);
+    if (!cleared) {
+      return {
+        status: 'failed',
+        errorCode: 'NOTICE_MAIL_REREGISTER_CLEAR_NOT_PERSISTED',
+        reason: `未認証アドレスを再登録するための一時解除が保存されませんでした (slot ${clearSlot})`,
+        manualRequired: true,
+      };
+    }
+  }
+
   const emailInput = page.locator(`form#noticeMail input[name="storeEmail${slot}"]`).first();
   const confirmInput = page.locator(`form#noticeMail input[name="storeEmail${slot}Confirm"]`).first();
   const sendRadio = page.locator(
     `form#noticeMail input[name="storeEmail${slot}SendFlg"][value="1"]`,
   ).first();
-  if (!pageState.target) {
+  if (!pageState.target || shouldReregister) {
     await emailInput.fill(email);
     await confirmInput.fill(email);
   }
