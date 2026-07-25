@@ -288,6 +288,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'booking updates with equipment must verify the persisted SalonBoard detail before reporting success',
   );
   assert.match(
+    scraperSource,
+    /waitForLoadState\('networkidle'[\s\S]{0,7000}equipmentSelect\.value = equipmentValue[\s\S]{0,1200}formSubmit\('extReserveChange', 'doComplete'\)/,
+    'booking updates must re-apply equipment after availability Ajax and in the same turn as form submission',
+  );
+  assert.match(
     pcWorkerSource,
     /ensureSalonSelected\(page,[\s\S]{0,240}genre:\s*jobGenre[\s\S]{0,120}baseUrl/,
     'PC photo/style jobs must use the same resilient group-salon selection as Cloud',

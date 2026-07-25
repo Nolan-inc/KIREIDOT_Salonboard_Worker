@@ -6614,6 +6614,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const wantedEquipExtId = String(p.salonboard_equipment_external_id || '').trim() || null;
   const wantedEquipName = String(p.salonboard_equipment_name || '').trim() || null;
   let expectedPersistedEquipName = wantedEquipName;
+  let selectedEquipmentValue = null;
   if (wantedEquipExtId || wantedEquipName) {
     const equipSelector = 'select[name="equipIdList"], #equipArea select.equipIdList';
     const hasEquipArea =
@@ -6730,6 +6731,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         true,
       );
     }
+    selectedEquipmentValue = picked.value;
     expectedPersistedEquipName = picked.label || applied.label || wantedEquipName;
   }
 
@@ -6990,6 +6992,54 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     return { repaired, state };
   }).catch(() => ({ repaired: [], state: [] }));
 
+  // 日時・所要時間の change handler は設備空き状況を Ajax で再取得し、設備selectの
+  // optionを差し替える。通信が遅い環境では、上でベッドを選択した後に応答が到着して
+  // 選択値が未選択へ戻る競合がある。いったん通信完了を待ってから再確定し、さらに
+  // 下のformSubmitと同じJSターン内でも再確定する。
+  if (selectedEquipmentValue) {
+    await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+    const equipmentReady = await page.evaluate((wantedValue) => {
+      const select = document.querySelector(
+        'select[name="equipIdList"], #equipArea select.equipIdList',
+      );
+      if (!select) return { ok: false, reason: 'select_missing' };
+      const option = Array.from(select.options).find((candidate) =>
+        candidate.value === wantedValue);
+      if (!option) {
+        return {
+          ok: false,
+          reason: 'option_missing_after_availability_refresh',
+          currentValue: select.value || '',
+        };
+      }
+      select.value = wantedValue;
+      select.dispatchEvent(new Event('input', { bubbles: true }));
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return {
+        ok: select.value === wantedValue,
+        currentValue: select.value || '',
+        assignId: select.closest('.jscEquipRow')
+          ?.querySelector('input[name="equipAssignIdList"]')?.value || '',
+      };
+    }, selectedEquipmentValue).catch((e) => ({
+      ok: false,
+      reason: e?.message || String(e),
+    }));
+    if (!equipmentReady.ok) {
+      const cap = await captureScrapeDebug(
+        page,
+        'change',
+        `equipment_reset_before_submit_${reserveId}`,
+        { diagnostics: { reserveId, selectedEquipmentValue, equipmentReady, url: page.url() } },
+      );
+      return fail(
+        `SalonBoardの設備空き状況更新後に「${expectedPersistedEquipName || selectedEquipmentValue}」を再選択できませんでした${cap ? ` (capture=${cap})` : ''}`,
+        'EQUIPMENT_FULL',
+        false,
+      );
+    }
+  }
+
   let nativeDialogAccepted = false;
   const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
@@ -7002,7 +7052,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // 顧客欄の blur handler が placeholder を復元し、正しいカナが空として送られる。
     // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
     // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
-    const directSubmitResult = await page.evaluate(() => {
+    const directSubmitResult = await page.evaluate((equipmentValue) => {
       const form = document.getElementById('extReserveChange');
       const jq = window.jQuery;
       if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') {
@@ -7029,12 +7079,53 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       jq('#extCouponArea select').each(function normalizeUndefinedCoupon() {
         if (jq(this).val() === undefined) jq(this).val('');
       });
+      // Ajax設備空き状況更新との競合を完全に避けるため、submitと同一JSターンで
+      // KDの設備IDを再設定する。ここで一致しなければ送信せず失敗へ戻す。
+      if (equipmentValue) {
+        const equipmentSelect = form.querySelector(
+          'select[name="equipIdList"], #equipArea select.equipIdList',
+        );
+        if (
+          !equipmentSelect ||
+          !Array.from(equipmentSelect.options).some((option) =>
+            option.value === equipmentValue)
+        ) {
+          return { submitted: false, reason: 'equipment_option_missing_at_submit' };
+        }
+        equipmentSelect.value = equipmentValue;
+        if (equipmentSelect.value !== equipmentValue) {
+          return { submitted: false, reason: 'equipment_value_mismatch_at_submit' };
+        }
+      }
       jq.shuhari.formSubmit('extReserveChange', 'doComplete');
       return { submitted: true };
-    }).catch((e) => ({
+    }, selectedEquipmentValue).catch((e) => ({
       submitted: false,
       reason: e?.message || String(e),
     }));
+    if (
+      selectedEquipmentValue &&
+      /^equipment_/.test(String(directSubmitResult.reason || ''))
+    ) {
+      const cap = await captureScrapeDebug(
+        page,
+        'change',
+        `equipment_missing_at_submit_${reserveId}`,
+        {
+          diagnostics: {
+            reserveId,
+            selectedEquipmentValue,
+            directSubmitResult,
+            url: page.url(),
+          },
+        },
+      );
+      return fail(
+        `SalonBoard送信直前に設備「${expectedPersistedEquipName || selectedEquipmentValue}」の選択が失われました${cap ? ` (capture=${cap})` : ''}`,
+        'EQUIPMENT_FULL',
+        false,
+      );
+    }
     directFormSubmitted = directSubmitResult.submitted === true;
     primaryClicked = directFormSubmitted;
 
