@@ -26,10 +26,10 @@
  *
  * スキップ条件:
  *   - macOS 以外で実行された場合
- *   - 上記いずれの環境変数も無い場合 (ローカルの試験ビルド時)
- *     → 警告ログを出して notarize をスキップ。Gatekeeper 警告は残るが
- *       「壊れている」表示にはなる。プロダクション配布ではない開発ビルド用。
- *   - SKIP_NOTARIZE=1 が設定されている場合
+ *   - SKIP_NOTARIZE=1 が設定されている場合 (開発ビルド用: npm run dist:mac:nosign)
+ *
+ * 認証情報が無い場合はビルドを失敗させる (旧挙動は警告のみでスキップだったが、
+ * 公証なしビルドが誤って公開されると全端末の自動更新が壊れるため fail-fast 化)。
  */
 
 const { notarize } = require("@electron/notarize");
@@ -73,10 +73,14 @@ module.exports = async function afterSign(context) {
   const password = process.env.APPLE_APP_SPECIFIC_PASSWORD;
   const teamId = process.env.APPLE_TEAM_ID;
 
-  // 何の認証情報もない場合は警告だけ出してスキップ
+  // 認証情報が無い場合はビルドを失敗させる (公証なしビルドの誤公開防止)。
+  // 開発用ビルドで意図的にスキップする場合は SKIP_NOTARIZE=1 を明示すること。
+  // (v0.2.219 事故: 公証スキップ+誤証明書のまま公開され全端末の自動更新が
+  //  「コードは指定されたコード要件を満たしていません」で失敗した)
   if (!keychainProfile && !(appleId && password && teamId)) {
-    console.warn(
-      "\n[notarize] ⚠️  認証情報が見つからないため notarize をスキップしました。\n" +
+    throw new Error(
+      "\n[notarize] ❌ 公証の認証情報が見つかりません。公証なしでの公開は自動更新を壊すため中断します。\n" +
+        "    開発ビルドで意図的にスキップするには SKIP_NOTARIZE=1 を設定 (npm run dist:mac:nosign)。\n" +
         "    Keychain profile 方式:\n" +
         "      xcrun notarytool store-credentials \"予約同期くん-notary\" \\\n" +
         "        --apple-id <YOUR_APPLE_ID> --team-id 7FMVQPBJKA \\\n" +
@@ -85,7 +89,6 @@ module.exports = async function afterSign(context) {
         "    または環境変数方式:\n" +
         "      APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID を .env.local に設定\n",
     );
-    return;
   }
 
   const opts = keychainProfile

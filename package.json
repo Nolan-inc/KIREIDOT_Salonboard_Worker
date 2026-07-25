@@ -28,7 +28,6 @@
     "dist:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish never",
     "dist:mac:nosign": "SKIP_NOTARIZE=1 npm run dist:mac:arm64",
     "publish:mac:arm64": "npm run prebuild:dist && npm run build && electron-builder --mac --arm64 --publish always",
-    "publish:mac:arm64:unsigned": "npm run prebuild:dist && npm run build && cross-env SKIP_NOTARIZE=1 CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --publish always -c.mac.identity=null",
     "verify:mac": "bash build-resources/verify-mac.sh"
   },
   "dependencies": {
@@ -99,7 +98,7 @@
           ]
         }
       ],
-      "identity": "HIKARU UEDA (7FMVQPBJKA)",
+      "identity": "Developer ID Application: HIKARU UEDA (7FMVQPBJKA)",
       "gatekeeperAssess": false,
       "hardenedRuntime": true,
       "entitlements": "build-resources/entitlements.mac.plist",

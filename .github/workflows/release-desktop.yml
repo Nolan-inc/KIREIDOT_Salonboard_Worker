@@ -86,13 +86,7 @@ jobs:
 
       - name: Build, notarize, and publish GitHub Release
         shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$BUILD_MODE" == "signed" ]]; then
-            npm run publish:mac:arm64
-          else
-            npm run publish:mac:arm64:unsigned
-          fi
+        run: npm run publish:mac:arm64
 
       - name: Verify published release assets
         shell: bash
