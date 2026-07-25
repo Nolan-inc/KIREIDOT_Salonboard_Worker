@@ -3675,8 +3675,39 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
   const isReached = async () =>
     (await page.locator('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]').count().catch(() => 0)) > 0;
 
+  // (0) 正規導線ファースト (genre優先): pushWorkPatternViaForm と同じ
+  //   「毎月の受付設定 → 勤務パターン登録リンク → returnPathStorage=04付き直接URL」。
+  //   ★異業態URL (CLP/CNK/CNB) の総当たりを先に行うと SB セッションの業態コンテキストが
+  //   汚染され、正しいURLでも空画面になり到達不能になる (2026-07-25 代々木上原=esthetic
+  //   で実証: 総当たり後の fetch は同一URLで失敗、正規導線のみの probe は成功)。
+  //   そのため正規導線を最優先し、総当たりは最後の保険に回す。
+  const wpGenrePrefix = opts.genre === 'hair' ? '/CLP/bt/set/' : '/KLP/set/';
+  const canonicalWorkPatternRoute = async (prefix) => {
+    try { await gotoInSalonContext(`${prefix}monthlySetup/`); } catch (_e) { return false; }
+    if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) return false;
+    const link = page
+      .locator('a[href*="workPatternSetup"], a:has-text("勤務パターン登録"), a:has-text("勤務パターン")')
+      .first();
+    if ((await link.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', { timeout: 15_000 }).catch(() => {}),
+        link.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      diag.tried.push({ via: `${prefix}monthlySetup/ link`, url: page.url().replace('https://salonboard.com', '') });
+      if (await isReached()) return true;
+    }
+    try {
+      await page.goto(new URL(`${prefix}workPatternSetup/?returnPathStorage=04`, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    } catch (_e) { return false; }
+    await page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', { timeout: 10_000 }).catch(() => {});
+    diag.tried.push({ via: `${prefix}workPatternSetup?returnPathStorage=04`, url: page.url().replace('https://salonboard.com', '') });
+    return isReached();
+  };
+  await canonicalWorkPatternRoute(wpGenrePrefix);
+
   // (1) 直接 goto を複数プレフィックスで試す。
   // hair は月次シフトと同じく /CLP/bt/set 配下にある。
+  if (!(await isReached()))
   for (const path of ['/CLP/bt/set/workPatternSetup/', '/KLP/set/workPatternSetup/', '/CNK/set/workPatternSetup/', '/CNB/set/workPatternSetup/']) {
     try {
       await gotoInSalonContext(path);
