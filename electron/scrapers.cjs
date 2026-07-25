@@ -2717,13 +2717,21 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     // そのため登録した区間が既存の「予定あり」に包含された場合も実在している。
     // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した
     // 12:30-13:30 を未登録と誤判定するため、同タイトルの包含も成功にする。
-    const covered = start <= startTotal && end >= endTotal;
-    if (covered && actualTitle === norm(title)) found = true;
-    // SB はタイトル未設定の予定を「予定あり」と表示し、同枠を完全被覆する既存予定が
-    // あると重複POSTを黙って破棄する。枠として目的(受付停止)は実現済みなので
-    // 冪等成功として扱う (2026-07-26 WAO新宿 休憩/閉め)。部分重複は従来どおり失敗
-    // (別予定との衝突検知を維持)。
-    else if (covered && actualTitle === '予定あり') found = true;
+    if (start <= startTotal && end >= endTotal && actualTitle === norm(title)) found = true;
+  }
+  // SB は既存予定と重複する予定POSTを黙って破棄する。既存予定(タイトル問わず。
+  // 「予定あり」=無題や旧予定方式の「土日祝早番」等も含む)の結合区間が登録区間を
+  // 完全被覆しているなら、受付停止という目的は既に達成済み=冪等成功として扱う
+  // (2026-07-26 WAO新宿 休憩/閉め・代官山 研修・中目黒で実害)。隣接2予定の合算被覆も
+  // ここで拾う。隙間のある部分重複は従来どおり失敗=別予定との衝突検知を維持。
+  if (!found && blocks.length > 0) {
+    const merged = [];
+    for (const b of blocks.slice().sort((a, c) => a.start - c.start)) {
+      const last = merged[merged.length - 1];
+      if (last && b.start <= last.end) last.end = Math.max(last.end, b.end);
+      else merged.push({ start: b.start, end: b.end });
+    }
+    if (merged.some((m) => m.start <= startTotal && m.end >= endTotal)) found = true;
   }
   return found ? { ok: true, reason: null, blocks } : { ok: false, reason: 'exact_schedule_not_found', blocks };
 }
