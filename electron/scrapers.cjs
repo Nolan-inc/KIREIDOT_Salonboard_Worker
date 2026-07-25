@@ -13431,18 +13431,10 @@ async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
     };
   }
 
-  if (opts.shopName) {
-    const want = String(opts.shopName).replace(/\s+/g, '');
-    const actual = String(pageState.storeName || '').replace(/\s+/g, '');
-    if (actual && !actual.includes(want) && !want.includes(actual)) {
-      return {
-        status: 'failed',
-        errorCode: 'NOTICE_MAIL_WRONG_STORE',
-        reason: `対象店舗が一致しません (期待=${opts.shopName}, 表示=${pageState.storeName})`,
-        manualRequired: true,
-      };
-    }
-  }
+  // 単店アカウントではブランド変更後も SalonBoard 側だけ旧店名が残ることがある
+  // (例: KD「Unelimit Silk 代官山店」/ SB「旧:Une limit 代官山店」)。
+  // ensureSalonSelected が groupTop の対象特定を済ませ、単店ではログインID自体が店舗を
+  // 一意にするため、表示名の完全一致を保存条件にはしない。
 
   if (pageState.target?.sendEnabled && pageState.target?.authenticated) {
     return {
