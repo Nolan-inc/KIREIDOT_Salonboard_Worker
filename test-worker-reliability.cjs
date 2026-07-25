@@ -266,10 +266,31 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'a rotated account login must bypass the failing shop-level static proxy override',
   );
   const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
+  const scraperSource = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
+  assert.match(
+    scraperSource,
+    /const stillOnGroupTop[\s\S]{0,180}stillOnGroupTop && opts\.genre !== 'hair'/,
+    'hair group-salon selection must validate the management context even when AJAX leaves the URL on groupTop',
+  );
+  assert.match(
+    scraperSource,
+    /const hairSalonOpts = \{ \.\.\.opts, baseUrl, genre: 'hair' \}[\s\S]{0,1800}ensureSalonSelected\(page, hairSalonOpts\)/,
+    'hair style posting must always enable the hair management-context validation',
+  );
   assert.match(
     pcWorkerSource,
     /ensureSalonSelected\(page,[\s\S]{0,240}genre:\s*jobGenre[\s\S]{0,120}baseUrl/,
     'PC photo/style jobs must use the same resilient group-salon selection as Cloud',
+  );
+  assert.match(
+    pcWorkerSource,
+    /postPhotoGalleryViaForm\(page, payload,[\s\S]{0,220}genre:\s*jobGenre/,
+    'PC photo/style posting must propagate the shop genre to salon selection',
+  );
+  assert.match(
+    cloudSource,
+    /postPhotoGalleryViaForm\(page, job\.payload,[\s\S]{0,220}genre,/,
+    'Cloud photo/style posting must propagate the shop genre to salon selection',
   );
   assert.match(
     pcWorkerSource,

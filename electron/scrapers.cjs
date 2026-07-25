@@ -9890,7 +9890,7 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
 // スタイル/フォトギャラリーは page.goto で /CNB ・/CNK の編集画面に直接遷移するため、
 // 遷移後に groupTop へ跳ね返されることがある。各 goto 後にこれを呼んで復帰させる。
 //
-// opts: { salonId?, shopName? }
+// opts: { salonId?, shopName?, genre?, baseUrl? }
 // 戻り値: { ok, selected, reason? }
 //   - groupTop に居ない (単一店舗 or 既に店舗文脈) → { ok:true, selected:false }
 //   - サロンを選べた → { ok:true, selected:true }
@@ -9999,7 +9999,8 @@ async function ensureSalonSelected(page, opts = {}) {
     }
   }
 
-  if (/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
+  const stillOnGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
+  if (stillOnGroupTop && opts.genre !== 'hair') {
     return {
       ok: false,
       selected: false,
@@ -10007,7 +10008,9 @@ async function ensureSalonSelected(page, opts = {}) {
       salonId: target.id,
     };
   }
-  // サロン選択は POST→セッション確定→リダイレクトのため、直後の goto で戻されないよう少し待つ。
+  // 美容室の店舗リンクは AJAX で選択状態だけを保存し、URL が groupTop のまま残る
+  // 個体がある。hair は下の管理TOP肯定確認を真の成否判定にする。
+  // サロン選択は POST→セッション確定のため、直後の goto で戻されないよう少し待つ。
   await page.waitForTimeout(1200);
 
   // 美容室グループ（ADER等）は選択後に /CLP/bt/top/ へ入って初めて店舗文脈が確立する。
@@ -10551,6 +10554,7 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
 // FRONT 画像 + 必須項目(スタイリスト/コメント/スタイル名/カテゴリ/長さ/メニュー内容) を入れて登録。
 async function postHairStyleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const hairSalonOpts = { ...opts, baseUrl, genre: 'hair' };
   const enablePost = opts.enablePost !== false;
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
@@ -10578,12 +10582,12 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     // ADER 郡山で判明)。salonId があれば先に groupTop でサロンを選んでから入る。
     if (opts.salonId) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      await ensureSalonSelected(page, hairSalonOpts).catch(() => {});
     }
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     // まだ groupTop に跳ね返された場合はサロンを選び直す。
-    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+    const sel = await ensureSalonSelected(page, hairSalonOpts);
     if (!sel.ok) {
       const cap = await captureScrapeDebug(page, 'photo_gallery', 'hair_store_select', { diagnostics: { url: page.url(), reason: sel.reason } });
       return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason}, capture=${cap || '?'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`, 'STORE_SELECT_REQUIRED', true);

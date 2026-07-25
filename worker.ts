@@ -1792,6 +1792,7 @@ async function handleJob(job: Job): Promise<void> {
         enablePost: ENABLE_PUSH,
         salonId,
         shopName,
+        genre,
       });
       await reportScraperResult(job, "push_photo_gallery", result, {}, page);
       return;

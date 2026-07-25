@@ -3956,7 +3956,13 @@ async function runPushJobs({ showBrowser } = {}) {
         }
       } else if (isPhotoGallery) {
         // ---- フォトギャラリー投稿 (エステ=photoGalleryEdit / 美容室=スタイル styleEdit) ----
-        const result = await postPhotoGalleryViaForm(page, payload, { baseUrl, enablePost: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null });
+        const result = await postPhotoGalleryViaForm(page, payload, {
+          baseUrl,
+          enablePost: enablePush,
+          salonId: creds.salon_id ?? null,
+          shopName: job.shop_name ?? null,
+          genre: jobGenre,
+        });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',
@@ -4897,7 +4903,13 @@ async function runTestStyleImage(payload) {
       title: p.title || 'テスト投稿',
       caption: p.caption || 'テスト',
       author_external_id: p.stylistExternalId || null,
-    }, { baseUrl, enablePost: !!p.enablePost, salonId: creds.salonId ?? null, shopName: p.shopName ?? null });
+    }, {
+      baseUrl,
+      enablePost: !!p.enablePost,
+      salonId: creds.salonId ?? null,
+      shopName: p.shopName ?? null,
+      genre: kind === 'style' ? 'hair' : 'esthetic',
+    });
 
     let failed = false;
     if (result.status === 'ok') {
