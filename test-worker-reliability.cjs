@@ -278,6 +278,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'hair style posting must always enable the hair management-context validation',
   );
   assert.match(
+    scraperSource,
+    /async function changeBookingViaForm[\s\S]{0,26000}const wantedEquipExtId[\s\S]{0,8000}equipSelect\.selectOption/,
+    'booking updates must re-apply the KIREIDOT equipment assignment to SalonBoard',
+  );
+  assert.match(
+    scraperSource,
+    /expectedPersistedEquipName[\s\S]{0,32000}readReservationEquipmentName\(page, reserveId,[\s\S]{0,1400}設備の保存をSalonBoard予約詳細で確認できませんでした/,
+    'booking updates with equipment must verify the persisted SalonBoard detail before reporting success',
+  );
+  assert.match(
     pcWorkerSource,
     /ensureSalonSelected\(page,[\s\S]{0,240}genre:\s*jobGenre[\s\S]{0,120}baseUrl/,
     'PC photo/style jobs must use the same resilient group-salon selection as Cloud',
