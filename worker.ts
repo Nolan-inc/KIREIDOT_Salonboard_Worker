@@ -73,6 +73,7 @@ type ScrapersModule = {
   pushMenuViaForm: ScraperFn;
   pushCouponViaForm: ScraperFn;
   pushWorkPatternViaForm: ScraperFn;
+  configureNoticeMailViaForm: ScraperFn;
   // fetch 系 (status ではなく rows/patterns を返す)
   scrapeBookings: (
     page: Page,
@@ -482,7 +483,9 @@ type JobType =
   | "push_kodawari"
   | "push_feature"
   // 受付可能数 (残り受付数) の手動オーバーライドを SB スケジュールへ同期 (美容室のみ)
-  | "push_acceptance";
+  | "push_acceptance"
+  // SalonBoard→KIREIDOT 予約メール取込アドレスの監査・有効化
+  | "configure_notice_mail";
 
 type Job = {
   id: string;
@@ -959,6 +962,7 @@ async function handleJob(job: Job): Promise<void> {
       "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
       "push_salon", "push_kodawari", "push_feature", "push_acceptance",
+      "configure_notice_mail",
     ]);
     const isWriteJob = WRITE_JOBS.has(job.job_type);
     let forceResidential = writeViaResidentialEnabled() && isWriteJob;
@@ -1460,6 +1464,25 @@ async function handleJob(job: Job): Promise<void> {
           status: "succeeded",
           summary: `discover: ${urls.length} pages dumped`,
         } as unknown as CallbackBody,
+        page,
+      );
+      return;
+    }
+
+    if (job.job_type === "configure_notice_mail") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.configureNoticeMailViaForm(page, p, {
+        baseUrl,
+        enablePost: ENABLE_PUSH,
+        salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
+        shopName: (job as { shop_name?: string | null }).shop_name ?? null,
+        genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
+      });
+      await reportScraperResult(
+        job,
+        "configure_notice_mail",
+        result,
+        { email: p.email ?? null },
         page,
       );
       return;

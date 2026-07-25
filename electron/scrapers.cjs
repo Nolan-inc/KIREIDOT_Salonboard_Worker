@@ -13345,6 +13345,221 @@ async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
   return { status: 'ok', summary, date: dateStr, applied, debug: { dialogMsgs, lastSaveInfo } };
 }
 
+/**
+ * SalonBoard の「予約お知らせメール一覧」で KIREIDOT 取込アドレスを有効化する。
+ *
+ * 「認証済み」は確認メールを一度受信できたことしか保証せず、その後に
+ * 配信状況が「停止」へ変わると予約メールは届かない。画面を直接監査し、
+ * 対象アドレスが存在すれば「配信する」へ戻し、未登録なら空き枠へ追加する。
+ *
+ * payload: { email: "ingest+...@inbound.kireidot.jp" }
+ * opts: { baseUrl, enablePost, salonId?, shopName?, genre? }
+ */
+async function configureNoticeMailViaForm(page, payload = {}, opts = {}) {
+  const email = String(payload.email || '').trim().toLowerCase();
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enablePost = opts.enablePost === true;
+  const genre = opts.genre === 'hair' ? 'hair' : 'esthetic';
+
+  if (!/^ingest\+[a-z0-9]+@inbound\.kireidot\.jp$/i.test(email)) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_INVALID_ADDRESS',
+      reason: 'KIREIDOT予約取込メールアドレスの形式が不正です',
+      manualRequired: true,
+    };
+  }
+
+  const selected = await ensureSalonSelected(page, {
+    salonId: opts.salonId || null,
+    shopName: opts.shopName || null,
+    genre,
+    baseUrl,
+  });
+  if (!selected.ok) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_STORE_SELECTION_FAILED',
+      reason: `対象店舗を選択できませんでした (${selected.reason || 'unknown'})`,
+      manualRequired: true,
+    };
+  }
+
+  const prefix = genre === 'hair' ? '/CLP/bt/set' : '/KLP/set';
+  const listUrl = new URL(`${prefix}/noticeMail/`, baseUrl).toString();
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForSelector('form#noticeMail', { timeout: 12_000 }).catch(() => {});
+
+  const pageState = await page.evaluate((targetEmail) => {
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const form = document.querySelector('form#noticeMail');
+    const body = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+    const storeName =
+      Array.from(document.querySelectorAll('body li'))
+        .map((el) => String(el.textContent || '').trim())
+        .find((t) => t && !/予約管理|掲載管理|お客様管理/.test(t)) || '';
+    const slots = [];
+    for (let i = 1; i <= 30; i++) {
+      const input = form?.querySelector(`input[name="storeEmail${i}"]`);
+      if (!input) continue;
+      const value = norm(input.value);
+      const send = form.querySelector(`input[name="storeEmail${i}SendFlg"][value="1"]`);
+      const rowText = String(input.closest('tr')?.innerText || '').replace(/\s+/g, ' ');
+      slots.push({
+        index: i,
+        value,
+        sendEnabled: !!send?.checked,
+        authenticated: /認証済み|認証済/.test(rowText),
+      });
+    }
+    return {
+      hasForm: !!form,
+      looksRight: /予約お知らせメール一覧/.test(body),
+      storeName,
+      slots,
+      target: slots.find((s) => s.value === norm(targetEmail)) || null,
+      empty: slots.find((s) => !s.value) || null,
+    };
+  }, email);
+
+  if (!pageState.hasForm || !pageState.looksRight) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_FORM_NOT_FOUND',
+      reason: `予約お知らせメール一覧を開けませんでした (${page.url()})`,
+      manualRequired: true,
+    };
+  }
+
+  if (opts.shopName) {
+    const want = String(opts.shopName).replace(/\s+/g, '');
+    const actual = String(pageState.storeName || '').replace(/\s+/g, '');
+    if (actual && !actual.includes(want) && !want.includes(actual)) {
+      return {
+        status: 'failed',
+        errorCode: 'NOTICE_MAIL_WRONG_STORE',
+        reason: `対象店舗が一致しません (期待=${opts.shopName}, 表示=${pageState.storeName})`,
+        manualRequired: true,
+      };
+    }
+  }
+
+  if (pageState.target?.sendEnabled && pageState.target?.authenticated) {
+    return {
+      status: 'ok',
+      summary: `予約メール配信済み確認: ${email} (slot ${pageState.target.index})`,
+      email,
+      slot: pageState.target.index,
+      changed: false,
+      authenticated: true,
+    };
+  }
+
+  const slot = pageState.target?.index || pageState.empty?.index;
+  if (!slot) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_NO_EMPTY_SLOT',
+      reason: `予約お知らせメール一覧に空き枠がなく、${email} も登録されていません`,
+      manualRequired: true,
+    };
+  }
+
+  if (!enablePost) {
+    return {
+      status: 'confirm_only',
+      errorCode: 'PUSH_DISABLED',
+      reason: `slot ${slot} を「配信する」へ変更する必要がありますが、自動書込が無効です`,
+      summary: `予約メール設定要修正: ${email} (slot ${slot})`,
+    };
+  }
+
+  const emailInput = page.locator(`form#noticeMail input[name="storeEmail${slot}"]`).first();
+  const confirmInput = page.locator(`form#noticeMail input[name="storeEmail${slot}Confirm"]`).first();
+  const sendRadio = page.locator(
+    `form#noticeMail input[name="storeEmail${slot}SendFlg"][value="1"]`,
+  ).first();
+  if (!pageState.target) {
+    await emailInput.fill(email);
+    await confirmInput.fill(email);
+  }
+  await sendRadio.check({ force: true });
+
+  const confirmButton = page.locator('form#noticeMail a#confirm').first();
+  if ((await confirmButton.count().catch(() => 0)) === 0) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_CONFIRM_NOT_FOUND',
+      reason: '予約メール設定の「確認する」ボタンが見つかりません',
+      manualRequired: true,
+    };
+  }
+  await confirmButton.click({ timeout: 8_000 });
+  await page.waitForURL(/\/noticeMail\/confirm/i, { timeout: 12_000 }).catch(() => {});
+
+  const confirmOk = await page.evaluate((targetEmail) => {
+    const body = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+    return body.toLowerCase().includes(String(targetEmail).toLowerCase()) &&
+      /配信する/.test(body) &&
+      /予約お知らせメール設定\s*確認/.test(body);
+  }, email).catch(() => false);
+  if (!confirmOk) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_CONFIRM_MISMATCH',
+      reason: '予約メール設定の確認画面で対象アドレスと「配信する」を照合できませんでした',
+      manualRequired: true,
+    };
+  }
+
+  const completeButton = page.locator('form#noticeMail a#complete').first();
+  if ((await completeButton.count().catch(() => 0)) === 0) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_COMPLETE_NOT_FOUND',
+      reason: '予約メール設定の「設定する」ボタンが見つかりません',
+      manualRequired: true,
+    };
+  }
+  await completeButton.click({ timeout: 8_000 });
+  await page.waitForTimeout(1_200);
+
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForSelector('form#noticeMail', { timeout: 12_000 }).catch(() => {});
+  const persisted = await page.evaluate(({ targetEmail, slotIndex }) => {
+    const form = document.querySelector('form#noticeMail');
+    const input = form?.querySelector(`input[name="storeEmail${slotIndex}"]`);
+    const send = form?.querySelector(
+      `input[name="storeEmail${slotIndex}SendFlg"][value="1"]`,
+    );
+    const rowText = String(input?.closest('tr')?.innerText || '').replace(/\s+/g, ' ');
+    return {
+      emailMatches:
+        String(input?.value || '').trim().toLowerCase() === String(targetEmail).toLowerCase(),
+      sendEnabled: !!send?.checked,
+      authenticated: /認証済み|認証済/.test(rowText),
+    };
+  }, { targetEmail: email, slotIndex: slot });
+
+  if (!persisted.emailMatches || !persisted.sendEnabled) {
+    return {
+      status: 'failed',
+      errorCode: 'NOTICE_MAIL_NOT_PERSISTED',
+      reason: `予約メール設定が保存されませんでした (slot ${slot})`,
+      manualRequired: true,
+    };
+  }
+
+  return {
+    status: 'ok',
+    summary: `予約メール配信を有効化: ${email} (slot ${slot}${persisted.authenticated ? ', 認証済み' : ', 認証待ち'})`,
+    email,
+    slot,
+    changed: true,
+    authenticated: persisted.authenticated,
+  };
+}
+
 module.exports = {
   scrapeBookings,
   scrapeStaff,
@@ -13382,6 +13597,7 @@ module.exports = {
   pushKodawariViaForm,
   pushFeatureViaForm,
   pushAcceptanceViaSchedule,
+  configureNoticeMailViaForm,
   getLastErrorShot,
   getLastErrorShotForPage,
   resetLastErrorShot,
