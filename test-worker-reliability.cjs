@@ -98,12 +98,27 @@ async function testNeverSyncedCancelIsIdempotent() {
   assert.equal(result.alreadyAbsent, true);
 }
 
-function testGuardTimeoutCallbackIsNotSuppressed() {
+function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
   const source = readFileSync(require.resolve('./worker.ts'), 'utf8');
   assert.match(
     source,
+    /const handlerOutcome[\s\S]*Promise\.race\(\[handlerOutcome, timeout\]\)/,
+    'the timeout guard must keep the original handler promise so it can be settled safely',
+  );
+  assert.match(
+    source,
+    /const settledAfterKill = await Promise\.race\([\s\S]{0,160}handlerOutcome[\s\S]{0,160}graceTimeout[\s\S]{0,500}TIMEOUT_RECOVERED/,
+    'after closing Chrome, the guard must wait for and accept the original callback result',
+  );
+  assert.match(
+    source,
+    /TIMEOUT_RECOVERED[\s\S]{0,500}_guardTimedOutJobs\.set\(job\.id/,
+    'late-callback suppression must only begin after the original handler misses its grace period',
+  );
+  assert.match(
+    source,
     /isGuardTimeoutReport[\s\S]*reportError\.includes\("\[JOB_TIMEOUT\]"\)/,
-    'the guard timeout callback must pass through late-callback suppression',
+    'the final guard timeout callback must pass through late-callback suppression',
   );
 }
 
@@ -347,7 +362,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 (async () => {
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
-  testGuardTimeoutCallbackIsNotSuppressed();
+  testGuardWaitsForOriginalResultBeforeTimeoutCallback();
   testKnownSalonBoardRecoveryBranchesStayEnabled();
   console.log('worker reliability tests: ok');
 })().catch((error) => {

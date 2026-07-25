@@ -684,9 +684,11 @@ async function fetchJobs(limit = 1): Promise<Job[]> {
 // 反映(書込)フローの失敗を page 単位で記録する。finally で「この page(=このジョブ)が
 // 失敗したか」を判定し、失敗時のみ録画動画を Admin へ上げるために使う。
 const _pageWriteFailed = new WeakMap<object, boolean>();
-// Guard timeout closes the browser while the original async handler is still
-// unwinding. Suppress its later "page has been closed" callback so one Cloud
-// attempt produces exactly one terminal callback / one history transition.
+// Guard timeout closes the browser and first gives the original async handler a
+// bounded grace period to finish its own callback.  Only a handler that still
+// does not settle after that grace period is recorded here; callbacks arriving
+// after the guard has finally re-queued such a job must be suppressed so one
+// Cloud attempt produces exactly one history transition.
 const _guardTimedOutJobs = new Map<string, number>();
 
 // 失敗時に反映フローの録画(webm)を Admin 経由で Storage に上げる。worker は Supabase 直アクセスを
@@ -5248,6 +5250,13 @@ const CLOUD_WRITE_FALLBACK_TIMEOUT_MS = Number(
     process.env.SB_CLOUD_BOOKING_FALLBACK_TIMEOUT_MS ??
     330_000,
 );
+// タイムアウト時に Chrome を閉じると、Playwright の待機は通常すぐ解除され、
+// 元の handleJob が成功/失敗の callback を返せる。ここを待たずに JOB_TIMEOUT を
+// 先に返すと、実際には成功した callback を「late」として捨てて再実行してしまう。
+// reaper の 420 秒より前に確定できる範囲で、最大60秒だけ元処理の終了を待つ。
+const JOB_TIMEOUT_SETTLE_GRACE_MS = Number(
+  process.env.SB_JOB_TIMEOUT_SETTLE_GRACE_MS ?? 60_000,
+);
 
 function isCloudWorker(): boolean {
   return WORKER_CAPABILITIES.split(",").map((v) => v.trim()).includes("playwright_cloud");
@@ -5265,17 +5274,23 @@ async function handleJobGuarded(job: Job): Promise<void> {
       ? CLOUD_WRITE_FALLBACK_TIMEOUT_MS
       : READ_JOB_SAFETY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), limitMs);
+  type HandlerOutcome =
+    | { kind: "done" }
+    | { kind: "error"; error: unknown };
+  const handlerOutcome: Promise<HandlerOutcome> = handleJob(job).then(
+    () => ({ kind: "done" as const }),
+    (error) => ({ kind: "error" as const, error }),
+  );
+  const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: "timeout" }), limitMs);
   });
   try {
-    const r = await Promise.race([handleJob(job).then(() => "done" as const), timeout]);
-    if (r === "timeout") {
-      _guardTimedOutJobs.set(job.id, Date.now());
-      setTimeout(() => _guardTimedOutJobs.delete(job.id), 30 * 60_000);
+    const first = await Promise.race([handlerOutcome, timeout]);
+    if (first.kind === "error") throw first.error;
+    if (first.kind === "timeout") {
       const secs = Math.round(limitMs / 1000);
       console.error(
-        `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — running を解除して再キューします`,
+        `[job] TIMEOUT ${job.job_type} ${job.id.slice(0, 8)} after ${secs}s — Chrome停止後に元処理の確定結果を待ちます`,
       );
       // ★タイムアウトで打ち切っても handleJob のブラウザは生きたまま残り、
       //   次ジョブが同一プロファイルへ突入して衝突(セッション相互破壊)していた。
@@ -5292,11 +5307,39 @@ async function handleJobGuarded(job: Job): Promise<void> {
       } catch {
         /* 生きていなければ no-op */
       }
+
+      let graceTimer: ReturnType<typeof setTimeout> | null = null;
+      const graceTimeout = new Promise<{ kind: "grace_timeout" }>((resolve) => {
+        graceTimer = setTimeout(
+          () => resolve({ kind: "grace_timeout" }),
+          JOB_TIMEOUT_SETTLE_GRACE_MS,
+        );
+      });
+      const settledAfterKill = await Promise.race([
+        handlerOutcome,
+        graceTimeout,
+      ]);
+      if (graceTimer) clearTimeout(graceTimer);
+
+      if (settledAfterKill.kind === "error") throw settledAfterKill.error;
+      if (settledAfterKill.kind === "done") {
+        console.log(
+          `[job] TIMEOUT_RECOVERED ${job.job_type} ${job.id.slice(0, 8)} — 元処理のcallbackで確定`,
+        );
+        return;
+      }
+
+      // Chrome停止後も元処理が終了しない場合だけ guard が再キューする。
+      // ここより後に返る孤児callbackは report() で抑止する。
+      _guardTimedOutJobs.set(job.id, Date.now());
+      setTimeout(() => _guardTimedOutJobs.delete(job.id), 30 * 60_000);
       await report({
         job_id: job.id,
         job_type: job.job_type,
         status: "retryable_failed",
-        error: `[JOB_TIMEOUT] ${secs}秒以内に完了しなかったため停止しました。同じCloudで全工程を自動再試行します`,
+        error: `[JOB_TIMEOUT] ${secs}秒の処理期限と${Math.round(
+          JOB_TIMEOUT_SETTLE_GRACE_MS / 1000,
+        )}秒の終了待機でも確定しなかったため停止しました。同じCloudで全工程を自動再試行します`,
       }).catch(() => {});
     }
   } catch (e) {
