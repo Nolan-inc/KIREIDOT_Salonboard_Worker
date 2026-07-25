@@ -228,7 +228,17 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   assert.match(
     source,
     /if \(staleToken\)[\s\S]{0,700}KPCL017V01[\s\S]{0,300}'SB_SERVER_ERROR'[\s\S]{0,80}false/,
-    'exhausted KPCL017V01 optimistic-lock conflicts must remain retryable in Cloud',
+    'exhausted KPCL017V01 optimistic-lock conflicts must remain retryable on the selected executor',
+  );
+  assert.match(
+    source,
+    /document\.body\?\.innerText[\s\S]{0,120}slice\(0, 1000\)/,
+    'SalonBoard error diagnostics must retain enough text to classify a trailing KPCL017V01 code',
+  );
+  assert.doesNotMatch(
+    source,
+    /KPCL017V01[\s\S]{0,120}最新情報からCloudで全工程を再試行/,
+    'the shared scraper must not claim a Cloud retry when the selected executor is the shop PC',
   );
   assert.doesNotMatch(
     source,
@@ -329,8 +339,8 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     pcWorkerSource,
-    /const HANDLED_JOB_TYPES = new Set\(\['push_photo_gallery'\]\)/,
-    'the desktop worker must only execute the PC-specific photo/style write flow',
+    /const HANDLED_JOB_TYPES = new Set\(\[[\s\S]{0,220}'push_booking'[\s\S]{0,120}'cancel_booking'[\s\S]{0,120}'push_shifts'[\s\S]{0,120}'push_photo_gallery'/,
+    'the desktop worker must execute booking, cancel, shift, and photo jobs explicitly routed to PC',
   );
   assert.match(
     pcWorkerSource,
@@ -339,8 +349,8 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     pcWorkerSource,
-    /PC_EXECUTOR_GUARD[\s\S]{0,260}Cloud workerへ戻します/,
-    'an unexpected non-photo desktop claim must be returned to Cloud instead of cancelled',
+    /PC_EXECUTOR_GUARD[\s\S]{0,260}店舗PCの処理対象外です/,
+    'an unexpected desktop claim must be rejected without falsely claiming Cloud rerouting',
   );
   assert.doesNotMatch(
     source,

@@ -5102,7 +5102,10 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // 実際にどの画面に居るかを診断に含める (原因切り分け用)。
     const diag = await page.evaluate(() => {
       const forms = Array.from(document.querySelectorAll('form')).map((f) => f.id || f.getAttribute('name') || f.action || '?').slice(0, 5);
-      const body = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 200);
+      // KPCL017V01 はエラーページ末尾に出る店舗がある。診断文を短く切りすぎると
+      // 一時競合を CONFIRMATION_MISMATCH（手動対応）へ誤分類するため、判定に十分な
+      // 長さを保持する。
+      const body = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 1000);
       return { url: location.href, title: document.title, forms, body };
     }).catch(() => ({ url: page.url(), title: '?', forms: [], body: '?' }));
     // SalonBoardのrlastupdateはスケジュール変更のたびに失効する。同じ店舗で受付操作や
@@ -5130,7 +5133,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       // 渡す。pushBookingViaForm 冒頭の既存予約確認により、直前の試行が実は成功して
       // いた場合も二重登録にはならない。
       return fail(
-        `SalonBoardの更新競合(KPCL017V01)が3回続きました。最新情報からCloudで全工程を再試行します。`,
+        `SalonBoardの更新競合(KPCL017V01)が3回続きました。最新情報から全工程を再試行します。`,
         'SB_SERVER_ERROR',
         false,
       );

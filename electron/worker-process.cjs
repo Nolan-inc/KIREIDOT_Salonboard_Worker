@@ -4429,9 +4429,15 @@ async function runPushJobs({ showBrowser } = {}) {
     }
     if (claimedJobs.length === 0) break; // キューが空
 
-    // 店舗PCはフォト/スタイル反映専用。予約・シフト・ブログ等がAPIの不具合や
-    // 古いキューで返ってきても実行せず、Cloud authoritative を崩さない。
-    const HANDLED_JOB_TYPES = new Set(['push_photo_gallery']);
+    // Cloudで3回完走できなかった予約系ジョブは、ログイン済みの普段使いChromeを
+    // 持つ店舗PCへ移管する。PC_EXECUTOR_GUARDでCloudへ戻していたため、DB上は
+    // 「PCへ移管」と表示されても実際にはCloud再試行になっていた。
+    const HANDLED_JOB_TYPES = new Set([
+      'push_booking',
+      'cancel_booking',
+      'push_shifts',
+      'push_photo_gallery',
+    ]);
     const handled = [];
     for (const j of claimedJobs) {
       if (!HANDLED_JOB_TYPES.has(j.job_type)) {
@@ -4440,7 +4446,7 @@ async function runPushJobs({ showBrowser } = {}) {
           job_type: j.job_type,
           status: 'retryable_failed',
           error_code: 'PC_EXECUTOR_GUARD',
-          error: `[PC_EXECUTOR_GUARD] 店舗PCでは ${j.job_type} を実行しません。Cloud workerへ戻します。`,
+          error: `[PC_EXECUTOR_GUARD] 店舗PCの処理対象外です: ${j.job_type}`,
           manual_required: false,
         });
         drainedOther++;
