@@ -3712,6 +3712,32 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
     }
   }
 
+  // (3) それでも開けない場合: push (pushWorkPatternViaForm) と同じ正規導線
+  //   「毎月の受付設定 (monthlySetup) → 勤務パターン登録リンク」を辿る。
+  //   代々木上原 (hair) は直接URL/staffSetup経由が /CNB/set/staffSetup/ 止まりで
+  //   fetch だけ失敗していた実例あり (2026-07-25)。push はこの導線で到達できている。
+  if (!(await isReached())) {
+    for (const monthlyPath of ['/CLP/bt/set/monthlySetup/', '/KLP/set/monthlySetup/']) {
+      try {
+        await gotoInSalonContext(monthlyPath);
+      } catch (_e) { continue; }
+      if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) break;
+      const link = page
+        .locator('a[href*="workPatternSetup"], a:has-text("勤務パターン登録"), a:has-text("勤務パターン")')
+        .first();
+      if ((await link.count().catch(() => 0)) > 0) {
+        await Promise.all([
+          page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', { timeout: 15_000 }).catch(() => {}),
+          link.click({ timeout: 10_000 }).catch(() => {}),
+        ]);
+        diag.tried.push({ via: monthlyPath, url: page.url().replace('https://salonboard.com', '') });
+        if (await isReached()) break;
+      } else {
+        diag.tried.push({ via: monthlyPath, err: 'no_workpattern_link' });
+      }
+    }
+  }
+
   diag.url = page.url().replace('https://salonboard.com', '');
 
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
