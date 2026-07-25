@@ -3717,7 +3717,10 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
   //   代々木上原 (hair) は直接URL/staffSetup経由が /CNB/set/staffSetup/ 止まりで
   //   fetch だけ失敗していた実例あり (2026-07-25)。push はこの導線で到達できている。
   if (!(await isReached())) {
-    for (const monthlyPath of ['/CLP/bt/set/monthlySetup/', '/KLP/set/monthlySetup/']) {
+    for (const [monthlyPath, directPath] of [
+      ['/CLP/bt/set/monthlySetup/', '/CLP/bt/set/workPatternSetup/?returnPathStorage=04'],
+      ['/KLP/set/monthlySetup/', '/KLP/set/workPatternSetup/?returnPathStorage=04'],
+    ]) {
       try {
         await gotoInSalonContext(monthlyPath);
       } catch (_e) { continue; }
@@ -3732,9 +3735,16 @@ async function scrapeShiftPatterns(page, baseUrl, opts = {}) {
         ]);
         diag.tried.push({ via: monthlyPath, url: page.url().replace('https://salonboard.com', '') });
         if (await isReached()) break;
-      } else {
-        diag.tried.push({ via: monthlyPath, err: 'no_workpattern_link' });
       }
+      // リンクDOMが店舗ごとに異なるため、monthlySetupで文脈を確立した後に
+      // returnPathStorage=04 付き直接URLを開く (pushWorkPatternViaForm と同じ最終手段。
+      // 素の直接URLは「情報が一部失われています」で弾かれるが、こちらは通る)。
+      try {
+        await page.goto(new URL(directPath, base).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      } catch (_e) { continue; }
+      await page.waitForSelector('#workPatternSetup, #openTimeArea, input[name="deleteShiftIds"]', { timeout: 10_000 }).catch(() => {});
+      diag.tried.push({ via: `${monthlyPath}->direct`, url: page.url().replace('https://salonboard.com', '') });
+      if (await isReached()) break;
     }
   }
 
