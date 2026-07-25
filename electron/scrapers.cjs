@@ -2607,7 +2607,8 @@ async function readReservationEquipmentName(page, reserveId, opts = {}) {
       const norm = (s) => (s || '').replace(/[\s　]/g, '');
       const cells = Array.from(document.querySelectorAll('th, td'));
       for (let i = 0; i < cells.length; i++) {
-        if (norm(cells[i].textContent) === '設備') {
+        // 店舗/画面版によって「設備」「設備（席・ベッド）」「利用設備」表記がある。
+        if (/^(?:利用)?設備(?:[（(].*[）)])?$/.test(norm(cells[i].textContent))) {
           const row = cells[i].closest('tr');
           const sibs = row ? Array.from(row.querySelectorAll('td, th')) : [];
           const rawVal = sibs.length ? (sibs[sibs.length - 1].textContent || '') : (cells[i + 1]?.textContent || '');
@@ -7360,17 +7361,67 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // 設備指定がある変更は、成功文言だけで完了扱いにしない。予約詳細を再取得して
   // SalonBoard側にも同じ設備名が残っていることを肯定確認する。
   if (expectedPersistedEquipName) {
-    const actualEquipName = await readReservationEquipmentName(page, reserveId, { baseUrl });
+    let actualEquipName = await readReservationEquipmentName(page, reserveId, { baseUrl });
+    let persistedEquipmentAssignment = null;
     const normEquip = (value) => String(value || '')
       .normalize('NFKC')
       .replace(/[\s　]/g, '')
       .replace(/ベット/g, 'ベッド');
+    // 詳細画面の設備行は店舗/予約種別によって表示されない版がある。一方、変更フォームは
+    // 永続化済みの割当だけに equipAssignIdList=YE... を返すため、詳細で読めなかった場合は
+    // サーバから変更フォームを再取得し「設備ID + 割当ID」の両方で肯定確認する。
+    if (!actualEquipName || normEquip(actualEquipName) !== normEquip(expectedPersistedEquipName)) {
+      await establishChangeContext();
+      for (const path of candidates) {
+        await page.goto(new URL(path, baseUrl).toString(), {
+          waitUntil: 'domcontentloaded',
+          timeout: 20_000,
+        }).catch(() => {});
+        await page.waitForSelector(formSel, { timeout: 6_000 }).catch(() => {});
+        if ((await page.locator(formSel).count().catch(() => 0)) === 0) {
+          await openChangeFormFromDetail();
+        }
+        if ((await page.locator(formSel).count().catch(() => 0)) === 0) continue;
+        persistedEquipmentAssignment = await page.evaluate(({ wantedId, wantedName }) => {
+          const norm = (value) => String(value || '')
+            .normalize('NFKC')
+            .replace(/[○×\s　]/g, '')
+            .replace(/ベット/g, 'ベッド');
+          const rows = Array.from(document.querySelectorAll('.jscEquipRow'));
+          for (const row of rows) {
+            const select = row.querySelector('select[name="equipIdList"], select.equipIdList');
+            if (!select || !select.value) continue;
+            const option = select.options[select.selectedIndex];
+            const name = norm(option?.textContent || '');
+            const assignId = String(
+              row.querySelector('input[name="equipAssignIdList"]')?.value || '',
+            ).trim();
+            const idMatches = wantedId && select.value === wantedId;
+            const nameMatches = wantedName && norm(wantedName) === name;
+            // dummy は画面上で追加しただけの未保存行。SalonBoard発番のYE...だけを
+            // 永続化済みの設備割当として扱い、表示上の選択だけで成功判定しない。
+            if ((idMatches || nameMatches) && /^YE\d+$/i.test(assignId)) {
+              return { id: select.value, name, assignId };
+            }
+          }
+          return null;
+        }, {
+          wantedId: wantedEquipExtId,
+          wantedName: expectedPersistedEquipName,
+        }).catch(() => null);
+        if (persistedEquipmentAssignment) {
+          actualEquipName = persistedEquipmentAssignment.name || expectedPersistedEquipName;
+        }
+        break;
+      }
+    }
     if (!actualEquipName || normEquip(actualEquipName) !== normEquip(expectedPersistedEquipName)) {
       const verifyCap = await captureScrapeDebug(page, 'change', `equipment_verify_failed_${reserveId}`, {
         diagnostics: {
           reserveId,
           expectedEquipName: expectedPersistedEquipName,
           actualEquipName,
+          persistedEquipmentAssignment,
           equipmentSubmitTrace,
           url: page.url(),
         },

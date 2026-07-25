@@ -284,8 +284,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     scraperSource,
-    /expectedPersistedEquipName[\s\S]{0,32000}readReservationEquipmentName\(page, reserveId,[\s\S]{0,1400}設備の保存をSalonBoard予約詳細で確認できませんでした/,
+    /expectedPersistedEquipName[\s\S]{0,32000}readReservationEquipmentName\(page, reserveId,[\s\S]{0,10000}設備の保存をSalonBoard予約詳細で確認できませんでした/,
     'booking updates with equipment must verify the persisted SalonBoard detail before reporting success',
+  );
+  assert.match(
+    scraperSource,
+    /persistedEquipmentAssignment[\s\S]{0,5000}\^YE\\d\+\$[\s\S]{0,1200}actualEquipName = persistedEquipmentAssignment\.name/,
+    'booking updates must accept only SalonBoard-issued persisted equipment assignments as the detail fallback',
   );
   assert.match(
     scraperSource,
