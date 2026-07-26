@@ -142,6 +142,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /readStableScheduleToken[\s\S]{0,1800}scheduleMainHead[\s\S]{0,1800}stableReads >= 2/,
+    'new bookings must wait for the Ajax-updated stable rlastupdate token',
+  );
+  assert.match(
+    source,
+    /readStableScheduleToken[\s\S]{0,1200}getAttribute\('value'\)/,
+    'rlastupdate reading must support both text and input value variants',
+  );
+  assert.match(
+    source,
     /invalidLastKana[\s\S]*\(\?:シ\|セイ\|姓/,
     'SalonBoard surname-kana placeholders must be replaced before booking updates',
   );

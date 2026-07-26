@@ -4974,6 +4974,38 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   const startHH = String(when.hour).padStart(2, '0');
   const startMM = String(when.minute).padStart(2, '0');
 
+  // SalonBoard のスケジュールは DOMContentLoaded 後にスタッフ列を Ajax 描画し、
+  // 描画完了時に #rlastupdate も新しい値へ差し替える。要素が最初に現れた瞬間の
+  // textContent を読むと、差し替え前のトークンを登録URLへ渡して KPCL017V01
+  // (「他のユーザによって変更」)を自分自身で発生させる店舗がある。
+  // 予定登録(addScheduleBlockViaSalonBoard)と同じく、スタッフ列の描画後に値が
+  // 連続して安定するまで待つ。input/value 形式の画面にも対応する。
+  const readStableScheduleToken = async () => {
+    const token = page.locator('#rlastupdate').first();
+    await token.waitFor({ state: 'attached', timeout: 12_000 }).catch(() => {});
+    await page.waitForSelector(
+      `.scheduleMainHead[id^="STAFF_"], .jscScheduleMainTableStaff, [id^="STAFF_"]`,
+      { state: 'attached', timeout: 12_000 },
+    ).catch(() => {});
+    let previous = '';
+    let stableReads = 0;
+    for (let i = 0; i < 16; i += 1) {
+      const current = await token.evaluate((el) => {
+        const value = 'value' in el ? String(el.value || '') : '';
+        return (value || el.getAttribute('value') || el.textContent || '').trim();
+      }).catch(() => '');
+      if (current && current === previous) {
+        stableReads += 1;
+        if (stableReads >= 2) return current;
+      } else {
+        previous = current;
+        stableReads = 0;
+      }
+      await page.waitForTimeout(250);
+    }
+    return previous;
+  };
+
   // --- 二重登録防止プリフライト (§6.4) ---
   // payload.preflight_required (孤児再enqueue / 手動「SB連携」リトライ / sweep 再enqueue
   // 時に Admin が付与) の場合のみ、登録フォームを開く前に既存予約を確認する。
@@ -5099,13 +5131,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         schedUrl.searchParams.set('_kd_token', String(Date.now()));
         await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       }
-      // #rlastupdate が出現したら即取得 (networkidle は待たない)。
-      await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-      rlastupdate = (await page
-        .locator('#rlastupdate')
-        .first()
-        .textContent()
-        .catch(() => ''))?.trim() || '';
+      // 要素の初期値ではなく、Ajaxによるスタッフ列描画後の安定値を使う。
+      // networkidle は常時通信があるため待たず、DOMの意味的な完了を待つ。
+      rlastupdate = await readStableScheduleToken();
     } catch (e) {
       if (schedTry === 2 || typeof opts.relogin !== 'function') {
         return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
