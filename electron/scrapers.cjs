@@ -4677,10 +4677,28 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
           try {
             await applyPatternDay(plan, `${month}${d}`);
           } catch (e) {
-            dayFailures.push(`${plan.staffName} ${month}${d}: ${e?.message ?? e}`);
-            // モーダルが開いたままなら閉じて次の日へ。
+            const msg = String(e?.message ?? e);
+            // モーダルが開いたままなら閉じる。
             await page.locator('#cancel:visible').first().click({ timeout: 2_000 }).catch(() => {});
             await page.waitForTimeout(200);
+            if (/入力された時間帯に別のシフトまたは予定/.test(msg)) {
+              // SBの非対称仕様: スケジュール画面経由は勤務時間と重なる予定を許すのに、
+              // シフト設定モーダルの再保存は同じ組合せを拒否する(2026-07-26 中目黒
+              // komachi ロープレ16:00-19:30 × パターン10:00-18:30 で実測)。
+              // この日だけ一括入力で上書き(その日の予定は消える)し、消えた予定行を
+              // 警告に残す。KD由来のブロックは後続の push_booking 再実行で復元できる。
+              try {
+                await applyChunk(plan, [d], `${month}${d}`);
+                warnings.push(
+                  `${plan.staffName} ${month}${d}: 既存予定が勤務時間と重複しモーダル保存不可→一括入力で設定`
+                  + ` (この日のSB予定は消えたため要復元。${msg.replace(/^[\s\S]*?rows=/, '消えた予定行=').slice(0, 200)})`,
+                );
+              } catch (e2) {
+                dayFailures.push(`${plan.staffName} ${month}${d}: 一括入力フォールバックも失敗: ${e2?.message ?? e2} (元: ${msg.slice(0, 160)})`);
+              }
+            } else {
+              dayFailures.push(`${plan.staffName} ${month}${d}: ${msg}`);
+            }
           }
         }
       } else {
