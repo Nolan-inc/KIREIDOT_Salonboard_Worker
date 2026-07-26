@@ -5767,9 +5767,17 @@ async function directJob(shopId: string): Promise<void> {
 // を刺激するため。再シードは実ジョブ/人手に任せる)。
 // 安全策: 既定 OFF (SB_KEEPALIVE_ENABLED=1 で有効化)。実ジョブが1件でも走行中なら一切
 // 実施しない(書込SLAを阻害しない)。専用stickyISP IPが健全でなければ触らない(フラグ延命防止)。
-const KEEPALIVE_ENABLED = /^(1|true|yes)$/i.test(
-  process.env.SB_KEEPALIVE_ENABLED ?? "",
-);
+// 有効化フラグ。env は **コンテナ再作成しないと変えられない**(=全店セッション消失リスク)ため、
+// ファイル /home/pwuser/.kireidot/keepalive_enabled でも有効化可能にする(autoLoginDisabled と同方式)。
+// タイマーは常時起動し、各サイクルでこの関数を読むので、ファイルを置くだけで再起動なしに有効化される。
+function keepaliveEnabled(): boolean {
+  if (/^(1|true|yes)$/i.test(process.env.SB_KEEPALIVE_ENABLED ?? "")) return true;
+  try {
+    return existsSync("/home/pwuser/.kireidot/keepalive_enabled");
+  } catch {
+    return false;
+  }
+}
 const KEEPALIVE_INTERVAL_MS = Number(
   process.env.SB_KEEPALIVE_INTERVAL_MS ?? 15 * 60_000,
 );
@@ -5845,7 +5853,7 @@ async function keepaliveOne(
 
 let _keepaliveRunning = false;
 async function keepaliveOnce(): Promise<void> {
-  if (!KEEPALIVE_ENABLED || !isCloudWorker() || isShutdownRequested()) return;
+  if (!keepaliveEnabled() || !isCloudWorker() || isShutdownRequested()) return;
   if (_keepaliveRunning) return; // 前サイクル未完なら重複起動しない
   if (_inFlight.size > 0) return; // 実ジョブ優先: 走行中は一切やらない
   // 健全IPが無い時は触らない(pollOnce と同じフラグ延命防止方針)。
@@ -5938,10 +5946,13 @@ async function main() {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
-  // keepalive: アイドル時に温かいセッションを延命 (既定OFF・cloud のみ)。
-  if (KEEPALIVE_ENABLED && isCloudWorker()) {
+  // keepalive: アイドル時に温かいセッションを延命 (cloud のみ)。タイマーは常時起動し、
+  // 各サイクルで keepaliveEnabled() を読む → ファイル /home/pwuser/.kireidot/keepalive_enabled を
+  // 置くだけで**再起動なし**に有効化できる(既定は無効=no-op)。cold login はしない。
+  if (isCloudWorker()) {
     console.log(
-      `[boot] keepalive 有効 (間隔=${Math.round(KEEPALIVE_INTERVAL_MS / 60_000)}分・実ジョブ走行中はスキップ・cold loginなし)`,
+      `[boot] keepalive タイマー起動 (間隔=${Math.round(KEEPALIVE_INTERVAL_MS / 60_000)}分・` +
+        `有効化=env SB_KEEPALIVE_ENABLED or ファイル keepalive_enabled・実ジョブ走行中はスキップ・cold loginなし)`,
     );
     const kaTimer = setInterval(() => {
       void keepaliveOnce();
