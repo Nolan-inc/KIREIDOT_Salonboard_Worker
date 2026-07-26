@@ -3016,7 +3016,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 影響しないため、実フォームが示す営業終了時刻までに丸めて同期する。
   // それ以外の時刻差分は誤登録防止のため従来どおり停止する。
   const parseHmTotal = (value) => {
-    const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+    // #jsiSalonEndTime は "21:00" ではなく "2100" (コロン無しHHMM) を返す個体が
+    // ある(2026-07-26 代官山で実測)。両形式を受け付ける。
+    const s = String(value || '').trim();
+    const m = s.match(/^(\d{1,2}):(\d{2})$/) || s.match(/^(\d{1,2})(\d{2})$/);
     return m ? Number(m[1]) * 60 + Number(m[2]) : null;
   };
   const selectedEndTotal = formState
