@@ -74,8 +74,9 @@ jobs:
             "set -e",
             ("curl -fL --retry 3 --connect-timeout 10 " + ($url|@sh) + " -o " + ($path + ".next"|@sh)),
             ("test -s " + ($path + ".next"|@sh)),
+            ("docker stop -t 40 " + ($container|@sh)),
             ("mv " + ($path + ".next"|@sh) + " " + ($path|@sh)),
-            ("docker restart " + ($container|@sh)),
+            ("docker start " + ($container|@sh)),
             ("docker inspect " + ($container|@sh) + " " + ("--format=Status={{.State.Status}} Started={{.State.StartedAt}} RestartCount={{.RestartCount}}"|@sh)),
             ("echo deployed_commit=" + $sha)
           ]}')
