@@ -4582,6 +4582,26 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
   };
 
+  // 日別モーダル内の予定行のうち、自分(予定方式)が作った「時間外」行だけ削除する。
+  // KD由来の休憩/業務や店舗手入力の予定は保持する(全削除すると 2026-07-26
+  // 代々木上原のようにSBの予定を巻き添えで消してしまう)。
+  const deleteOwnJikangaiRows = async () => {
+    for (let i = 0; i < 12; i++) {
+      const idx = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic'));
+        return rows.findIndex((r) => {
+          const t = r.querySelector('input[name="titles"]');
+          return t && String(t.value || '').trim() === '時間外';
+        });
+      }).catch(() => -1);
+      if (idx < 0) break;
+      const del = page.locator('#yoteiArea .tblSetInfoBasic').nth(idx).locator('a.mod_btn_delete_04:visible').first();
+      if ((await del.count().catch(() => 0)) === 0) break;
+      await del.click({ timeout: 5_000 }).catch(() => {});
+      await page.waitForTimeout(150);
+    }
+  };
+
   // (5a') 出勤パターンは日別モーダル(changeShiftSchedule)で1日ずつ反映する。
   // ★一括入力(batchSet)は日設定を丸ごと上書きし、その日に登録済みの「予定」
   //   (KD由来の休憩/業務ブロックや店舗が手入力した予定)まで消してしまう
@@ -4611,7 +4631,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       s.dispatchEvent(new Event('change', { bubbles: true }));
     }, plan.patternId).catch(() => {});
     await page.waitForTimeout(200);
-    // 既存の予定行には一切触れない(保持したまま保存する)。
+    // 自分(予定方式)が過去に作った「時間外」行は、新パターンの時間帯と重複して
+    // SBの保存検証に弾かれるため先に削除する。それ以外の予定行(KD由来の
+    // 休憩/業務や店舗手入力)は保持したまま保存する。
+    await deleteOwnJikangaiRows();
     await page.locator('#yoteiSet').click({ timeout: 8_000 });
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -4619,18 +4642,43 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       const errVisible = await page.locator('#popupErrorMessage:visible').count().catch(() => 0);
       if (errVisible > 0) {
         const errText = (await page.locator('#popupErrorMessage').innerText().catch(() => '')).trim();
-        if (errText) throw new Error(`シフト設定エラー: ${errText.slice(0, 100)}`);
+        if (errText) {
+          // 診断用: モーダル内の予定行(時間帯/タイトル)を残してから閉じる。
+          const rows = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic')).map((r) => ({
+              start: `${r.querySelector('.jscSchStartHours')?.value ?? '?'}:${r.querySelector('.jscSchStartMinutes')?.value ?? '?'}`,
+              end: `${r.querySelector('.jscSchEndHours')?.value ?? '?'}:${r.querySelector('.jscSchEndMinutes')?.value ?? '?'}`,
+              title: r.querySelector('input[name="titles"]')?.value ?? '',
+            }))).catch(() => []);
+          const cap = await captureScrapeDebug(page, 'shifts', `pattern_day_conflict_${plan.staffExt}_${ymd}`, {
+            diagnostics: { staff: plan.staffName, ymd, patternId: plan.patternId, rows },
+          }).catch(() => null);
+          await page.locator('#cancel:visible').first().click({ timeout: 3_000 }).catch(() => {});
+          throw new Error(
+            `シフト設定エラー: ${errText.slice(0, 100)} (rows=${JSON.stringify(rows).slice(0, 200)}${cap ? `, capture=${cap}` : ''})`,
+          );
+        }
       }
       if ((await page.locator('#yoteiSet:visible').count().catch(() => 0)) === 0) return;
     }
     throw new Error('シフト設定モーダルが閉じませんでした');
   };
 
+  // 1日の失敗で月全体を止めない: 失敗日は記録して他の日を続行し、最後に
+  // まとめて失敗を報告する(リトライはdiffベースなので失敗日だけ再試行される)。
+  const dayFailures = [];
   try {
     for (const plan of plans) {
       if (plan.kind === 'work') {
         for (const d of plan.days) {
-          await applyPatternDay(plan, `${month}${d}`);
+          try {
+            await applyPatternDay(plan, `${month}${d}`);
+          } catch (e) {
+            dayFailures.push(`${plan.staffName} ${month}${d}: ${e?.message ?? e}`);
+            // モーダルが開いたままなら閉じて次の日へ。
+            await page.locator('#cancel:visible').first().click({ timeout: 2_000 }).catch(() => {});
+            await page.waitForTimeout(200);
+          }
         }
       } else {
         for (let i = 0; i < plan.days.length; i += 5) {
@@ -4642,6 +4690,13 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
   } catch (e) {
     return fail(`シフトの一括入力に失敗: ${e?.message ?? e}`, 'UNKNOWN_ERROR', true);
+  }
+  if (dayFailures.length > 0) {
+    return fail(
+      `シフト反映で${dayFailures.length}日分が失敗 (他の日は反映済み): ${dayFailures.join(' / ').slice(0, 600)}`,
+      'UNKNOWN_ERROR',
+      true,
+    );
   }
 
   // パネルを閉じる (セルクリック/「設定」ボタンが隠れないように)
@@ -4683,20 +4738,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     // 既存の予定行のうち、自分が過去に作った「時間外」行だけ削除する(再実行時の
     // 重複防止)。KD由来の休憩/業務や店舗手入力の予定は保持する(全削除すると
     // 2026-07-26 代々木上原のようにSBの予定を巻き添えで消してしまう)。
-    for (let i = 0; i < 12; i++) {
-      const idx = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic'));
-        return rows.findIndex((r) => {
-          const t = r.querySelector('input[name="titles"]');
-          return t && String(t.value || '').trim() === '時間外';
-        });
-      }).catch(() => -1);
-      if (idx < 0) break;
-      const del = page.locator('#yoteiArea .tblSetInfoBasic').nth(idx).locator('a.mod_btn_delete_04:visible').first();
-      if ((await del.count().catch(() => 0)) === 0) break;
-      await del.click({ timeout: 5_000 }).catch(() => {});
-      await page.waitForTimeout(150);
-    }
+    await deleteOwnJikangaiRows();
     // 時間外ブロック (ベースパターンの勤務時間のうち、シフト外の前後) を予定に
     const blocks = [];
     if (toMin(cp.start) > toMin(cp.base.start)) blocks.push({ s: cp.base.start, e: cp.start });
