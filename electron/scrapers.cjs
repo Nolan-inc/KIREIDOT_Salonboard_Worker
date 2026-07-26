@@ -2848,13 +2848,14 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
       refreshUrl.searchParams.set('date', when.yyyymmdd);
       refreshUrl.searchParams.set('_kd_token', `${Date.now()}_${formAttempt}`);
-      // #rlastupdate はHTML本体に埋め込まれている。DOMContentLoadedまで待つと
-      // 大きなスケジュール/外部スクリプトの読込で10秒以上経ち、その間の受付操作で
-      // 取得直後のトークンが失効する。commit後に要素が解析された瞬間に読み、
-      // 他の描画完了を待たず登録フォームへ進む。
+      // ★KPCL017根治(2026-07-26 WAO新宿で実証): commit直後の #rlastupdate 即読みは、
+      //   AJAXが描画完了時にトークンを差し替える店舗(WAO)では **AJAX前の古い値** を掴み、
+      //   取得1秒後の登録でも必ず KPCL017V01(他のユーザによって変更)を自分で誘発していた
+      //   (capture: rlastupdate=20260726230620 → 23:06:21 に KPCL017)。初回取得(上の
+      //   readStableRlastupdate)と実予約側(readStableScheduleToken)と同様に、AJAX確定後の
+      //   安定値を使う。安定読みは2連続一致で即返るため通常は数百msで完了する。
       await page.goto(refreshUrl.toString(), { waitUntil: 'commit', timeout: 25_000 });
-      await page.waitForSelector('#rlastupdate', { state: 'attached', timeout: 8_000 });
-      rlastupdate = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+      rlastupdate = await readStableRlastupdate();
     } catch (e) {
       return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
     }
