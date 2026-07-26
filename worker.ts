@@ -5760,6 +5760,133 @@ async function directJob(shopId: string): Promise<void> {
   }
 }
 
+// ── keepalive: アイドル中アカウントのセッション延命 (cold login はしない) ────────────
+// 目的: 温かいセッション(userDataDir の _abck/cookie)を定期的に軽く触って延命し、次の
+// 実ジョブが再ログイン不要で即実行できる状態を保つ。cold login の嵐(=画像認証/KPCL017
+// の増幅器)を根絶する。needs_login のアカウントはスキップ(ここで再ログインを撃つと Akamai
+// を刺激するため。再シードは実ジョブ/人手に任せる)。
+// 安全策: 既定 OFF (SB_KEEPALIVE_ENABLED=1 で有効化)。実ジョブが1件でも走行中なら一切
+// 実施しない(書込SLAを阻害しない)。専用stickyISP IPが健全でなければ触らない(フラグ延命防止)。
+const KEEPALIVE_ENABLED = /^(1|true|yes)$/i.test(
+  process.env.SB_KEEPALIVE_ENABLED ?? "",
+);
+const KEEPALIVE_INTERVAL_MS = Number(
+  process.env.SB_KEEPALIVE_INTERVAL_MS ?? 15 * 60_000,
+);
+const KEEPALIVE_STAGGER_MS = Number(
+  process.env.SB_KEEPALIVE_STAGGER_MS ?? 20_000,
+);
+
+type KeepaliveTarget = {
+  shop_id: string;
+  login_id: string;
+  base_url?: string | null;
+  salon_id?: string | null;
+  genre?: string | null;
+};
+
+async function fetchKeepaliveTargets(): Promise<KeepaliveTarget[]> {
+  const res = await fetch(`${API}/api/salonboard/keepalive-targets`, {
+    headers: buildAuthHeaders(),
+  });
+  if (!res.ok) {
+    throw new Error(`keepalive targets fetch failed: ${res.status}`);
+  }
+  const json = (await res.json()) as { targets?: KeepaliveTarget[] };
+  return json.targets ?? [];
+}
+
+async function keepaliveOne(
+  t: KeepaliveTarget,
+): Promise<"warm" | "skip" | "needs_login" | "captcha" | "error"> {
+  const baseUrl = t.base_url ?? "https://salonboard.com/";
+  const sessionKey = sessionKeyFor(t.login_id, baseUrl);
+  // アカウントの sticky ISP IP で開く(avoidResidential=true=代替IPを使わない)。
+  // 専用IPが健全でなければ launch.proxy が空 → 触らない(誤ったIPでセッションを壊さない)。
+  const { launch, realChrome } = resolveLaunchOptions(
+    null,
+    false,
+    t.shop_id,
+    true,
+    sessionKey,
+  );
+  if (!launch.proxy?.server) return "skip";
+  let ctx: BrowserContext | null = null;
+  try {
+    ctx = await launchStealthContext({
+      launch,
+      realChrome,
+      shopId: t.shop_id,
+      profileKey: sessionKey,
+      legacyShopId: t.shop_id,
+    });
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    const status = await isLoggedIn(page, baseUrl, {
+      genre: t.genre ?? undefined,
+      salonId: t.salon_id ?? null,
+    });
+    if (status === "logged_in") {
+      // isLoggedIn が管理TOPを開いた時点でサーバ側セッションが延命される。
+      // storageState を再保存し、close で _abck/cookie を userDataDir に flush。
+      await saveStorageState(ctx, storageStatePathFor(sessionKey));
+      return "warm";
+    }
+    // needs_login/captcha はここで再ログインしない(Akamai刺激回避)。
+    return status === "captcha" ? "captcha" : "needs_login";
+  } catch (e) {
+    console.warn(
+      `[keepalive] ${t.shop_id.slice(0, 8)} error: ${e instanceof Error ? e.message : e}`,
+    );
+    return "error";
+  } finally {
+    await ctx?.close().catch(() => {});
+  }
+}
+
+let _keepaliveRunning = false;
+async function keepaliveOnce(): Promise<void> {
+  if (!KEEPALIVE_ENABLED || !isCloudWorker() || isShutdownRequested()) return;
+  if (_keepaliveRunning) return; // 前サイクル未完なら重複起動しない
+  if (_inFlight.size > 0) return; // 実ジョブ優先: 走行中は一切やらない
+  // 健全IPが無い時は触らない(pollOnce と同じフラグ延命防止方針)。
+  if (
+    proxyPoolList().length > 0 &&
+    _healthyProxies &&
+    _healthyProxies.length === 0 &&
+    !fallbackConfigured()
+  ) {
+    return;
+  }
+  _keepaliveRunning = true;
+  try {
+    const targets = await fetchKeepaliveTargets().catch((e) => {
+      console.warn(
+        `[keepalive] targets fetch failed: ${e instanceof Error ? e.message : e}`,
+      );
+      return [] as KeepaliveTarget[];
+    });
+    if (targets.length === 0) return;
+    const counts: Record<string, number> = {};
+    for (const t of targets) {
+      if (isShutdownRequested() || _inFlight.size > 0) break; // 実ジョブが来たら即譲る
+      const r = await withAccountJobGate(
+        {
+          credentials: {
+            login_id: t.login_id,
+            base_url: t.base_url ?? undefined,
+          },
+        } as unknown as Job,
+        () => keepaliveOne(t),
+      ).catch(() => "error" as const);
+      counts[r] = (counts[r] ?? 0) + 1;
+      await sleep(KEEPALIVE_STAGGER_MS); // 出口集中を避けてstagger
+    }
+    console.log(`[keepalive] cycle done ${JSON.stringify(counts)}`);
+  } finally {
+    _keepaliveRunning = false;
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
@@ -5810,6 +5937,17 @@ async function main() {
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  // keepalive: アイドル時に温かいセッションを延命 (既定OFF・cloud のみ)。
+  if (KEEPALIVE_ENABLED && isCloudWorker()) {
+    console.log(
+      `[boot] keepalive 有効 (間隔=${Math.round(KEEPALIVE_INTERVAL_MS / 60_000)}分・実ジョブ走行中はスキップ・cold loginなし)`,
+    );
+    const kaTimer = setInterval(() => {
+      void keepaliveOnce();
+    }, KEEPALIVE_INTERVAL_MS);
+    if (typeof kaTimer.unref === "function") kaTimer.unref();
+  }
 
   // メインループ: 空きスロット分を claim して並行処理 -> ポーリング間隔待機。
   // 処理中(別店舗レーン)がある間は短めに回してスロットを埋め続ける。
