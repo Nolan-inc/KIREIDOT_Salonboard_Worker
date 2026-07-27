@@ -2704,6 +2704,9 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   if (!line) return { ok: false, reason: 'staff_line_not_found', blocks: [] };
   const blocks = [];
   let found = false;
+  const targetTitle = norm(title);
+  // 「予定」「予定あり」等の汎用タイトルは別予定への誤一致を招くため、同名重なり判定から除外。
+  const genericTitle = !targetTitle || targetTitle === '予定' || targetTitle === '予定あり';
   for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
     const isDayOff = el.classList.contains('isDayOff');
     const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
@@ -2727,6 +2730,14 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した
     // 12:30-13:30 を未登録と誤判定するため、同タイトルの包含も成功にする。
     if (start <= startTotal && end >= endTotal && actualTitle === norm(title)) found = true;
+    // ★境界ドリフトの根治(2026-07-27 中目黒 やました しおり で実害): SBは同一スタッフに
+    //   時間帯が重なる予定を複数持てないため、境界が数分ズレた同名予定が既にあると新規POSTを
+    //   黙って破棄し、cloudのverifyが恒久的に exact_schedule_not_found → CONFIRMATION_MISMATCH の
+    //   誤エラー通知を出し続ける(例: KD=19:45-21:00 に対し SB=19:30-20:45。旧executorの:45→:30
+    //   丸めや手動入力で15分ズレ)。固有タイトル(顧客名など)が一致し対象区間と少しでも重なる
+    //   既存予定があれば、受付停止という同期目的は達成済み=冪等成功として扱う。完全被覆でない
+    //   区間差は残るが、別予定との衝突検知(タイトル不一致 or 汎用タイトル)は従来どおり維持する。
+    if (!genericTitle && actualTitle === targetTitle && start < endTotal && end > startTotal) found = true;
   }
   // SB は既存予定と重複する予定POSTを黙って破棄する。既存予定(タイトル問わず。
   // 「予定あり」=無題や旧予定方式の「土日祝早番」等も含む)の結合区間が登録区間を
