@@ -7400,7 +7400,14 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
     // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
     const directSubmitResult = await page.evaluate((equipmentValue) => {
-      const form = document.getElementById('extReserveChange');
+      // ★HotPepper(ネット予約 BF...)の変更フォームは id="reserveChange"(action=/net/reserveChange)、
+      //   KD由来(YG/YH)は id="extReserveChange"。設備(ベッド)を同一JSターンで再設定するには実フォームを
+      //   掴む必要がある。extReserveChange 決め打ちだとネット予約でnull→直接送信が不発→ボタン送信
+      //   フォールバックとなり、Ajax設備空き更新にベッド選択が巻き戻され「未割り当て」で保存されていた
+      //   (2026-07-27 新宿三丁目 BF37921037/BF35299811 で実害)。両IDと設備/時刻行を持つフォームから解決。
+      const form = document.getElementById('extReserveChange')
+        || document.getElementById('reserveChange')
+        || document.querySelector('select[name="equipIdList"], #jsiRsvHour, #rsvTime, select[name="time"]')?.form;
       const jq = window.jQuery;
       if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') {
         return { submitted: false, reason: 'helper_or_form_missing' };
@@ -7449,7 +7456,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           .filter(([name]) => /^equip/i.test(String(name)))
           .map(([name, value]) => [String(name), String(value)])
         : [];
-      jq.shuhari.formSubmit('extReserveChange', 'doComplete');
+      jq.shuhari.formSubmit(form.id || 'extReserveChange', 'doComplete');
       return { submitted: true, equipmentFields };
     }, selectedEquipmentValue).catch((e) => ({
       submitted: false,
@@ -7526,7 +7533,9 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         const warn = document.getElementById('warnArea');
         if (!warn || getComputedStyle(warn).display === 'none') return false;
         const jq = window.jQuery;
-        const form = document.getElementById('extReserveChange');
+        const form = document.getElementById('extReserveChange')
+          || document.getElementById('reserveChange')
+          || document.querySelector('select[name="equipIdList"], #jsiRsvHour, #rsvTime, select[name="time"]')?.form;
         if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') return false;
         const mappings = [
           ['nmSeiKana', 'orgNmSeiKana', 'ヨヤク'],
@@ -7548,7 +7557,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         }
         warn.style.display = 'none';
         jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');
-        jq.shuhari.formSubmit('extReserveChange', 'doComplete');
+        jq.shuhari.formSubmit(form.id || 'extReserveChange', 'doComplete');
         return true;
       }).catch(() => false);
       if (warningResubmitted) {
