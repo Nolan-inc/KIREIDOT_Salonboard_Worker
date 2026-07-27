@@ -2132,15 +2132,24 @@ async function scrapeMenus(page, opts = {}) {
   }
 
   const raw = await page.evaluate(() => {
-    // name="frmMenuEditMenuDetailList[N].field" の N とフィールドを引く
-    const re = /^frmMenuEditMenuDetailList\[(\d+)\]\.(.+)$/;
+    // 非hair: frmMenuEditMenuDetailList[N].field
+    // hair:    setMenuDetailInfoList[N].field
+    const re = /^(?:frmMenuEditMenuDetailList|setMenuDetailInfoList)\[(\d+)\]\.(.+)$/;
     const byIndex = {};
     const els = document.querySelectorAll(
-      'input[name^="frmMenuEditMenuDetailList"], textarea[name^="frmMenuEditMenuDetailList"], select[name^="frmMenuEditMenuDetailList"]',
+      [
+        'input[name^="frmMenuEditMenuDetailList"]',
+        'textarea[name^="frmMenuEditMenuDetailList"]',
+        'select[name^="frmMenuEditMenuDetailList"]',
+        'input[name^="setMenuDetailInfoList"]',
+        'textarea[name^="setMenuDetailInfoList"]',
+        'select[name^="setMenuDetailInfoList"]',
+      ].join(','),
     );
     for (const el of els) {
       const m = (el.name || '').match(re);
       if (!m) continue;
+      if ((el.type === 'radio' || el.type === 'checkbox') && !el.checked) continue;
       const idx = m[1];
       const field = m[2];
       let val = '';
@@ -2160,9 +2169,17 @@ async function scrapeMenus(page, opts = {}) {
       items.push({
         external_id: (f.menuId || '').trim() || `idx_${idx}`,
         name,
-        category: (f.menuCategoryName || f.genreName || '').trim() || null,
+        category: (
+          f.menuCategoryName ||
+          f.selectedMenuCategoryName ||
+          f.selectedMenuCategoryCd ||
+          f.genreName ||
+          ''
+        ).trim() || null,
         price: (f.price || '').replace(/[^\d]/g, '') || null,
-        duration_min: (f.sejyutsuAimTime || '').replace(/[^\d]/g, '') || null,
+        duration_min: (f.sejyutsuAimTime || f.aimTime || f.minutes || '')
+          .replace(/[^\d]/g, '') || null,
+        is_active: f.presentFlg !== '0',
       });
     }
     return {
@@ -2199,7 +2216,7 @@ async function scrapeMenus(page, opts = {}) {
     category: it.category,
     price: it.price ? Number(it.price) : null,
     duration_min: it.duration_min ? Number(it.duration_min) : null,
-    is_active: true,
+    is_active: it.is_active !== false,
   }));
   return {
     rows,
