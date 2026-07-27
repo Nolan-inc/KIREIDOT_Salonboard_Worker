@@ -2689,6 +2689,15 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
 // 予定ブロックを探す (page.evaluate 用)。予定は reserveId を持たず一覧からも読めないため、
 // 登録前の冪等チェックと登録後の実在確認の両方でこの関数を使う。
 // 戻り値 blocks には対象スタッフ列の全予定を入れ、失敗診断 (何が実在するか) に使う。
+// SalonBoard の予定タイトル/メモ等のテキスト列は 4バイトUTF-8(BMP外=絵文字)を保存できず、
+// POST は 200 で受理されるが行が保存されない → verify が exact_schedule_not_found になる
+// (2026-07-27 WAO新宿 rimi「ソルティーモデル（はるなちゃん💕）」で20回連続失敗。絵文字入り
+// ブロックは全期間で 0/2 しか同期せず、絵文字なしは 307/364 同期)。SBへ送る前に astral 文字
+// (絵文字・異体字セレクタ等 BMP外)を除去して保存可能なタイトルにする。
+function stripAstral(s) {
+  return String(s == null ? '' : s).replace(/[\u{10000}-\u{10FFFF}]/gu, '');
+}
+
 function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
   // 敬称(さん/様等)と注釈(「（こぼ手入力）」等の括弧書き)を除いた固有名の核。
@@ -2798,8 +2807,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const endMM = String(endMin).padStart(2, '0');
 
   // タイトル = 理由(休憩/業務等)。メモにも理由を残す。
-  const title = (String(p.block_reason || '').trim() || '予定').slice(0, 30);
-  const memo = (String(p.block_reason || '').trim()).slice(0, 100);
+  const title = (stripAstral(String(p.block_reason || '').trim()) || '予定').slice(0, 30);
+  const memo = stripAstral(String(p.block_reason || '').trim()).slice(0, 100);
 
   // 対象日 (YYYYMMDD) と 表示用文字列 (YYYY年M月D日（曜）)。
   // フォームは date クエリ無しで開く=既定「今日」なので、対象日が違えば
@@ -3340,7 +3349,7 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   const startMin = when.hour * 60 + when.minute;
-  const title = String(p.block_reason || '').trim().slice(0, 30) || null;
+  const title = stripAstral(String(p.block_reason || '').trim()).slice(0, 30) || null;
   let staffExt = String(p.salonboard_staff_external_id || '').toUpperCase() || null;
   const staffName = String(p.staff_name || '').normalize('NFKC').replace(/\s+/g, '').trim() || null;
 
