@@ -2274,7 +2274,7 @@ async function handleJob(job: Job): Promise<void> {
             (
               pg: Page,
               o: Record<string, unknown>,
-            ) => Promise<{ rows?: unknown[] }>
+            ) => Promise<{ rows?: unknown[]; debug?: unknown }>
           >;
           const res = await sx[m.fn](page, {
             baseUrl,
@@ -2285,12 +2285,16 @@ async function handleJob(job: Job): Promise<void> {
             password: job.credentials.password,
           });
           const rows = (res?.rows ?? []) as unknown[];
+          const emptyDebug =
+            rows.length === 0 && res?.debug
+              ? ` debug=${JSON.stringify(res.debug).slice(0, 1500)}`
+              : "";
           await report({
             job_id: job.id,
             job_type: job.job_type,
             status: "succeeded",
             [m.key]: rows,
-            summary: `${job.job_type}: ${rows.length}件取得`,
+            summary: `${job.job_type}: ${rows.length}件取得${emptyDebug}`,
           } as unknown as CallbackBody);
           console.log(`[job] done  ${tag} (${job.job_type} ${rows.length}件)`);
         } catch (e) {

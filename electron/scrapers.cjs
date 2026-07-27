@@ -2165,7 +2165,32 @@ async function scrapeMenus(page, opts = {}) {
         duration_min: (f.sejyutsuAimTime || '').replace(/[^\d]/g, '') || null,
       });
     }
-    return { items, total: Object.keys(byIndex).length };
+    return {
+      items,
+      total: Object.keys(byIndex).length,
+      page: {
+        url: location.href,
+        title: document.title,
+        headings: Array.from(document.querySelectorAll('h1,h2'))
+          .map((el) => (el.textContent || '').trim())
+          .filter(Boolean)
+          .slice(0, 8),
+        forms: Array.from(document.querySelectorAll('form'))
+          .map((form) => form.getAttribute('action') || form.id || form.getAttribute('name') || '?')
+          .slice(0, 12),
+        menuLinks: Array.from(document.querySelectorAll('a[href]'))
+          .map((anchor) => ({
+            text: (anchor.textContent || '').replace(/\s+/g, ' ').trim(),
+            href: anchor.getAttribute('href') || '',
+          }))
+          .filter((link) => /メニュー|menu/i.test(`${link.text} ${link.href}`))
+          .slice(0, 20),
+        fieldNames: Array.from(document.querySelectorAll('input[name],textarea[name],select[name]'))
+          .map((el) => el.getAttribute('name'))
+          .filter(Boolean)
+          .slice(0, 40),
+      },
+    };
   });
 
   const rows = (raw.items ?? []).map((it) => ({
@@ -2176,7 +2201,14 @@ async function scrapeMenus(page, opts = {}) {
     duration_min: it.duration_min ? Number(it.duration_min) : null,
     is_active: true,
   }));
-  return { rows, debug: { itemsFound: rows.length, fieldsTotal: raw.total } };
+  return {
+    rows,
+    debug: {
+      itemsFound: rows.length,
+      fieldsTotal: raw.total,
+      ...(rows.length === 0 ? { page: raw.page } : {}),
+    },
+  };
 }
 
 // ----------------- クーポン一覧 (couponList) -----------------
