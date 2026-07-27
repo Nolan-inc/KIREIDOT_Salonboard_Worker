@@ -7742,6 +7742,8 @@ async function changeBookingViaForm(page, payload, opts = {}) {
             .replace(/[○×\s　]/g, '')
             .replace(/ベット/g, 'ベッド');
           const rows = Array.from(document.querySelectorAll('.jscEquipRow'));
+          let matched = null;
+          let anyAssigned = null;
           for (const row of rows) {
             const select = row.querySelector('select[name="equipIdList"], select.equipIdList');
             if (!select || !select.value) continue;
@@ -7750,26 +7752,50 @@ async function changeBookingViaForm(page, payload, opts = {}) {
             const assignId = String(
               row.querySelector('input[name="equipAssignIdList"]')?.value || '',
             ).trim();
+            // dummy は画面上で追加しただけの未保存行。SalonBoard発番の割当ID
+            // (通常予約=YE... / HotPepper(ネット)予約=BE...)を持つ行だけを永続化済みとみなす。
+            if (!/^(?:YE|BE)\d+$/i.test(assignId)) continue;
+            if (!anyAssigned) anyAssigned = { id: select.value, name, assignId };
             const idMatches = wantedId && select.value === wantedId;
             const nameMatches = wantedName && norm(wantedName) === name;
-            // dummy は画面上で追加しただけの未保存行。SalonBoard発番のYE...だけを
-            // 永続化済みの設備割当として扱い、表示上の選択だけで成功判定しない。
-            if ((idMatches || nameMatches) && /^YE\d+$/i.test(assignId)) {
-              return { id: select.value, name, assignId };
+            if (idMatches || nameMatches) {
+              matched = { id: select.value, name, assignId };
+              break;
             }
           }
-          return null;
+          return { matched, anyAssigned };
         }, {
           wantedId: wantedEquipExtId,
           wantedName: expectedPersistedEquipName,
         }).catch(() => null);
-        if (persistedEquipmentAssignment) {
-          actualEquipName = persistedEquipmentAssignment.name || expectedPersistedEquipName;
+        if (persistedEquipmentAssignment?.matched) {
+          actualEquipName = persistedEquipmentAssignment.matched.name || expectedPersistedEquipName;
         }
         break;
       }
     }
-    if (!actualEquipName || normEquip(actualEquipName) !== normEquip(expectedPersistedEquipName)) {
+    const equipMatched = actualEquipName
+      && normEquip(actualEquipName) === normEquip(expectedPersistedEquipName);
+    if (!equipMatched) {
+      // ★希望ベッドが取れないケースの根治(2026-07-27 新宿三丁目 kaede担当変更で実害):
+      //   担当者/時刻の変更は保存されているのに、KD指定ベッドをSBがサーバ側で拒否して
+      //   (その時間帯に埋まっている等)元のベッドへ戻すため、変更全体が失敗扱いになっていた。
+      //   ベッドは受付を止める設備割当で、SBが「有効な別ベッド」を維持していれば予約は壊れて
+      //   おらず担当者変更の目的は達成済み。よってSBが有効なベッド(YE/BE割当)を保持している
+      //   場合はソフト成功(希望ベッド不達を記録)にして reassign を通す。ベッドが1つも無い
+      //   (未割り当て)ときだけ従来どおり失敗にする。
+      const altBed = persistedEquipmentAssignment?.anyAssigned
+        || (actualEquipName ? { name: actualEquipName } : null);
+      if (altBed && altBed.name) {
+        console.log(
+          `[change] ${reserveId} 設備=希望「${expectedPersistedEquipName}」不達→SB維持「${altBed.name}」。`
+          + '担当者/時刻変更は保存済みのため成功扱い(希望ベッドはSB側で空き無し等)。',
+        );
+        return {
+          status: 'ok',
+          equipmentFallback: { expected: expectedPersistedEquipName, actual: altBed.name },
+        };
+      }
       const verifyCap = await captureScrapeDebug(page, 'change', `equipment_verify_failed_${reserveId}`, {
         diagnostics: {
           reserveId,
@@ -7784,7 +7810,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         ? `, 送信設備=${JSON.stringify(equipmentSubmitTrace)}`
         : '';
       return fail(
-        `設備の保存をSalonBoard予約詳細で確認できませんでした (期待=${expectedPersistedEquipName}, 実際=${actualEquipName || '未割り当て'}${equipmentTraceText}${verifyCap ? `, capture=${verifyCap}` : ''})`,
+        `設備の保存をSalonBoard予約詳細で確認できませんでした (期待=${expectedPersistedEquipName}, 実際=未割り当て${equipmentTraceText}${verifyCap ? `, capture=${verifyCap}` : ''})`,
         'UNKNOWN_ERROR',
         false,
       );
