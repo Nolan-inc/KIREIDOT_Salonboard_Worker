@@ -98,7 +98,7 @@
           ]
         }
       ],
-      "identity": "Developer ID Application: HIKARU UEDA (7FMVQPBJKA)",
+      "identity": "HIKARU UEDA (7FMVQPBJKA)",
       "gatekeeperAssess": false,
       "hardenedRuntime": true,
       "entitlements": "build-resources/entitlements.mac.plist",
