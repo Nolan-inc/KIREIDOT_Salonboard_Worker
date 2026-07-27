@@ -2705,14 +2705,23 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const blocks = [];
   let found = false;
   for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
-    if (el.classList.contains('isDayOff')) continue;
+    const isDayOff = el.classList.contains('isDayOff');
     const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
     const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
     if (!m) continue;
     const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
     const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
     const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
-    blocks.push({ start, end, title: actualTitle });
+    blocks.push({ start, end, title: actualTitle, isDayOff });
+    // SalonBoard の休日は実DOM上 0:00-29:00 の予定として表現される。
+    // KIREIDOT側の「移動」「他店舗出勤」等を追加しようとすると
+    // 「別のシフトまたは予定が登録されています」とPOSTを破棄するが、
+    // 予約受付を止めるという同期目的は休日で既に達成済みである。
+    // 対象区間を休日が包含していれば、タイトル不一致でも冪等成功とする。
+    if (isDayOff && start <= startTotal && end >= endTotal) {
+      found = true;
+      continue;
+    }
     // SalonBoard は同じタイトルの連続・隣接予定を1つの表示ブロックへ結合する。
     // そのため登録した区間が既存の「予定あり」に包含された場合も実在している。
     // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した

@@ -132,6 +132,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /isDayOff && start <= startTotal && end >= endTotal[\s\S]{0,120}found = true/,
+    'a SalonBoard day-off covering the requested block must be idempotent success',
+  );
+  assert.match(
+    source,
     /extReserveDetail\/\?reserveId=/,
     'booking changes must fall back through the reservation detail page',
   );
