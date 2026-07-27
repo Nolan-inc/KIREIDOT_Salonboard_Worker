@@ -35,6 +35,7 @@ const {
   scrapeStaff,
   scrapeEquipment,
   scrapeMenus,
+  scrapeStyles,
   scrapeCoupons,
   scrapeBlogs,
   scrapeReviews,
@@ -340,19 +341,51 @@ async function acquireSalonboardPage(conn) {
   // 1) キャッシュ済みの作業タブが生きていれば再利用
   const cached = conn && conn.workerPage;
   if (cached && !(cached.isClosed && cached.isClosed())) {
+    // ★キャッシュを使う場合でも、余分なタブが増えていたら掃除する
+    //   (セッション切れ連発時に各ジョブが新タブを開いて放置し「タブが何十個も開く」
+    //    症状の対策)。作業タブ以外の salonboard/about:blank タブは閉じる。
+    await pruneExtraTabs(context, cached);
     return { page: cached, createdNewTab: false };
   }
-  // 2) 起動時の about:blank タブがあれば作業タブとして採用
+  // 2) 既存タブ (salonboard or about:blank) を作業タブとして採用。
+  //    以前は about:blank だけを探していたため、タブの URL が salonboard に変わると
+  //    再利用できず毎回 newPage して増え続けていた。salonboard タブも再利用対象にする。
   let page = null;
   try {
-    page = (context.pages ? context.pages() : []).find((p) => {
-      try { return p.url() === 'about:blank'; } catch (_e) { return false; }
-    }) || null;
+    const pages = context.pages ? context.pages() : [];
+    // salonboard を優先、無ければ about:blank、無ければ最初の生きたタブ。
+    page =
+      pages.find((p) => { try { return /salonboard\.com/i.test(p.url()); } catch (_e) { return false; } }) ||
+      pages.find((p) => { try { return p.url() === 'about:blank'; } catch (_e) { return false; } }) ||
+      pages.find((p) => { try { return !(p.isClosed && p.isClosed()); } catch (_e) { return false; } }) ||
+      null;
   } catch (_e) { /* noop */ }
   // 3) 無ければ新規タブ
   if (!page) page = await context.newPage();
   if (conn && conn.context) conn.workerPage = page;
+  // 採用した作業タブ以外の余分なタブを掃除する。
+  await pruneExtraTabs(context, page);
   return { page, createdNewTab: false };
+}
+
+/**
+ * 作業タブ (keep) 以外の余分なタブを閉じる。CDP 常駐 Chrome にジョブごとの
+ * ログイン画面タブが溜まって「タブが何十個も開く」のを防ぐ。keep は絶対に閉じない。
+ * 常駐 Chrome を壊さないよう、閉じるのはタブ (page) だけ。エラーは握り潰す。
+ */
+async function pruneExtraTabs(context, keep) {
+  try {
+    const pages = context.pages ? context.pages() : [];
+    // 生きているタブが 1 枚だけなら何もしない。
+    if (pages.length <= 1) return;
+    for (const p of pages) {
+      if (p === keep) continue;
+      try {
+        if (p.isClosed && p.isClosed()) continue;
+        await p.close({ runBeforeUnload: false });
+      } catch (_e) { /* 閉じられないタブは無視 */ }
+    }
+  } catch (_e) { /* noop */ }
 }
 
 /**
@@ -779,6 +812,97 @@ function tryAcquireShopLock(shopId, workerLabel) {
 }
 function releaseShopLock(shopId) {
   inProgressShops.delete(shopId);
+}
+
+// ─────────────────────────────────────────────
+// 店舗単位「ログイン・クールダウン」(画像認証/ログイン制限の連打抑止)。
+//
+// SalonBoard(Akamai)は同一ログインID/IPへログインが短時間に殺到すると、
+// 「旗を飛行機の後ろにドラッグ」等の画像認証を出してログインを拒否する。
+// この状態でジョブごとに tryLogin を叩き続けると、Akamai 側の制限が延命され
+// 画像認証が出続ける (docs: 「doLogin 乱発こそがフラグの主因」)。
+//
+// 対策: 画像認証/ログイン失敗を検知したら、その店舗への「ログイン試行」を一定時間
+// 完全停止する。クールダウン中でも「既にログイン済みのセッションを使う」ジョブは
+// 通す (isLoggedIn=logged_in なら tryLogin をスキップするため)。ログインが必要な
+// のに切れている場合だけ、ジョブを retryable で戻して連打を止める。
+//
+// fetch 経路は markCredentialError で Admin 側に 6h ブロックを立てて claim を止める
+// が、書込(push/cancel, CDP方式)経路にはこの店舗ブロックが無く、captcha を見ても
+// 次のジョブが即ログインを叩いていた。ここを塞ぐのが本修正の主眼。
+const shopLoginCooldownUntil = new Map();
+const CAPTCHA_COOLDOWN_MS = 30 * 60_000; // 画像認証検知: 30 分ログイン停止
+const LOGIN_FAIL_COOLDOWN_MS = 10 * 60_000; // 通常ログイン失敗: 10 分
+
+/** 画像認証/ログイン失敗を検知したら、その店舗のログイン試行を一定時間止める。 */
+function noteLoginBlocked(shopId, kind /* 'captcha' | 'login_failed' */) {
+  if (!shopId) return;
+  const ms = kind === 'captcha' ? CAPTCHA_COOLDOWN_MS : LOGIN_FAIL_COOLDOWN_MS;
+  const until = Date.now() + ms;
+  const prev = shopLoginCooldownUntil.get(shopId) ?? 0;
+  // 既により長いクールダウンが張られていれば延長しない (captcha 30m を login_fail 10m で縮めない)。
+  if (until > prev) shopLoginCooldownUntil.set(shopId, until);
+  log(
+    `ログイン・クールダウン: shop=${String(shopId).slice(0, 8)} を ${Math.round(ms / 60_000)} 分ログイン停止 (${kind})`,
+    'warn',
+  );
+}
+
+/** ログイン成功が確認できたらクールダウンを解除する。 */
+function clearLoginCooldown(shopId) {
+  if (shopId) shopLoginCooldownUntil.delete(shopId);
+}
+
+/** この店舗が今ログイン・クールダウン中か。中なら残り ms を返す (0 = 解除済み)。 */
+function loginCooldownRemainingMs(shopId) {
+  if (!shopId) return 0;
+  const until = shopLoginCooldownUntil.get(shopId) ?? 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) {
+    shopLoginCooldownUntil.delete(shopId);
+    return 0;
+  }
+  return remaining;
+}
+
+// ─────────────────────────────────────────────
+// グローバル・ログイン間隔制御 (一斉ログインの分散)。
+//
+// SalonBoard の取得 (fetch_bookings) は 1 時間ごとに全店分がまとめて投入される。
+// その時点でセッションが切れている店舗が多いと、全店が「ほぼ同時刻・同一IP」で
+// 一斉にログインを叩く → Akamai が「不審」と判断し画像認証を出す。VPN で IP を
+// 変えても次の正時にまた一斉ログインするため 1 時間周期で再発する。
+//
+// 対策: worker 全体でログインの実行を直列化し、前回ログインから最低 LOGIN_MIN_GAP_MS
+// 空ける。これで「一斉」を時間方向にばらして、Akamai から見た単位時間あたりの
+// ログイン数を下げる (人間の複数店舗運用に近づける)。
+let _lastLoginAt = 0;
+let _loginGate = Promise.resolve();
+const LOGIN_MIN_GAP_MS = Number(process.env.SB_LOGIN_MIN_GAP_MS) || 45_000; // 店舗間で最低45秒空ける
+
+/**
+ * ログイン直前に呼ぶ。前回ログインから LOGIN_MIN_GAP_MS 経つまで待機する。
+ * worker 全体で直列化するため、_loginGate に自分をチェーンする。
+ * signal: 中断チェック用の関数 (true を返したら待機を打ち切る)。
+ */
+async function acquireLoginSlot(label, shouldAbort) {
+  // 直前の待機者が終わるまで待ってから自分の番に入る (直列化)。
+  const prev = _loginGate;
+  let release;
+  _loginGate = new Promise((r) => { release = r; });
+  try {
+    await prev;
+    for (;;) {
+      const wait = _lastLoginAt + LOGIN_MIN_GAP_MS - Date.now();
+      if (wait <= 0) break;
+      if (typeof shouldAbort === 'function' && shouldAbort()) break;
+      // 長い待機は細かく刻んで中断可能にする。
+      await new Promise((r) => setTimeout(r, Math.min(wait, 3_000)));
+    }
+    _lastLoginAt = Date.now();
+  } finally {
+    release();
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1614,17 +1738,33 @@ async function keepAliveShop(target) {
 
     const state = await isLoggedIn(page, creds.baseUrl, genre);
     if (state === 'logged_in') {
+      clearLoginCooldown(shopId); // 生きているのでクールダウンは解除。
+      return { shopId, result: 'alive' };
+    }
+    if (state === 'transient_error') {
+      // 一時エラー画面 (KPCL010V01)。セッションは生きているので延命的には「継続」扱い。
+      // 再ログインしない (ここは延命が目的で、ジョブ再試行は各ジョブ側が行う)。
+      clearLoginCooldown(shopId);
       return { shopId, result: 'alive' };
     }
     if (state === 'captcha') {
-      // captcha はここでは触らない (再ログイン連打しない)。取得側の処理に委ねる。
+      // captcha はここでは触らない (再ログイン連打しない)。この店舗のログインを止める。
+      noteLoginBlocked(shopId, 'captcha');
       return { shopId, result: 'captcha' };
     }
     // needs_login / unknown: 専用Chrome内で1回だけ再ログイン。
+    // ただしログイン・クールダウン中の店舗は延命の再ログインもしない (連打を止めるのが目的)。
+    const cooldownMs = loginCooldownRemainingMs(shopId);
+    if (cooldownMs > 0) {
+      return { shopId, result: 'cooldown' };
+    }
     const r = await tryLogin(page, { ...creds, slow: true });
     if (r.status === 'ok') {
+      clearLoginCooldown(shopId);
       return { shopId, result: 'relogin' };
     }
+    // 延命の再ログインも captcha/失敗ならクールダウンを立てる。
+    noteLoginBlocked(shopId, r.status === 'captcha' ? 'captcha' : 'login_failed');
     return { shopId, result: `relogin_failed:${r.status}` };
   } catch (e) {
     return { shopId, error: e?.message ?? String(e) };
@@ -1639,7 +1779,12 @@ async function keepAliveShop(target) {
 async function keepSessionsAlive() {
   if (!supabase || keepAliveRunning) return;
   if (!workerActive) return; // 待機端末は触らない (後勝ち競合を避ける)
-  if (running || pushJobsRunning) return; // 取得/書込中はブラウザを立てない
+  // ★取得/書込中でも keepalive を止めない (2026-07-22): CDP 方式では店舗ごとに別 Chrome
+  //   (別ポート) なので、処理中の店舗は keepAliveShop 内の tryAcquireShopLock /
+  //   tryAcquireChromePortLock で個別に弾かれ、それ以外の店舗はセッションを延命できる。
+  //   従来は running || pushJobsRunning で全停止していたため、1 時間ごとの取得や大量の
+  //   書込処理が続く間ずっと延命できず、セッションがアイドルタイムアウトで切れて
+  //   次の取得で全店一斉再ログイン → 画像認証、を招いていた。全停止はやめ、個別ロックに委ねる。
   if (!isWithinKeepAliveHours()) return; // 夜間は停止
   if (!buildDeviceHeaders()) return; // device 未設定
 
@@ -1656,8 +1801,10 @@ async function keepSessionsAlive() {
     let alive = 0;
     let relogin = 0;
     for (const t of targets) {
-      // ループ中に取得/書込が始まったら中断 (優先度を譲る)。
-      if (running || pushJobsRunning || !workerActive) break;
+      // 待機端末になったら中断。取得/書込中でも続行する: 処理中の店舗は keepAliveShop 内の
+      // 店舗/ポートロックで個別に弾かれ、それ以外の店舗のセッション延命は止めない
+      // (全停止するとセッションが切れて一斉再ログイン→画像認証を招くため)。
+      if (!workerActive) break;
       const res = await keepAliveShop(t).catch((e) => ({ error: e?.message ?? e }));
       if (res?.result === 'alive') alive++;
       else if (res?.result === 'relogin') relogin++;
@@ -2214,6 +2361,7 @@ async function processShop(target, channels, runId, opts = {}) {
         if (sessionState === 'logged_in') {
           needsLogin = false;
           sessionReused = true;
+          clearLoginCooldown(shopId); // 生きているのでクールダウン解除。
           emit('shop:progress', {
             shopId,
             step: 'login',
@@ -2221,6 +2369,7 @@ async function processShop(target, channels, runId, opts = {}) {
           });
         } else if (sessionState === 'captcha') {
           // captcha 検知 → セッション破棄 + 6h ブロック (再ログイン連打しない)
+          noteLoginBlocked(shopId, 'captcha');
           clearStorageState(ssPath);
           const blockedUntil = blockedUntilForCode('captcha_detected');
           await markCredentialError(
@@ -2238,6 +2387,18 @@ async function processShop(target, channels, runId, opts = {}) {
           });
           await recordShopRun(runId, shopId, false, null, 'captcha_detected', counts);
           return { ok: false, errorCode: 'captcha_detected' };
+        } else if (sessionState === 'transient_error') {
+          // 「エラーが発生しました。再度操作しなおしてください。」(KPCL010V01)。
+          // ログインは生きている一時エラー → 再ログイン/ブロックはせず、この店舗の取得を
+          // 一時エラーで終える (次の取得サイクルで自然に再試行される。連打しない)。
+          emit('shop:end', {
+            shopId,
+            ok: false,
+            error: 'SalonBoard で一時エラー (再度操作しなおしてください) を検知。次サイクルで再試行します',
+            errorCode: 'transient_error',
+          });
+          await recordShopRun(runId, shopId, false, null, 'transient_error', counts);
+          return { ok: false, errorCode: 'transient_error' };
         } else if (sessionState === 'needs_login') {
           // セッション切れ → 1 回だけ再ログイン (連打しない)
           sessionExpiredFlag = true;
@@ -2251,10 +2412,26 @@ async function processShop(target, channels, runId, opts = {}) {
     // 2) 必要なときだけログイン (session_expired のときも合計 1 回)
     let loginAttempted = false;
     if (needsLogin) {
+      // ★ログインが必要だが、この店舗はログイン・クールダウン中 → 再ログインを見送る。
+      //   連打で Akamai 制限を延命しないためのガード (blocked_until が別途 claim を抑えるが、
+      //   ローカル側でも二重に止める)。
+      const cooldownMs = loginCooldownRemainingMs(shopId);
+      if (cooldownMs > 0) {
+        const mins = Math.ceil(cooldownMs / 60_000);
+        emit('shop:end', {
+          shopId,
+          ok: false,
+          error: `ログイン・クールダウン中 (残り約${mins}分) — 再ログインを見送りました`,
+          errorCode: 'login_cooldown',
+        });
+        await recordShopRun(runId, shopId, false, null, 'login_cooldown', counts);
+        return { ok: false, errorCode: 'login_cooldown' };
+      }
       loginAttempted = true;
       // 取得時も bot 検知/reCAPTCHA を避けるため、人間らしくゆっくり(1文字ずつ)ログインする。
       const r = await tryLogin(page, { ...creds, slow: true });
       if (r.status === 'captcha') {
+        noteLoginBlocked(shopId, 'captcha');
         clearStorageState(ssPath);
         const blockedUntil = blockedUntilForCode('captcha_detected');
         await markCredentialError(
@@ -2279,6 +2456,7 @@ async function processShop(target, channels, runId, opts = {}) {
         const code = sessionExpiredFlag
           ? 'login_required'
           : classifyError(new Error(r.reason ?? 'login_failed')).code;
+        noteLoginBlocked(shopId, 'login_failed');
         clearStorageState(ssPath);
         const blockedUntil = blockedUntilForCode(code);
         await markCredentialError(shopId, r.reason ?? 'login_failed', blockedUntil, code);
@@ -2292,6 +2470,7 @@ async function processShop(target, channels, runId, opts = {}) {
         await recordShopRun(runId, shopId, false, null, r.reason ?? 'login_failed', counts);
         return { ok: false, errorCode: code };
       }
+      clearLoginCooldown(shopId); // ログイン成功 → クールダウン解除。
       emit('shop:progress', { shopId, step: 'login', msg: 'ログイン成功' });
       // 成功 → storageState を保存
       await saveStorageState(ctx, ssPath);
@@ -2886,19 +3065,35 @@ async function isLoggedIn(page, baseUrl, genre) {
       );
       const errorTitle = /エラー|ERROR/i.test(title);
       const expiredText =
-        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|再ログイン|セッション|タイムアウト|ログインしてください|操作されなかった|ログインTOP画面より再度やり直して|エラーが発生しました/.test(
+        /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|再ログイン|セッション|タイムアウト|ログインしてください|操作されなかった|ログインTOP画面より再度やり直して/.test(
           body,
         );
+      // 一時的な操作エラー (ログインは生きているが処理に失敗)。「エラーが発生しました。
+      // 再度操作しなおしてください。」(KPCL010V01 等) が該当。再操作すれば直るので、
+      // 再ログインではなく「ジョブそのものを再試行」させたい (transient)。
+      const transientText = /エラーが発生しました。?再度操作(を)?しなおし|再度操作しなおして/.test(body);
       // SalonBoard のセッション/認証エラーコード (KPCL018V01 等) を検出。
       // 「KPCL018V01」「KPCL017V01」などが本文に出たら未ログイン扱いにする。
-      const errorCode = /KPCL\d{3}V\d{2}/.test(body);
+      // ただし KPCL010V01 (一時的な操作エラー) はセッション有効なので除外する。
+      const errorCode = /KPCL\d{3}V\d{2}/.test(body) && !/KPCL010V01/.test(body);
+      // グローバルナビ (予約管理/掲載管理/…) が出ている = ログインは生きている、の強い手がかり。
+      // KPCL010V01 の画面はこのナビが完全表示される (セッション切れ画面には無い)。
+      const hasGlobalNav =
+        /予約管理/.test(body) && /掲載管理/.test(body) && /お客様管理/.test(body);
       // 「予約一覧/管理画面に居る」と言えるための前向きな手がかり (どれも無ければ不確実)
       const looksLikeApp =
         !!document.getElementById('resultList') ||
         document.querySelectorAll('input, select, textarea').length > 0 ||
         /予約|スタッフ|シフト|メニュー|売上|店舗/.test(body);
-      return { errorTitle, expiredText, errorCode, hasLoginLink, looksLikeApp };
+      return { errorTitle, expiredText, transientText, errorCode, hasLoginLink, hasGlobalNav, looksLikeApp };
     });
+    // ★一時的な操作エラー (KPCL010V01 等): ログインは生きているので再ログインしない。
+    //   ジョブ側で「再度実行しなおす」ために transient_error を返す。
+    //   グローバルナビが出ている (=確実にログイン済み) ときだけ transient と判定し、
+    //   ナビが無い曖昧なエラー画面は従来どおりセッション切れ側に倒す (安全側)。
+    if (expired.transientText && expired.hasGlobalNav && !expired.expiredText) {
+      return 'transient_error';
+    }
     // KPCL系エラーコード / セッション切れ文言 / (エラー画面+ログイン導線) なら再ログイン。
     if (expired.errorCode || expired.expiredText || (expired.errorTitle && expired.hasLoginLink)) {
       return 'needs_login';
@@ -2908,6 +3103,29 @@ async function isLoggedIn(page, baseUrl, genre) {
     return 'logged_in';
   }
   return 'unknown';
+}
+
+/**
+ * 現在のページが SalonBoard の一時エラー画面
+ * (「エラーが発生しました。再度操作しなおしてください。」/ KPCL010V01) かを判定する。
+ * ページ遷移はせず、今開いている DOM だけを見る軽量チェック。操作の途中/送信後に
+ * この画面へ飛ばされたケース (isLoggedIn の landing チェックでは拾えない) を、
+ * ジョブの失敗ハンドラ側で検出して「再試行」に回すために使う。
+ * セッションは生きている (グローバルナビが出る) ので再ログインはしない。
+ */
+async function isTransientErrorPage(page) {
+  try {
+    return await page.evaluate(() => {
+      const body = (document.body?.innerText || '').replace(/\s+/g, '');
+      const transient = /エラーが発生しました。?再度操作(を)?しなおし|再度操作しなおして/.test(body)
+        || /KPCL010V01/.test(body);
+      // セッション切れ文言 (再ログインが必要な側) が同時に出ているときは transient としない。
+      const expired = /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|操作されなかった/.test(body);
+      return transient && !expired;
+    });
+  } catch (_e) {
+    return false;
+  }
 }
 
 function safeUrl(rel, base) {
@@ -3047,6 +3265,12 @@ async function tryLogin(page, c) {
       return false;
     }
   };
+
+  // ★一斉ログインの分散: 実ログインを叩く前に worker 全体のログインスロットを取得し、
+  //   直前のログインから最低 LOGIN_MIN_GAP_MS 空ける。1 時間ごとの全店一斉取得で
+  //   全店が同時刻にログインを叩き Akamai に画像認証を出される問題への対策。
+  //   (既にログイン済みでフォームが出ないケースはスロット取得後すぐ抜けるので実害小。)
+  await acquireLoginSlot('tryLogin', () => (typeof c.shouldAbort === 'function' ? c.shouldAbort() : false));
 
   const MAX_ATTEMPTS = 2;
   let formVisible = false;
@@ -3338,9 +3562,9 @@ async function sendMenus(shopId, rows) {
  */
 async function sendStyles(shopId, rows) {
   if (!rows || rows.length === 0) return 0;
+  // 取得件数の上限は設けない (掲載中スタイルを全件取り込む)。
   const valid = rows
     .filter((r) => r.external_id && r.name)
-    .slice(0, 100)
     .map((r) => ({
       external_id: r.external_id,
       name: r.name,
@@ -3349,21 +3573,36 @@ async function sendStyles(shopId, rows) {
       length: r.length ?? null,
       stylist_name: r.stylist_name ?? null,
       coupon_external_id: r.coupon_external_id ?? null,
+      coupon_name: r.coupon_name ?? null,
+      feature: r.feature ?? null,
+      // 掲載No。ホットペッパー サロンレポートの閲覧数ランキングとの突き合わせに使う。
+      sort_no: r.sort_no ?? null,
+      is_published: r.is_published ?? null,
+      is_pickup: r.is_pickup ?? null,
+      style_updated_at: r.style_updated_at ?? null,
     }));
   if (valid.length === 0) return 0;
-  const { error } = await supabase.rpc('salonboard_bulk_upsert_styles', {
-    p_shop_id: shopId,
-    p_rows: valid,
-  });
-  if (error) {
-    emit('log', {
-      level: 'error',
-      msg: `bulk_upsert_styles: ${error.message}`,
-      at: new Date().toISOString(),
+
+  // 件数が多い店舗があるので分割して送る (1リクエストの JSON が大きくなりすぎないように)。
+  const CHUNK = 200;
+  let sent = 0;
+  for (let i = 0; i < valid.length; i += CHUNK) {
+    const chunk = valid.slice(i, i + CHUNK);
+    const { error } = await supabase.rpc('salonboard_bulk_upsert_styles', {
+      p_shop_id: shopId,
+      p_rows: chunk,
     });
-    return 0;
+    if (error) {
+      emit('log', {
+        level: 'error',
+        msg: `bulk_upsert_styles: ${error.message}`,
+        at: new Date().toISOString(),
+      });
+      return sent;
+    }
+    sent += chunk.length;
   }
-  return valid.length;
+  return sent;
 }
 
 /**
@@ -3384,6 +3623,8 @@ async function sendPhotoGalleries(shopId, rows) {
       image_external_id: r.image_external_id ?? null,
       genre_code: r.genre_code ?? null,
       is_published: r.is_published !== false,
+      // 掲載No。ホットペッパー サロンレポートの閲覧数ランキングとの突き合わせに使う。
+      sort_no: r.sort_no ?? null,
     }));
   if (valid.length === 0) return 0;
   const { error } = await supabase.rpc('salonboard_bulk_upsert_photo_galleries', {
@@ -3788,6 +4029,8 @@ async function runPushJobs({ showBrowser } = {}) {
       const jobGenre = job.genre === 'hair' ? 'hair' : 'esthetic';
       let auth = await isLoggedIn(page, baseUrl, jobGenre);
       if (auth === 'captcha') {
+        // 画像認証を検知 → この店舗のログイン試行を 30 分停止 (連打で Akamai 制限を延命しない)。
+        noteLoginBlocked(job.shop_id, 'captcha');
         await postCallback({
           job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id,
           error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at landing', manual_required: true,
@@ -3795,21 +4038,57 @@ async function runPushJobs({ showBrowser } = {}) {
         await cleanupBrowser();
         return;
       }
+      if (auth === 'transient_error') {
+        // 「エラーが発生しました。再度操作しなおしてください。」(KPCL010V01)。
+        // ログインは生きている一時エラー → 再ログインせず、ジョブを再試行に回す。
+        emit('log', { level: 'warn', msg: `[${tag}] ⚠ 一時エラー画面 (再度操作しなおしてください) を検知 → ジョブを再試行`, at: new Date().toISOString() });
+        await postCallback({
+          job_id: job.id, job_type: job.job_type, status: 'retryable_failed',
+          booking_id: payload.booking_id, content_post_id: payload.content_post_id ?? null,
+          error_code: 'SB_TRANSIENT_ERROR',
+          error: 'SalonBoard で一時エラー (エラーが発生しました。再度操作しなおしてください。) を検知しました。自動で再試行します。',
+        });
+        await cleanupBrowser();
+        return;
+      }
       if (auth !== 'logged_in') {
+        // ★ログインが必要だが、この店舗はログイン・クールダウン中 → tryLogin を叩かず
+        //   retryable で戻す。既存セッションが生きていれば上の isLoggedIn=logged_in で
+        //   ここには来ないので、「ログイン済みジョブ」は止めず「再ログイン連打」だけ止まる。
+        const cooldownMs = loginCooldownRemainingMs(job.shop_id);
+        if (cooldownMs > 0) {
+          const mins = Math.ceil(cooldownMs / 60_000);
+          emit('log', { level: 'warn', msg: `[${tag}] ⏸ ログイン・クールダウン中 (残り約${mins}分) — 再ログインを見送り retry へ`, at: new Date().toISOString() });
+          await postCallback({
+            job_id: job.id, job_type: job.job_type, status: 'retryable_failed',
+            booking_id: payload.booking_id, content_post_id: payload.content_post_id ?? null,
+            error_code: 'LOGIN_COOLDOWN',
+            error: `画像認証/ログイン制限を検知したため、この店舗のログイン試行をクールダウン中(残り約${mins}分)。時間をおいて自動再試行します。`,
+          });
+          await cleanupBrowser();
+          return;
+        }
         // 書き込み(push_booking)時もゆっくりログイン (bot 検知回避)。
         const lr = await tryLogin(page, { baseUrl: new URL('/login/', baseUrl).toString(), loginId: creds.login_id, password: creds.password, slow: true });
         if (lr.status === 'captcha') {
+          noteLoginBlocked(job.shop_id, 'captcha');
           await postCallback({ job_id: job.id, status: 'captcha_detected', booking_id: payload.booking_id, error_code: 'RECAPTCHA_REQUIRED', error: 'captcha at login', manual_required: true });
           await cleanupBrowser();
           return;
         }
         if (lr.status === 'failed') {
+          noteLoginBlocked(job.shop_id, 'login_failed');
           await postCallback({ job_id: job.id, status: 'login_required', booking_id: payload.booking_id, error_code: 'LOGIN_FAILED', error: lr.reason || 'login failed', manual_required: true });
           await cleanupBrowser();
           return;
         }
+        // ログイン成功 → この店舗のクールダウンを解除。
+        clearLoginCooldown(job.shop_id);
         // CDP 接続 (既存 Chrome) では Cookie/セッションは Chrome 自身が保持するため、
         // storageState を別ファイルに保存/注入しない (既存セッションを壊さない)。
+      } else {
+        // 既存セッションで通った → クールダウンは解除してよい。
+        clearLoginCooldown(job.shop_id);
       }
 
       // グループ店舗(1ログイン複数サロン): /(CNC|KLP)/groupTop/ に着地したら対象サロンを選択。
@@ -3857,6 +4136,8 @@ async function runPushJobs({ showBrowser } = {}) {
       const isFetchStaff = job.job_type === 'fetch_staff';
       const isFetchEquipment = job.job_type === 'fetch_equipment';
       const isFetchReviews = job.job_type === 'fetch_reviews';
+      // Admin フォトギャラリー画面の「スタイル写真を取得」ボタン。
+      const isFetchStyle = job.job_type === 'fetch_style';
       const isCancel = job.job_type === 'cancel_booking';
       // create完了前に予約日時/担当が更新されると、旧DB trigger が action=update を
       // 追加することがある。external_booking_id が無い予約はSB上の変更対象を一意に
@@ -4070,6 +4351,57 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🔴 ${staffLabel}取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
         }
+      } else if (isFetchStyle) {
+        // ---- スタイル一覧取得 (Admin のフォトギャラリー「スタイル写真を取得」ボタン) ----
+        // 通常の同期 (channels=['menus']) と同じ scrapeStyles → sendStyles を使うが、
+        // Admin から手動でジョブとして起動できるようにした経路。
+        // 掲載中スタイルを全件取得する (取得件数の上限なし)。
+        if (jobGenre !== 'hair') {
+          // エステ等にスタイル一覧は無い (フォトギャラリーが対応機能)。
+          await postCallback({
+            job_id: job.id, job_type: 'fetch_style', status: 'succeeded',
+            summary: '美容室以外はスタイル一覧が無いためスキップしました',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ スタイル取得スキップ (美容室以外)`, at: new Date().toISOString() });
+        } else {
+          try {
+            const { rows, debug } = await scrapeStyles(page, {
+              salonId: creds.salon_id ?? null,
+              shopName: job.shop_name ?? null,
+            });
+            const sent = await sendStyles(job.shop_id, rows);
+            if (sent === 0) {
+              const found = debug?.itemsFound ?? (Array.isArray(rows) ? rows.length : 0);
+              await postCallback({
+                job_id: job.id, job_type: 'fetch_style', status: 'manual_required',
+                error_code: 'STYLE_SAVE_FAILED',
+                error: `スタイルを保存できませんでした (読取${found}件)。SalonBoardのログイン状態や掲載スタイルの有無を確認してください。`,
+                manual_required: true,
+              });
+              emit('log', { level: 'warn', msg: `[${tag}] 🟡 スタイル保存0件 (読取${found}件)`, at: new Date().toISOString() });
+            } else {
+              await postCallback({
+                job_id: job.id, job_type: 'fetch_style', status: 'succeeded',
+                summary: `スタイル ${sent} 件取得`,
+              });
+              emit('log', {
+                level: 'info',
+                msg: `[${tag}] ✅ スタイル ${sent} 件取得 (${debug?.pagesScanned ?? '?'}ページ / 担当欠落${debug?.missingStylist ?? 0}件)`,
+                at: new Date().toISOString(),
+              });
+            }
+          } catch (e) {
+            const isCaptcha = e?.code === 'RECAPTCHA_REQUIRED';
+            const noRetry = isCaptcha || exhausted;
+            await postCallback({
+              job_id: job.id, job_type: 'fetch_style',
+              status: isCaptcha ? 'captcha_detected' : noRetry ? 'manual_required' : 'retryable_failed',
+              error_code: e?.code || 'UNKNOWN_ERROR', error: `${e?.message ?? e}`.slice(0, 500),
+              manual_required: noRetry,
+            });
+            emit('log', { level: 'warn', msg: `[${tag}] 🔴 スタイル取得失敗: ${e?.message ?? e}`, at: new Date().toISOString() });
+          }
+        }
       } else if (isFetchEquipment && jobGenre === 'hair') {
         // 美容室(hair)の SalonBoard には設備設定が存在しない (スタイリストベース)。
         // エステ用 /CNK/set/equipList/ へ飛ぶと失敗するためジョブは成功扱いでスキップ。
@@ -4219,13 +4551,17 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 キャンセル未確定 (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
+          const isTransient = await isTransientErrorPage(page).catch(() => false);
+          const toManual = !isTransient && shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'cancel_booking',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
-            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason, manual_required: toManual,
+            booking_id: payload.booking_id,
+            error_code: isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode,
+            error: isTransient ? 'SalonBoard で一時エラー (再度操作しなおしてください) を検知。自動で再試行します。' : result.reason,
+            manual_required: toManual,
           });
-          emit('log', { level: 'warn', msg: `[${tag}] 🔴 キャンセル失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 キャンセル失敗: [${isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode}] ${isTransient ? '一時エラー→再試行' : result.reason}`, at: new Date().toISOString() });
         }
       } else if (isUpdate) {
         // ---- 変更 (時間/所要/担当) ----
@@ -4274,13 +4610,17 @@ async function runPushJobs({ showBrowser } = {}) {
           });
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 変更未確定 (実登録OFF)`, at: new Date().toISOString() });
         } else {
-          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
+          const isTransient = await isTransientErrorPage(page).catch(() => false);
+          const toManual = !isTransient && shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           await postCallback({
             job_id: job.id, job_type: 'push_booking',
             status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
-            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason, manual_required: toManual,
+            booking_id: payload.booking_id,
+            error_code: isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode,
+            error: isTransient ? 'SalonBoard で一時エラー (再度操作しなおしてください) を検知。自動で再試行します。' : result.reason,
+            manual_required: toManual,
           });
-          emit('log', { level: 'warn', msg: `[${tag}] 🔴 変更失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 変更失敗: [${isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode}] ${isTransient ? '一時エラー→再試行' : result.reason}`, at: new Date().toISOString() });
         }
       } else {
         // ---- 新規登録 ----
@@ -4314,15 +4654,20 @@ async function runPushJobs({ showBrowser } = {}) {
           emit('log', { level: 'warn', msg: `[${tag}] 🟡 入力のみ (実登録OFF)`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: false, reason: 'push_disabled' });
         } else {
-          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
+          // 失敗が「一時エラー画面 (再度操作しなおしてください / KPCL010V01)」由来なら、
+          // manual に上げず必ず再試行に回す (再操作で直るため)。
+          const isTransient = await isTransientErrorPage(page).catch(() => false);
+          const toManual = !isTransient && shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
           const isCaptcha = result.errorCode === 'RECAPTCHA_REQUIRED';
           await postCallback({
             job_id: job.id, job_type: 'push_booking',
             status: isCaptcha ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
-            booking_id: payload.booking_id, error_code: result.errorCode, error: result.reason,
+            booking_id: payload.booking_id,
+            error_code: isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode,
+            error: isTransient ? 'SalonBoard で一時エラー (再度操作しなおしてください) を検知。自動で再試行します。' : result.reason,
             manual_required: toManual,
           });
-          emit('log', { level: 'warn', msg: `[${tag}] 🔴 失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 失敗: [${isTransient ? 'SB_TRANSIENT_ERROR' : result.errorCode}] ${isTransient ? '一時エラー→再試行' : result.reason}`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: false, reason: result.reason, errorCode: result.errorCode });
         }
       }
@@ -4330,13 +4675,25 @@ async function runPushJobs({ showBrowser } = {}) {
       processed++;
     } catch (e) {
       log(`push: job ${String(job.id).slice(0, 8)} 例外: ${e?.message ?? e}`, 'error');
+      // 操作の途中で「エラーが発生しました。再度操作しなおしてください。」(KPCL010V01)
+      // 画面へ飛ばされた場合、それは一時エラー。再度実行しなおせば直るので、確実に
+      // retryable_failed として戻す (原因を SB_TRANSIENT_ERROR で明示)。
+      let isTransient = false;
+      try { if (cdpPage) isTransient = await isTransientErrorPage(cdpPage); } catch (_e) { /* noop */ }
       try {
         await postCallback({
-          job_id: job.id, job_type: 'push_booking', status: 'retryable_failed',
-          booking_id: payload.booking_id, error_code: 'UNKNOWN_ERROR',
-          error: `worker exception: ${e?.message ?? e}`, manual_required: false,
+          job_id: job.id, job_type: job.job_type, status: 'retryable_failed',
+          booking_id: payload.booking_id, content_post_id: payload.content_post_id ?? null,
+          error_code: isTransient ? 'SB_TRANSIENT_ERROR' : 'UNKNOWN_ERROR',
+          error: isTransient
+            ? 'SalonBoard で一時エラー (エラーが発生しました。再度操作しなおしてください。) を検知しました。自動で再試行します。'
+            : `worker exception: ${e?.message ?? e}`,
+          manual_required: false,
         });
       } catch (_e) { /* ignore */ }
+      if (isTransient) {
+        emit('log', { level: 'warn', msg: `[push ${String(job.id).slice(0, 8)}] ⚠ 一時エラー画面を検知 → 再試行`, at: new Date().toISOString() });
+      }
       await cleanupBrowser();
     }
   };

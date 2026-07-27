@@ -27,6 +27,9 @@
            画像ID表示 <span id="FRONT_IMG_ID_ID">B195359246</span>
     アップロードは CN_CMN_imageUploaderModal.js のモーダル (#imageUploaderModalBody に描画)。
     → 1枚目(FRONT)が必須。完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B…)が入るかで判定。
+    ★2枚目/3枚目(SIDE/BACK)も同じ手順でアップロードする(uploadHairStyleFrontImage の slot 引数)。
+      DOM の命名が3枠で完全対称 ({SLOT}_IMG_ID / _ID / _IMG) なので FRONT の実装をそのまま流用。
+      2枚目以降は任意で、失敗しても登録は続行する(hair_extra_image_failed を残すだけ)。
     画像応募チェック: input#agrFlgStyleImgId (任意, 既定OFF)
 
   ■ スタイリストコメント (必須) ← フォトギャラリー(美容室)はここを必ず入力させる
@@ -48,6 +51,15 @@
     ハッシュタグ: 任意 (#hashTagTxt)
 
   ■ モデル情報 / ヘアスタイル特集 … すべて任意 (modelHairVolumeKbn 等の radio, hairCatalogSpecialCd select)
+    ★未取得: 「スタイルのモデル情報」(髪量/髪質/太さ/クセ/年代/顔型) の実DOM(name/value)は
+      この抜粋に含まれていない。Worker 側 scrapers.cjs の SB_MODEL_FIELDS は SalonBoard の
+      命名規則からの**推定値**で仮置きしている。実HTMLをここに追記したら、
+        - electron/scrapers.cjs      … SB_MODEL_FIELDS の name
+        - KIREIDOT_Admin PhotoGalleryClient.tsx … STYLE_MODEL_FIELDS の options 値
+        - KIREIDOT_Admin photo-gallery/actions.ts … MODEL_FIELD_CODES
+      の3箇所を実値に差し替えること。推定が外れていてもチェックが空振りするだけで
+      (全項目任意のため) スタイル登録自体は成功し、hair_model_info_not_set の
+      診断キャプチャに残る。
 
   ■ 自動投稿(push_photo_gallery, kind="style")の最小実装方針 (postHairStyleViaForm):
     1. /CNB/draft/styleList/ → 「スタイル新規追加」(a[onclick*="addStyle"]) で styleEdit を開く。

@@ -337,17 +337,33 @@ export type StyleRow = {
   image_url: string | null;
   length: string | null;
   stylist_name: string | null;
+  /** 紐付けクーポン名 / ID。 */
+  coupon_name: string | null;
+  coupon_external_id: string | null;
+  /** ヘアスタイル特集。 */
+  feature: string | null;
+  /** 掲載No (SalonBoard スタイル一覧の「順番」)。 */
+  sort_no: number | null;
+  is_published: boolean | null;
+  is_pickup: boolean | null;
+  style_updated_at: string | null;
   last_synced_at: string | null;
 };
 
+/**
+ * 掲載中スタイルを全件取得する (取得上限なし)。
+ * 並びは SalonBoard の掲載No (sort_no) 昇順 = 実際の掲載順。
+ */
 export async function fetchStyleList(scope: StaffScope): Promise<StyleRow[]> {
   if (!scope.shopId) return [];
   const { data, error } = await supabase
     .from('salonboard_style_imports')
-    .select('id, external_id, name, image_url, length, stylist_name, last_synced_at')
+    .select(
+      'id, external_id, name, image_url, length, stylist_name, coupon_name, coupon_external_id, feature, sort_no, is_published, is_pickup, style_updated_at, last_synced_at'
+    )
     .eq('shop_id', scope.shopId)
-    .order('last_synced_at', { ascending: false, nullsFirst: false })
-    .limit(100);
+    .order('sort_no', { ascending: true, nullsFirst: false })
+    .order('last_synced_at', { ascending: false, nullsFirst: false });
   if (error) {
     console.warn('[data] fetchStyleList error:', error.message);
     return [];
@@ -359,6 +375,13 @@ export async function fetchStyleList(scope: StaffScope): Promise<StyleRow[]> {
     image_url: r.image_url ?? null,
     length: r.length ?? null,
     stylist_name: r.stylist_name ?? null,
+    coupon_name: r.coupon_name ?? null,
+    coupon_external_id: r.coupon_external_id ?? null,
+    feature: r.feature ?? null,
+    sort_no: r.sort_no ?? null,
+    is_published: r.is_published ?? null,
+    is_pickup: r.is_pickup ?? null,
+    style_updated_at: r.style_updated_at ?? null,
     last_synced_at: r.last_synced_at ?? null,
   })) as StyleRow[];
 }

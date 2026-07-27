@@ -7942,15 +7942,16 @@ async function scrapeStylists(page, opts = {}) {
  *   - ページング: a.pgLink / a.pgNext / a.pgLast (?pn=N)
  */
 async function scrapeStyles(page, opts = {}) {
-  const MAX_PAGES = 30;
-  // フォトギャラリー画面で「SalonBoard スタイル一覧」を表示するための取得上限。
-  // 多すぎると画面/取込負荷が大きいので最大 100 件で打ち切る (ユーザー要望)。
-  const MAX_STYLES = 100;
+  // ページ送りの安全上限。1ページ150件なので 200ページ = 30000件まで対応できる。
+  // (以前は取得上限100件で打ち切っていたが、掲載中スタイルを全件取得する方針に変更)
+  const MAX_PAGES = 200;
   const allItems = [];
   const seen = new Set();
   let pageUrl = STYLE_LIST_URL;
+  let pagesScanned = 0;
 
   for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
+    pagesScanned = pageNum;
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
@@ -7992,6 +7993,8 @@ async function scrapeStyles(page, opts = {}) {
         let length = '';
         let stylist = '';
         let imageUrl = '';
+        let feature = '';
+        let couponName = '';
         const tr = input ? input.closest('tr') : null;
         if (tr) {
           // 主行: スタイル名は colspan=3 の td。
@@ -8000,21 +8003,46 @@ async function scrapeStyles(page, opts = {}) {
           // サムネイル画像: 行ブロック内の img[name="stylePhoto"]。
           // (主行に無い場合があるので、後続の兄弟行も含めて探す)
           let photoImg = tr.querySelector('img[name="stylePhoto"], img[src*="IMGDB_HD"]');
-          // 付随行(長さ/担当)を兄弟 tr から拾う (最大4行ブロック)。
+
+          // 1スタイル = 4行ブロック。行ごとに役割が決まっているので、
+          // 「全セルを平坦化して 0番目=長さ / 1番目=担当」と決め打ちせず、行構造で判定する。
+          //   行2: 長さ / 担当 / チェック(要確認)   ← rowspan の都合で td 数が 2〜3 に変動する
+          //   行3: ヘアスタイル特集
+          //   行4: クーポン (tr.coupon-data-contents)
+          // 担当が空のスタイルがあると平坦化方式では「要確認」や特集名を担当として
+          // 拾ってしまい、担当名が欠落・誤登録されていた。
           let sib = tr.nextElementSibling;
-          const extra = [];
           for (let i = 0; i < 3 && sib; i++) {
+            // 次のスタイルの主行(styleId を持つ行)に到達したら、このブロックは終わり。
+            if (sib.querySelector('input[name$=".styleId"]')) break;
             if (!photoImg) {
               photoImg = sib.querySelector('img[name="stylePhoto"], img[src*="IMGDB_HD"]');
             }
-            const cells = Array.from(sib.querySelectorAll('td.td_value_store_c'))
-              .map((c) => txt(c))
-              .filter((t) => t && t !== '-');
-            extra.push(...cells);
+            const rowText = txt(sib);
+            if (sib.classList.contains('coupon-data-contents')) {
+              // クーポン行: クーポン名は .jsc_SB_modal_coupon_name 内。
+              couponName = txt(sib.querySelector('.jsc_SB_modal_coupon_name .txt_ellipsis'))
+                || txt(sib.querySelector('.jsc_SB_modal_coupon_name'));
+            } else if (rowText.indexOf('ヘアスタイル特集') >= 0) {
+              // 特集行: ラベル「ヘアスタイル特集：」を除いた残り。「-」は未設定。
+              const v = rowText.replace(/^.*ヘアスタイル特集[：:]\s*/, '').trim();
+              feature = v === '-' ? '' : v;
+            } else {
+              // 長さ/担当行。td を順に読み、「要確認」等のチェック列は除外する。
+              // 「-」や空セルも位置合わせのため残したまま順序で判定する。
+              const cells = Array.from(sib.querySelectorAll('td.td_value_store_c')).map((c) => txt(c));
+              // チェック列(font#font_alert を含む td)を落とす。
+              const tds = Array.from(sib.querySelectorAll('td.td_value_store_c'));
+              const valueCells = [];
+              for (let k = 0; k < tds.length; k++) {
+                if (tds[k].querySelector('#font_alert, font')) continue;
+                valueCells.push(cells[k]);
+              }
+              if (!length && valueCells.length > 0) length = valueCells[0] === '-' ? '' : (valueCells[0] || '');
+              if (!stylist && valueCells.length > 1) stylist = valueCells[1] === '-' ? '' : (valueCells[1] || '');
+            }
             sib = sib.nextElementSibling;
           }
-          if (extra.length) length = extra[0] || '';
-          if (extra.length > 1) stylist = extra[1] || '';
           if (photoImg) imageUrl = photoImg.getAttribute('src') || '';
         }
         items.push({
@@ -8024,6 +8052,18 @@ async function scrapeStyles(page, opts = {}) {
           stylist,
           image_url: imageUrl,
           coupon_external_id: (f.couponId || '').trim() || null,
+          coupon_name: couponName || null,
+          // ヘアスタイル特集 (未設定なら null)。
+          feature: feature || null,
+          // 掲載順 (input[name="...sortNo"] の値)。サロンレポートPDFの「掲載No」と同じ番号で、
+          // ホットペッパーの閲覧数ランキングと突き合わせるキーになる。
+          sort_no: (f.sortNo || '').trim() || null,
+          // 掲載中フラグ / Pick Up フラグ / 最終更新日時。
+          is_published: String(f.presentFlg ?? '') === '1',
+          is_pickup: !!document.querySelector(
+            `input[name="frmStyleListStyleInfoDtoList[${idx}].pickupFlg"]:checked`
+          ),
+          style_last_up_date: (f.styleLastUpDate || '').trim() || null,
         });
       }
       // ページング情報
@@ -8038,9 +8078,6 @@ async function scrapeStyles(page, opts = {}) {
         allItems.push(it);
       }
     }
-
-    // 取得上限 (100件) に達したら以降のページは見ない。
-    if (allItems.length >= MAX_STYLES) break;
 
     // 次ページへ。pgNext が無ければ終了。
     if (!pageData.nextHref) break;
@@ -8064,9 +8101,20 @@ async function scrapeStyles(page, opts = {}) {
     return { url, imageExternalId: m ? m[1] : null };
   };
 
+  // styleLastUpDate ("20260708135144000") → ISO 文字列。
+  const parseSbTimestamp = (raw) => {
+    const s = String(raw ?? '').trim();
+    const m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+    if (!m) return null;
+    // SalonBoard の表示は JST。+09:00 として ISO 化する。
+    const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+09:00`;
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  };
+
+  // 掲載中スタイルは全件返す (取得上限なし)。
   const rows = allItems
     .filter((it) => it.external_id && it.name)
-    .slice(0, MAX_STYLES)
     .map((it) => {
       const img = normalizeStyleImage(it.image_url);
       return {
@@ -8078,13 +8126,31 @@ async function scrapeStyles(page, opts = {}) {
         length: cleanText(it.length) || null,
         stylist_name: cleanText(it.stylist) || null,
         coupon_external_id: it.coupon_external_id || null,
+        coupon_name: cleanText(it.coupon_name) || null,
+        // ヘアスタイル特集。
+        feature: cleanText(it.feature) || null,
         // フォトギャラリー表示用の画像。
         image_url: img.url,
         image_external_id: img.imageExternalId,
+        // 掲載No (サロンレポートPDFの「掲載No」と同じ番号)。
+        sort_no: Number.isFinite(Number(it.sort_no)) ? Number(it.sort_no) : null,
+        is_published: it.is_published !== false,
+        is_pickup: !!it.is_pickup,
+        style_updated_at: parseSbTimestamp(it.style_last_up_date),
       };
     });
 
-  return { rows, debug: { itemsFound: rows.length, genre: 'hair', source: 'styleList', max: MAX_STYLES } };
+  return {
+    rows,
+    debug: {
+      itemsFound: rows.length,
+      genre: 'hair',
+      source: 'styleList',
+      pagesScanned: pagesScanned,
+      missingStylist: rows.filter((r) => !r.stylist_name).length,
+      missingSortNo: rows.filter((r) => r.sort_no == null).length,
+    },
+  };
 }
 
 // =====================================================================
@@ -8137,6 +8203,8 @@ async function scrapePhotoGallery(page, opts = {}) {
         genre_code: genreEl ? (genreEl.value || '') : '',
         is_published: presentEl ? presentEl.value === '1' : true,
         image_url: imgUrl,
+        // フォーム上の枠番号 (0始まり)。+1 がサロンレポートPDFの「掲載No」に対応する。
+        slot_index: Number(idx),
       });
     }
     return { items };
@@ -8165,6 +8233,10 @@ async function scrapePhotoGallery(page, opts = {}) {
         image_external_id: img.id || it.image_external_id || null,
         genre_code: it.genre_code || null,
         is_published: it.is_published !== false,
+        // 掲載No (枠番号 0始まり → 1始まり)。HPBサロンレポートの掲載Noと突き合わせる。
+        sort_no: Number.isFinite(Number(it.slot_index))
+          ? Number(it.slot_index) + 1
+          : null,
       };
     });
 
@@ -10794,6 +10866,11 @@ async function ensureSalonSelected(page, opts = {}) {
 //     menu_text?,         //   メニュー内容テキスト ≤50 (必須項目, 空なら styleName)
 //     coupon_external_id?,//   クーポン(CP...) 紐付け (任意)
 //     coupon_name?,       //   クーポン名 (external_id が一覧に無い時の補助一致)
+//     hashtags?: string[],//   ハッシュタグ (任意。payload.tags と同内容が入る)
+//     image_class_cds?,   //   画像枠の区分 SV01..SV06 を images と同じ並びで (任意)
+//     model?: {           //   スタイルのモデル情報 (すべて任意。SB_MODEL_FIELDS 参照)
+//       hair_volume?, hair_quality?, hair_thickness?, hair_curl?, age?, face_type?
+//     },
 //   }
 // }
 // opts: { baseUrl, enablePost }  enablePost=false なら確認まで(登録確定しない)。
@@ -11261,6 +11338,27 @@ async function uploadPhotoGallerySlotImage(page, idx, rowTable, file) {
   return { ok: true, imageId: (imageId || '').trim() || null, diag };
 }
 
+/**
+ * スタイルのモデル情報 (styleEdit「スタイルのモデル情報」セクション。すべて任意)。
+ *
+ * ★注意: name (DOM の radio name) は styleEdit の実DOMが未取得のため、SalonBoard の
+ *   命名規則 (frmStyleEditStyleDto.<項目>Kbn) からの**推定値**。実HTMLを
+ *   salonboard_code/美容室/ に取り込んだら、ここの name/value と
+ *   Admin 側 STYLE_MODEL_FIELDS (PhotoGalleryClient.tsx) / MODEL_FIELD_CODES
+ *   (photo-gallery/actions.ts) を突き合わせて差し替えること。
+ *   name が実DOMと一致しない場合でもチェックが空振りするだけで、
+ *   モデル情報は全項目任意なのでスタイル登録自体は成功する
+ *   (空振りは hair_model_info_not_set の診断キャプチャに残る)。
+ */
+const SB_MODEL_FIELDS = [
+  { key: 'hair_volume',    name: 'frmStyleEditStyleDto.modelHairVolumeKbn' },     // 髪量
+  { key: 'hair_quality',   name: 'frmStyleEditStyleDto.modelHairQualityKbn' },    // 髪質
+  { key: 'hair_thickness', name: 'frmStyleEditStyleDto.modelHairThicknessKbn' },  // 太さ
+  { key: 'hair_curl',      name: 'frmStyleEditStyleDto.modelHairCurlKbn' },       // クセ
+  { key: 'age',            name: 'frmStyleEditStyleDto.modelAgeKbn' },            // 年代
+  { key: 'face_type',      name: 'frmStyleEditStyleDto.modelFaceTypeKbn' },       // 顔型
+];
+
 // ---- 美容室: /CNB スタイル掲載情報編集/登録 (styleEdit) ----
 // 実DOM: salonboard_code/美容室/スタイル登録_styleEdit.html
 // スタイル一覧 → 「スタイル新規追加」(addStyle) で /CNB/draft/styleEdit/ を開き、
@@ -11374,6 +11472,39 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
       return fail(`スタイル画像のアップロードで imageId を取得できませんでした(セッション失効/リダイレクトの可能性)。バックオフ後に自動再試行します。imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'SB_UPLOAD_HELD', false);
     }
     return fail(`スタイル画像のアップロードを確認できませんでした (${uploaded.reason || ''}) imgreg=[${imgregSummary}] (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 2.5) 画像枠の区分 (FRONT/SIDE/BACK…) と 2枚目/3枚目の画像。
+  //      style.image_class_cds は Admin の画像並び順と同じ配列 (SV01=FRONT 等)。
+  //      SalonBoard の枠は3つなので、先頭3枚だけを枠1/2/3に入れる。
+  //      ※2枚目以降のアップロードは任意。失敗してもスタイル登録自体は続行する
+  //        (1枚目が入っていれば投稿は成立するため、機会損失を作らない)。
+  {
+    const classCds = Array.isArray(style.image_class_cds) ? style.image_class_cds : [];
+    const allImages = Array.isArray(p.images) && p.images.length ? p.images : [imageUrl];
+    const SLOTS = ['FRONT', 'SIDE', 'BACK'];
+    // 枠1の区分 select (styleClassCd01) は既定 SV01。指定があれば上書きする。
+    for (let i = 0; i < SLOTS.length; i++) {
+      const cd = String(classCds[i] || '').trim();
+      if (!cd) continue;
+      const num = String(i + 1).padStart(2, '0'); // 01/02/03
+      await page.locator(`select[name="frmStyleEditStyleInfoDto.styleClassCd${num}"]`).first()
+        .selectOption({ value: cd }).catch(() => {});
+    }
+    // 2枚目/3枚目をアップロード (1枚目は上で完了済み)。
+    for (let i = 1; i < SLOTS.length && i < allImages.length; i++) {
+      const url = String(allImages[i] || '').trim();
+      if (!url) continue;
+      const d2 = await downloadImageToTmp(page, url, 'photo_gallery');
+      if (!d2) continue;
+      const up2 = await uploadHairStyleFrontImage(page, d2.file, SLOTS[i]);
+      d2.cleanup();
+      if (!up2.ok) {
+        await captureScrapeDebug(page, 'photo_gallery', 'hair_extra_image_failed', {
+          diagnostics: { url: page.url(), slot: SLOTS[i], reason: up2.reason ?? null },
+        }).catch(() => {});
+      }
+    }
   }
 
   // 3) スタイリスト名 (必須): 選択されたスタッフ(author_external_id=T...)で投稿する。
@@ -11514,6 +11645,33 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     }
   }
 
+  // 6.7) スタイルのモデル情報 (任意, payload.style.model)。
+  //      未指定のキーは触らない = SalonBoard 側の「設定しない」のまま。
+  //      失敗しても警告キャプチャのみでスタイル登録は継続する (全項目が任意のため)。
+  if (style.model && typeof style.model === 'object') {
+    try {
+      const missed = [];
+      for (const f of SB_MODEL_FIELDS) {
+        const v = String(style.model[f.key] ?? '').trim();
+        if (!v) continue;
+        // radio 群。name は SalonBoard の DTO 名 (下の SB_MODEL_FIELDS 定義参照)。
+        const radio = page.locator(`input[type="radio"][name="${f.name}"][value="${v}"]`).first();
+        if ((await radio.count().catch(() => 0)) === 0) { missed.push(`${f.key}(no-dom)`); continue; }
+        const ok = await radio.check({ timeout: 3_000 }).then(() => true).catch(() => false);
+        if (!ok) missed.push(`${f.key}(check-failed)`);
+      }
+      if (missed.length) {
+        await captureScrapeDebug(page, 'photo_gallery', 'hair_model_info_not_set', {
+          diagnostics: { url: page.url(), missed, model: style.model },
+        }).catch(() => {});
+      }
+    } catch (e) {
+      await captureScrapeDebug(page, 'photo_gallery', 'hair_model_info_error', {
+        diagnostics: { url: page.url(), error: e?.message ?? String(e) },
+      }).catch(() => {});
+    }
+  }
+
   if (!enablePost) {
     return { status: 'confirm_only' };
   }
@@ -11606,10 +11764,11 @@ async function downscaleJpegViaBlank(page, file, maxDim = 1280, quality = 0.8) {
 }
 
 /**
- * styleEdit の FRONT 枠に画像を1枚アップロードする。
- * 未設定の FRONT 画像(img#FRONT_IMG_ID_IMG.img_new_no_photo)をクリック→
+ * styleEdit の指定枠 (slot = FRONT/SIDE/BACK) に画像を1枚アップロードする。
+ * 未設定の画像(img#{SLOT}_IMG_ID_IMG.img_new_no_photo)をクリック→
  * CN_CMN_imageUploaderModal で画像をアップロード。
- * 完了は FRONT_IMG_ID hidden / #FRONT_IMG_ID_ID に画像ID(B...)が入るかで判定する。
+ * 完了は {SLOT}_IMG_ID hidden / #{SLOT}_IMG_ID_ID に画像ID(B...)が入るかで判定する。
+ * ※DOM の命名が3枠で完全対称なので、FRONT で実績のある手順をそのまま流用する。
  * 戻り値: { ok, imageId?, reason? }
  */
 // ★_abck スコアを上げる「人間らしいマウス徘徊」(2026-07-11 画像アップロードERR_ABORTED/通信失敗対策)。
@@ -11630,8 +11789,14 @@ async function humanizeMouseWander(page) {
   } catch (_e) { /* best-effort */ }
 }
 
-async function uploadHairStyleFrontImage(page, file) {
-  const idHidden = page.locator('input#FRONT_IMG_ID, input[name="FRONT_IMG_ID"]').first();
+async function uploadHairStyleFrontImage(page, file, slot = 'FRONT') {
+  // 枠ID: FRONT_IMG_ID / SIDE_IMG_ID / BACK_IMG_ID。DOM の命名が完全に対称なので
+  // 1枚目(FRONT)で実績のある手順をそのまま2枚目/3枚目にも使う。
+  const SLOT = /^(FRONT|SIDE|BACK)$/.test(String(slot)) ? String(slot) : 'FRONT';
+  const HID = `${SLOT}_IMG_ID`;        // hidden の name/id
+  const SPAN = `${SLOT}_IMG_ID_ID`;    // 画像IDの表示 span
+  const IMG = `${SLOT}_IMG_ID_IMG`;    // プレビュー img (クリックでモーダル)
+  const idHidden = page.locator(`input#${HID}, input[name="${HID}"]`).first();
   const before = await idHidden.inputValue().catch(() => '');
   // ★(A) 2026-07-11: 直接POST(Playwright request=ブラウザTLS指紋/Akamaiセンサーを持たない)を
   //   先に撃つと ERR_ABORTED され、同一セッションが challenge 状態に落ちて、後続の「信頼された
@@ -11681,7 +11846,7 @@ async function uploadHairStyleFrontImage(page, file) {
   }).catch(() => { /* モーダル方式 */ });
 
   // FRONT 画像エリアをクリックしてアップロードUIを開く。
-  const trigger = page.locator('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG').first();
+  const trigger = page.locator(`img#${IMG}, #${IMG}`).first();
   if ((await trigger.count().catch(() => 0)) === 0) {
     return { ok: false, reason: 'no_front_image_area' };
   }
@@ -11697,10 +11862,10 @@ async function uploadHairStyleFrontImage(page, file) {
   //   モーダルDOMを差し替えて in-flight の doUpload XHR を net::ERR_ABORTED で中断していた。
   //   → まず dispatch を1回だけ撃ってモーダルが開くのを待つ。開かなければ playwright click を
   //     フォールバックで1回だけ撃つ(=モーダルGETは常に1回)。
-  await page.evaluate(() => {
-    const el = document.querySelector('img#FRONT_IMG_ID_IMG, #FRONT_IMG_ID_IMG');
+  await page.evaluate((imgId) => {
+    const el = document.querySelector(`img#${imgId}, #${imgId}`);
     if (el) ['mousedown', 'mouseup', 'click'].forEach((t) => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
-  }).catch(() => {});
+  }, IMG).catch(() => {});
   const modalOpened = await page.waitForFunction(() => {
     return !!document.querySelector('#imgUploadForm, #imageUploaderModalBody #imgUploadForm, input.jscImageUploaderModalInput, .jscImageUploaderModalDropArea');
   }, null, { timeout: 3_500 }).then(() => true).catch(() => false);
@@ -11827,8 +11992,8 @@ async function uploadHairStyleFrontImage(page, file) {
           directPostBlocked = true;
         } else {
         const html = await resp.text().catch(() => '');
-        // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT_IMG_ID)へ反映する。
-        const applied = await page.evaluate((resHtml) => {
+        // レスポンスHTMLから画像ID等を取り出して親フォーム(FRONT/SIDE/BACK_IMG_ID)へ反映する。
+        const applied = await page.evaluate(({ resHtml, HID, SPAN, IMG }) => {
           try {
             const tmp = document.createElement('div');
             tmp.innerHTML = resHtml;
@@ -11840,7 +12005,7 @@ async function uploadHairStyleFrontImage(page, file) {
               lengthSizeOrg: get('lengthSizeOrg'), sideSizeOrg: get('sideSizeOrg'), resolutionOrg: get('resolutionOrg'),
             };
             const imageId = fields.imageId;
-            const elementName = fields.elementName || 'FRONT_IMG_ID';
+            const elementName = fields.elementName || HID;
             if (typeof window.setUploadImage === 'function') {
               try {
                 if (window.ACTION_FORM_NAME === 'styleEditForm') {
@@ -11850,28 +12015,28 @@ async function uploadHairStyleFrontImage(page, file) {
                 }
               } catch (_e) { /* 直書きにフォールバック */ }
             }
-            // ★保険(本命): imageId があれば FRONT_IMG_ID hidden / span / プレビュー img を直接セット。
+            // ★保険(本命): imageId があれば対象枠の hidden / span / プレビュー img を直接セット。
             //   setUploadImage の有無に依存せず確実に反映する。
             if (imageId) {
-              const h = document.getElementById('FRONT_IMG_ID'); if (h) h.value = imageId;
-              const span = document.getElementById('FRONT_IMG_ID_ID'); if (span) span.textContent = imageId;
-              if (fields.imageFilePath) { const img = document.getElementById('FRONT_IMG_ID_IMG'); if (img) img.src = fields.imageFilePath; }
+              const h = document.getElementById(HID); if (h) h.value = imageId;
+              const span = document.getElementById(SPAN); if (span) span.textContent = imageId;
+              if (fields.imageFilePath) { const img = document.getElementById(IMG); if (img) img.src = fields.imageFilePath; }
             }
             if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
             try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
             return { ok: !!imageId, imageId, fields };
           } catch (e) { return { ok: false, error: String(e) }; }
-        }, html).catch(() => ({ ok: false }));
+        }, { resHtml: html, HID, SPAN, IMG }).catch(() => ({ ok: false }));
 
         // 直接POSTが HTTP 200 を返している＝サーバ側のアップロードは成功している。
         // applied で imageId を反映できたら、それで確定(ブラウザXHRは絶対に走らせない)。
         if (resp.status() === 200 && applied && applied.imageId) {
           page.off('response', onResp); page.off('requestfailed', onReqFail);
           // hidden 反映を確認(直書き済みなので即 true のはず)。
-          await page.waitForFunction((prev) => {
-            const h = document.getElementById('FRONT_IMG_ID');
+          await page.waitForFunction(({ prev, HID }) => {
+            const h = document.getElementById(HID);
             return !!(h && h.value && h.value !== prev);
-          }, before, { timeout: 4_000 }).catch(() => {});
+          }, { prev: before, HID }, { timeout: 4_000 }).catch(() => {});
           let imageId = (await idHidden.inputValue().catch(() => '')) || applied.imageId || '';
           return { ok: true, imageId: (imageId || '').trim() || null, via: 'direct_post' };
         }
@@ -12009,13 +12174,13 @@ async function uploadHairStyleFrontImage(page, file) {
     imgregLog.push({ inMemory: usedInMemory, sentBytes });
   }
 
-  const isDone = () => page.evaluate((prev) => {
-    const h = document.getElementById('FRONT_IMG_ID');
+  const isDone = () => page.evaluate(({ prev, HID, SPAN }) => {
+    const h = document.getElementById(HID);
     const hv = h ? (h.value || '') : '';
-    const s = document.getElementById('FRONT_IMG_ID_ID');
+    const s = document.getElementById(SPAN);
     const sv = s ? (s.textContent || '').trim() : '';
     return (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
-  }, before).catch(() => false);
+  }, { prev: before, HID, SPAN }).catch(() => false);
   const hasCommError = () => page.evaluate(() => {
     const ue = document.getElementById('uploadError');
     const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
@@ -12117,17 +12282,17 @@ async function uploadHairStyleFrontImage(page, file) {
   // 押下後、完了(FRONT_IMG_ID 反映) か エラー(通信に失敗しました) のどちらかを待つ。
   // ★fail-fast: doUpload の $.ajax timeout を 45 秒にしたため、待ち上限も 55 秒に短縮。
   //   45秒以内に応答が無い=Akamai の一時ホールド。長く粘らず切って retryable で再試行に回す。
-  await page.waitForFunction((prev) => {
-    const h = document.getElementById('FRONT_IMG_ID');
+  await page.waitForFunction(({ prev, HID, SPAN }) => {
+    const h = document.getElementById(HID);
     const hv = h ? (h.value || '') : '';
-    const s = document.getElementById('FRONT_IMG_ID_ID');
+    const s = document.getElementById(SPAN);
     const sv = s ? (s.textContent || '').trim() : '';
     const done = (!!hv && hv !== prev) || /^B\d{4,}$/.test(sv);
     const ue = document.getElementById('uploadError');
     const ueShown = ue && !ue.classList.contains('dn') && (ue.textContent || '').trim();
     const err = !!ueShown || /通信に失敗しました|アップロードに失敗|形式が正しくありません/.test(document.body?.innerText || '');
     return done || err;
-  }, before, { timeout: 55_000 }).catch(() => {});
+  }, { prev: before, HID, SPAN }, { timeout: 55_000 }).catch(() => {});
 
   const detach = () => { try { page.off('response', onResp); page.off('requestfailed', onReqFail); page.off('request', onReq); } catch (_e) {} };
 
@@ -12172,7 +12337,7 @@ async function uploadHairStyleFrontImage(page, file) {
         const html = await resp.text().catch(() => '');
         imgregLog.push({ directPostFallback: true, status: resp.status(), tMs: Date.now() - _t0, bodyHead: (html || '').replace(/\s+/g, ' ').slice(0, 160) });
         if (resp.status() === 200) {
-          const applied = await page.evaluate((resHtml) => {
+          const applied = await page.evaluate(({ resHtml, HID, SPAN, IMG }) => {
             try {
               const tmp = document.createElement('div');
               tmp.innerHTML = resHtml;
@@ -12180,15 +12345,15 @@ async function uploadHairStyleFrontImage(page, file) {
               if (String(get('userErrorFlg') || '0') !== '0') return { ok: false, userError: true };
               const imageId = get('imageId');
               if (!imageId) return { ok: false };
-              // FRONT_IMG_ID hidden / span / プレビュー img を直接反映 (setUploadImage 非依存の保険)。
-              const h = document.getElementById('FRONT_IMG_ID'); if (h) h.value = imageId;
-              const span = document.getElementById('FRONT_IMG_ID_ID'); if (span) span.textContent = imageId;
-              const fp = get('imageFilePath'); if (fp) { const img = document.getElementById('FRONT_IMG_ID_IMG'); if (img) img.src = fp; }
+              // 対象枠の hidden / span / プレビュー img を直接反映 (setUploadImage 非依存の保険)。
+              const h = document.getElementById(HID); if (h) h.value = imageId;
+              const span = document.getElementById(SPAN); if (span) span.textContent = imageId;
+              const fp = get('imageFilePath'); if (fp) { const img = document.getElementById(IMG); if (img) img.src = fp; }
               if (typeof window.modalClose === 'function') { try { window.modalClose(); } catch (_e) {} }
               try { const b = document.getElementById('imageUploaderModalBody'); if (b) b.innerHTML = ''; } catch (_e) {}
               return { ok: true, imageId };
             } catch (_e) { return { ok: false }; }
-          }, html).catch(() => ({ ok: false }));
+          }, { resHtml: html, HID, SPAN, IMG }).catch(() => ({ ok: false }));
           if (applied && applied.ok && applied.imageId) {
             detach();
             return { ok: true, imageId: applied.imageId, via: 'direct_post_fallback' };
@@ -12213,7 +12378,7 @@ async function uploadHairStyleFrontImage(page, file) {
   // 画像ID は hidden 優先、無ければ span から。
   let imageId = (await idHidden.inputValue().catch(() => '')) || '';
   if (!imageId) {
-    imageId = (await page.locator('#FRONT_IMG_ID_ID').first().textContent().catch(() => '') || '').trim();
+    imageId = (await page.locator(`#${SPAN}`).first().textContent().catch(() => '') || '').trim();
   }
   return { ok: true, imageId: imageId.trim() || null };
 }
@@ -14148,6 +14313,7 @@ module.exports = {
   scrapeSalonInfo,
   scrapeEquipment,
   scrapeMenus,
+  // 美容室スタイル一覧 (Admin の「スタイル写真を取得」= fetch_style ジョブで使う)。
   scrapeStyles,
   scrapeCoupons,
   scrapeBlogs,

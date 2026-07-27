@@ -25,7 +25,7 @@ type GalleryItem = {
 /**
  * 美容室=「スタイル」/ エステ等=「フォトギャラリー」一覧ページ。
  * SalonBoard から取得して *_imports に保存した画像付きデータを Instagram 風グリッドで
- * 表示する (読み取り専用・最大100件)。取得は menus チャネルの同期で行われる。
+ * 表示する (読み取り専用・掲載中を全件)。取得は menus チャネルの同期で行われる。
  */
 export function Styles() {
   const scope = useEffectiveScope();
@@ -52,9 +52,13 @@ export function Styles() {
         setItems(
           rows.map((s) => ({
             id: s.id,
-            title: s.name,
-            sub1: s.stylist_name,
-            sub2: s.length,
+            // 掲載No (SalonBoard スタイル一覧の「順番」) を先頭に出す。
+            title: s.sort_no != null ? `No.${s.sort_no} ${s.name ?? ''}`.trim() : s.name,
+            // 担当が取れていない場合も分かるように「担当 未設定」を出す。
+            sub1: s.stylist_name || '担当 未設定',
+            sub2: [s.length, s.is_published === false ? '非掲載' : null, s.is_pickup ? 'Pick Up' : null]
+              .filter(Boolean)
+              .join(' / ') || null,
             image_url: s.image_url,
           })),
         );
@@ -92,7 +96,7 @@ export function Styles() {
         <p className="text-[13px] text-ink-soft">
           {loading
             ? '読み込み中…'
-            : `SalonBoard から取得した${label} ${items.length} 件 (最大100件)`}
+            : `SalonBoard から取得した${label} ${items.length} 件`}
         </p>
         <button
           type="button"
@@ -130,7 +134,7 @@ export function Styles() {
             )}
             {label}がありません。
             <br />
-            「サロンボードから取得」を押すと SalonBoard の{label} (最大100件) を取り込めます。
+            「サロンボードから取得」を押すと SalonBoard の{label}を全件取り込めます。
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 lg:grid-cols-5">
