@@ -7830,7 +7830,9 @@ async function scrapeStylists(page, opts = {}) {
       position: cleanText(it.position),
       catch_phrase: null,
       bio: null,
-      photo_url: it.photo_url ? absoluteUrl(it.photo_url) : null,
+      photo_url: it.photo_url
+        ? normalizeSalonboardImageUrl(it.photo_url, 720, 960)
+        : null,
       is_published: true,
     }))
     .filter((r) => r.name); // 名前が取れた行のみ (sendStaff の必須条件)
@@ -7962,14 +7964,14 @@ async function scrapeStyles(page, opts = {}) {
   }
 
   // サムネイル画像URLを正規化する。styleList の img は w=60&h=80 の小さいサムネ。
-  // フォトギャラリー表示用に大きめ (w=360&h=480) に差し替え、絶対URL化する。
+  // Retina表示でも荒れないサイズ (w=720&h=960) に差し替え、絶対URL化する。
   // 画像ID (B...) も IMGDB_HD/.../B........./ から抽出する。
   const normalizeStyleImage = (raw) => {
     if (!raw) return { url: null, imageExternalId: null };
     let url = String(raw).replace(/&amp;/g, '&').trim();
     try { url = new URL(url, 'https://imgbp.salonboard.com').toString(); } catch (_e) { /* keep raw */ }
     // サイズ指定を大きくする (w/h を置換、無ければそのまま)。
-    url = url.replace(/([?&])w=\d+/i, '$1w=360').replace(/([?&])h=\d+/i, '$1h=480');
+    url = url.replace(/([?&])w=\d+/i, '$1w=720').replace(/([?&])h=\d+/i, '$1h=960');
     const m = url.match(/\/(B\d{6,})\//) || url.match(/\/(B\d{6,})\.[a-z]+/i);
     return { url, imageExternalId: m ? m[1] : null };
   };
@@ -9052,7 +9054,9 @@ async function scrapeStaff(page, opts = {}) {
       designation_fee: parseYen(it.designation_fee_raw),
       catch_phrase: cleanText(it.catch_phrase),
       bio: null,
-      photo_url: it.photo_url ? absoluteUrl(it.photo_url) : null,
+      photo_url: it.photo_url
+        ? normalizeSalonboardImageUrl(it.photo_url, 720, 960)
+        : null,
       is_published: it.is_published !== false,
     });
   }
@@ -9083,6 +9087,29 @@ function absoluteUrl(src) {
     return new URL(src, 'https://salonboard.com').toString();
   } catch (_e) {
     return src;
+  }
+}
+
+/**
+ * SalonBoard一覧画面の画像は 45x60 等の極小サムネイルURLを返す。
+ * そのままAdminのカードで拡大するとモザイク状になるため、画像CDNのサイズ指定を
+ * 表示用途に十分な値へ置き換える。SalonBoard以外のURLは絶対URL化だけ行う。
+ */
+function normalizeSalonboardImageUrl(src, width = 720, height = 960) {
+  const absolute = absoluteUrl(String(src).replace(/&amp;/g, '&'));
+  if (!absolute) return null;
+  try {
+    const url = new URL(absolute);
+    if (
+      url.hostname === 'imgbp.salonboard.com' &&
+      url.pathname.includes('/IMGDB_HD/')
+    ) {
+      url.searchParams.set('w', String(width));
+      url.searchParams.set('h', String(height));
+    }
+    return url.toString();
+  } catch (_e) {
+    return absolute;
   }
 }
 

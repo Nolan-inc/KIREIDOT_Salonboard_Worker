@@ -2243,6 +2243,7 @@ async function handleJob(job: Job): Promise<void> {
         fetch_staff: { fn: "scrapeStaff", key: "staff" },
         fetch_menu: { fn: "scrapeMenus", key: "menus" },
         fetch_menus: { fn: "scrapeMenus", key: "menus" },
+        fetch_style: { fn: "scrapeMenus", key: "styles" },
         fetch_coupon: { fn: "scrapeCoupons", key: "coupons" },
         fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
         fetch_equipment: { fn: "scrapeEquipment", key: "equipment" },
