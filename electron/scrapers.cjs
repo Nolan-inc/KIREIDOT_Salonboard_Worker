@@ -2691,6 +2691,12 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
 // 戻り値 blocks には対象スタッフ列の全予定を入れ、失敗診断 (何が実在するか) に使う。
 function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  // 敬称(さん/様等)と注釈(「（こぼ手入力）」等の括弧書き)を除いた固有名の核。
+  // 手動入力予定の照合で「とっとりこころさん」と「とっとりこころ（こぼ手入力）」を一致させる。
+  const nameCore = (s) => norm(s)
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/(さん|さま|様|ちゃん|くん|君)$/, '')
+    .trim();
   const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
     const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
     return m ? m[1].toUpperCase() : null;
@@ -2715,6 +2721,7 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
     const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
     const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
+    const actualMemo = norm(el.querySelector('.todoMemo')?.textContent);
     blocks.push({ start, end, title: actualTitle, isDayOff });
     // SalonBoard の休日は実DOM上 0:00-29:00 の予定として表現される。
     // KIREIDOT側の「移動」「他店舗出勤」等を追加しようとすると
@@ -2738,6 +2745,15 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     //   既存予定があれば、受付停止という同期目的は達成済み=冪等成功として扱う。完全被覆でない
     //   区間差は残るが、別予定との衝突検知(タイトル不一致 or 汎用タイトル)は従来どおり維持する。
     if (!genericTitle && actualTitle === targetTitle && start < endTotal && end > startTotal) found = true;
+    // ★手動入力予定の根治(2026-07-27 代官山 とっとりこころ で実害): 店舗がSBへ手入力すると
+    //   todoTitle は汎用「予定あり」になり、実名は todoMemo に入る(例 memo「とっとりこころ（こぼ手入力）」/
+    //   KD block_reason「とっとりこころさん」)。title一致では拾えないため、敬称・注釈を除いた固有名の核が
+    //   SB側の title か memo と一致し対象区間と重なるなら、同一予定=冪等成功とする。核が2文字以下だと
+    //   別予定への誤一致リスクがあるため3文字以上に限定。汎用タイトル対象や別名は従来どおり失敗=衝突検知。
+    if (!genericTitle && start < endTotal && end > startTotal) {
+      const tCore = nameCore(targetTitle);
+      if (tCore.length >= 3 && (tCore === nameCore(actualTitle) || tCore === nameCore(actualMemo))) found = true;
+    }
   }
   // SB は既存予定と重複する予定POSTを黙って破棄する。既存予定(タイトル問わず。
   // 「予定あり」=無題や旧予定方式の「土日祝早番」等も含む)の結合区間が登録区間を
