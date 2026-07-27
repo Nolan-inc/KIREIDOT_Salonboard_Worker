@@ -2425,6 +2425,11 @@ let _lastProxyCheck = 0;
 // 保証するので、ここでは「プロセス全体の同時実行数」だけを上限管理する。別店舗(=別ISP
 // IP/別セッション)は安全に並行可能(店舗→IPは pickProxy で sticky)。
 const _inFlight = new Map<string, Promise<unknown>>();
+// keepalive を「書込走行中だけ」スキップさせるため、in-flight な書込ジョブIDを別途追跡する。
+// fetch 走行中は keepalive を許可し、warm を保つ(同一アカウントの衝突は withAccountJobGate が防ぐ)。
+// 従来は _inFlight(fetch含む全ジョブ)>0 でスキップしていたため、fetch が多い時間帯に
+// keepalive が一度も走らず、セッションが cold 化していた(2026-07-27 判明)。
+const _inFlightWrites = new Set<string>();
 // SalonBoard は1ログインで複数店舗を持つ。DB の per-shop lane だけでは同じ
 // ログインIDの店舗が並列実行され、サロン選択・フォーム状態・Cookie を奪い合う。
 // Cloud worker 内ではログインアカウント単位で必ず直列化する。
@@ -5222,14 +5227,19 @@ async function pollOnce(): Promise<number> {
   for (const job of jobs) {
     // await しない: 別店舗レーンを並行処理。handleJobGuarded は必ず callback を返し、
     // 例外も内部で握って running を解除する(取りこぼし防止)。
+    const isWrite = job.job_type === "push_booking"
+      || job.job_type === "cancel_booking"
+      || job.job_type === "push_shifts";
     const p = withAccountJobGate(job, () => handleJobGuarded(job))
       .catch((e) =>
         console.error(`[job] guarded uncaught ${job.id.slice(0, 8)}: ${e}`)
       )
       .finally(() => {
         _inFlight.delete(job.id);
+        if (isWrite) _inFlightWrites.delete(job.id);
       });
     _inFlight.set(job.id, p);
+    if (isWrite) _inFlightWrites.add(job.id);
   }
   return jobs.length;
 }
@@ -5855,7 +5865,7 @@ let _keepaliveRunning = false;
 async function keepaliveOnce(): Promise<void> {
   if (!keepaliveEnabled() || !isCloudWorker() || isShutdownRequested()) return;
   if (_keepaliveRunning) return; // 前サイクル未完なら重複起動しない
-  if (_inFlight.size > 0) return; // 実ジョブ優先: 走行中は一切やらない
+  if (_inFlightWrites.size > 0) return; // 書込優先: 書込走行中のみスキップ(fetch中は温める)
   // 健全IPが無い時は触らない(pollOnce と同じフラグ延命防止方針)。
   if (
     proxyPoolList().length > 0 &&
@@ -5876,7 +5886,7 @@ async function keepaliveOnce(): Promise<void> {
     if (targets.length === 0) return;
     const counts: Record<string, number> = {};
     for (const t of targets) {
-      if (isShutdownRequested() || _inFlight.size > 0) break; // 実ジョブが来たら即譲る
+      if (isShutdownRequested() || _inFlightWrites.size > 0) break; // 書込が来たら即譲る
       const r = await withAccountJobGate(
         {
           credentials: {
