@@ -2106,8 +2106,6 @@ function cleanText(s) {
 
 // ----------------- メニュー一覧 (menuEdit) -----------------
 
-const MENU_EDIT_URL = 'https://salonboard.com/CNK/draft/menuEdit';
-
 /**
  * SalonBoard のメニュー編集画面からメニュー一覧を取得する。
  * 実 DOM (menu.html) より、各メニューは
@@ -2119,13 +2117,19 @@ const MENU_EDIT_URL = 'https://salonboard.com/CNK/draft/menuEdit';
  * の連番フィールドで構成される。属性順に依存しないよう DOM の .value を読む。
  */
 async function scrapeMenus(page, opts = {}) {
-  // ジャンル別分岐: 美容室(hair)はメニューではなく「スタイル一覧」を取得する。
-  // 他ジャンル(esthetic/nail/eyelash/other)は従来のメニュー編集画面 (/CNK/draft/menuEdit)。
-  if (opts.genre === 'hair') {
-    return scrapeStyles(page, opts);
-  }
-  await page.goto(MENU_EDIT_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  // 掲載管理は美容室=/CNB/、その他=/CNK/。スタイルは scrapeStyles で別に取得する。
+  const menuEditUrl = draftUrl(opts.genre, 'menuEdit', opts.baseUrl);
+  await page.goto(menuEditUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  const selected = await ensureSalonSelected(page, {
+    salonId: opts.salonId,
+    shopName: opts.shopName,
+  });
+  if (selected.selected) {
+    await page.goto(menuEditUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  }
 
   const raw = await page.evaluate(() => {
     // name="frmMenuEditMenuDetailList[N].field" の N とフィールドを引く
@@ -14060,6 +14064,7 @@ module.exports = {
   scrapeSalonInfo,
   scrapeEquipment,
   scrapeMenus,
+  scrapeStyles,
   scrapeCoupons,
   scrapeBlogs,
   scrapeReviews,

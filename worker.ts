@@ -2243,7 +2243,7 @@ async function handleJob(job: Job): Promise<void> {
         fetch_staff: { fn: "scrapeStaff", key: "staff" },
         fetch_menu: { fn: "scrapeMenus", key: "menus" },
         fetch_menus: { fn: "scrapeMenus", key: "menus" },
-        fetch_style: { fn: "scrapeMenus", key: "styles" },
+        fetch_style: { fn: "scrapeStyles", key: "styles" },
         fetch_coupon: { fn: "scrapeCoupons", key: "coupons" },
         fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
         fetch_equipment: { fn: "scrapeEquipment", key: "equipment" },
@@ -5457,6 +5457,7 @@ async function directScrape(shopId: string): Promise<void> {
     const fnByType: Record<string, string> = {
       bookings: "scrapeBookings", staff: "scrapeStaff",
       menu: "scrapeMenus", menus: "scrapeMenus",
+      style: "scrapeStyles", styles: "scrapeStyles",
       coupon: "scrapeCoupons", coupons: "scrapeCoupons",
       blog: "scrapeBlogs", blogs: "scrapeBlogs",
       review: "scrapeReviews", reviews: "scrapeReviews",
