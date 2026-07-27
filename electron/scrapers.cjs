@@ -5036,27 +5036,13 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   }
   const when = parseJstPartsForPush(p.scheduled_at);
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
-  // ★過去時刻の予約: SalonBoard は当日(JST)内なら開始時刻を過ぎていても
-  //   警告確認(「予約時間を過ぎていますがよろしいですか？」等)付きで登録/変更を
-  //   受け付ける。警告は acceptWarningModal / ネイティブ confirm ハンドラが自動で
-  //   OK するため、ここでは「JST で前日以前」の予約だけを弾く。
-  //   (2026-07-22 変更: 従来の1時間グレースだと当日内の事後入力・修正が
-  //    BOOKING_TIME_PAST で止まっていた。日跨ぎ直後の edge のため1時間グレースも併存。)
-  //   scheduled_at は JST ISO(+09:00) の絶対時刻なので、Date で now と直接比較できる(TZ非依存)。
-  const PAST_GRACE_MS = 60 * 60 * 1000; // 日跨ぎ直後(前日23時台など)の許容
-  const startMs = new Date(p.scheduled_at).getTime();
-  const jstDayOf = (ms) => Math.floor((ms + 9 * 60 * 60 * 1000) / 86_400_000);
-  if (
-    Number.isFinite(startMs)
-    && jstDayOf(startMs) < jstDayOf(Date.now())
-    && startMs < Date.now() - PAST_GRACE_MS
-  ) {
-    return fail(
-      `予約の開始時刻(${p.scheduled_at})が前日以前のため SalonBoard に登録できません。過去日の予約は SalonBoard へ直接ご登録ください。`,
-      'BOOKING_TIME_PAST',
-      true,
-    );
-  }
+  // ★過去時刻の予約: SalonBoard は開始時刻を過ぎた予約(当日内の事後入力や、前日以前の
+  //   過去日)でも、警告確認(「予約時間を過ぎていますがよろしいですか？」等)付きで
+  //   登録/変更を受け付ける。警告は acceptWarningModal / ネイティブ confirm ハンドラが
+  //   自動で OK するため、ここでの過去時刻ブロックは行わない。
+  //   (2026-07-27 変更: 従来は「前日以前」を BOOKING_TIME_PAST で弾いていたが、過去日の
+  //    事後登録の要望に対応し撤廃。SB フォーム側が受け付けない場合のみ通常の失敗として
+  //    surface される。旧: 当日OK/1時間グレース → 過去日も含め一律許可。)
   if (!p.salonboard_staff_external_id) {
     return fail('SalonBoard スタッフ external_id が未指定です', 'STAFF_MAPPING_NOT_FOUND', true);
   }
