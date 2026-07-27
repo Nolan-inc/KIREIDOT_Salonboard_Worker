@@ -125,6 +125,11 @@ function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
 function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   const source = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
   const cloudSource = readFileSync(require.resolve('./worker.ts'), 'utf8');
+  const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
+  const pcFallbackGateMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260727171841_gate_pc_fallback_on_compatible_worker.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -177,7 +182,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /formSubmit\('extReserveChange', 'doComplete'\)/,
+    /formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
     'KLP booking updates must submit synchronously before placeholder blur restores empty names',
   );
   assert.match(
@@ -197,7 +202,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /warningResubmitted[\s\S]*warnArea[\s\S]*formSubmit\('extReserveChange', 'doComplete'\)/,
+    /warningResubmitted[\s\S]*warnArea[\s\S]*formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
     'SalonBoard equipment warnings must resubmit synchronously without restoring name placeholders',
   );
   assert.match(
@@ -219,6 +224,26 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     `${source}\n${cloudSource}`,
     /登録の完了サインは出ましたが\s*reserveId\s*を確認できませんでした/,
     'the legacy false-failure message must not return from either worker implementation',
+  );
+  assert.match(
+    pcWorkerSource,
+    /normalizeConfirmedRegistrationCallback[\s\S]{0,900}id_unverified:\s*true/,
+    'the desktop callback boundary must normalize legacy confirmed registrations to success',
+  );
+  assert.match(
+    pcWorkerSource,
+    /isConfirmedRegistrationWithoutReserveId\(msg\)\) return/,
+    'the desktop worker must suppress legacy false-failure Slack notifications',
+  );
+  assert.match(
+    pcFallbackGateMigration,
+    /last_seen_at >= now\(\) - interval '2 minutes'[\s\S]{0,500}>= \(0, 2, 231\)/,
+    'PC fallback must require a fresh compatible desktop worker',
+  );
+  assert.match(
+    pcFallbackGateMigration,
+    /not v_compatible_pc_online[\s\S]{0,1800}executor = 'playwright_cloud'[\s\S]{0,900}run_at = now\(\) \+ interval '1 minute'/,
+    'Cloud failures must remain in Cloud while no compatible PC is online',
   );
   assert.match(
     source,
@@ -305,7 +330,6 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /accountHasRotated[\s\S]{0,420}!accountHasRotated[\s\S]{0,220}shopOverride/,
     'a rotated account login must bypass the failing shop-level static proxy override',
   );
-  const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
   const scraperSource = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
   assert.match(
     scraperSource,
@@ -329,12 +353,12 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     scraperSource,
-    /persistedEquipmentAssignment[\s\S]{0,5000}\^YE\\d\+\$[\s\S]{0,1200}actualEquipName = persistedEquipmentAssignment\.name/,
+    /persistedEquipmentAssignment[\s\S]{0,5000}\^\(\?:YE\|BE\)\\d\+\$[\s\S]{0,1200}actualEquipName = persistedEquipmentAssignment\.matched\.name/,
     'booking updates must accept only SalonBoard-issued persisted equipment assignments as the detail fallback',
   );
   assert.match(
     scraperSource,
-    /waitForLoadState\('networkidle'[\s\S]{0,7000}equipmentSelect\.value = equipmentValue[\s\S]{0,1200}formSubmit\('extReserveChange', 'doComplete'\)/,
+    /waitForLoadState\('networkidle'[\s\S]{0,7000}equipmentSelect\.value = equipmentValue[\s\S]{0,1200}formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
     'booking updates must re-apply equipment after availability Ajax and in the same turn as form submission',
   );
   assert.match(

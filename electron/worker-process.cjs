@@ -1385,13 +1385,19 @@ function maybeSlackFromEmit(type, payload) {
   try {
     if (type === 'error') {
       const msg = payload?.msg ?? payload?.error ?? JSON.stringify(payload);
+      // Older scraper branches reported this after SalonBoard had already
+      // shown the registration-complete state.  Retrying can duplicate the
+      // booking, so never surface it as an operational failure.
+      if (isConfirmedRegistrationWithoutReserveId(msg)) return;
       void sendSlack(`エラー: ${msg}`);
       return;
     }
     if (type === 'log') {
       const lvl = payload?.level;
       if (lvl === 'error' || lvl === 'warn') {
-        void sendSlack(`[${lvl}] ${payload?.msg ?? ''}`);
+        const msg = payload?.msg ?? '';
+        if (isConfirmedRegistrationWithoutReserveId(msg)) return;
+        void sendSlack(`[${lvl}] ${msg}`);
       }
       return;
     }
@@ -4639,8 +4645,16 @@ async function runPushJobs({ showBrowser } = {}) {
             // preflight で既に SalonBoard にあった (新規登録ではない) ことを Admin に伝える。
             // スイープの「自動で入れた」Slack 通知は新規登録のみを対象にするため、ここを見て分岐する。
             already_exists: result.alreadyExists === true,
-            result_payload: result.confirmed,
-            summary: `push_booking ${result.alreadyExists ? '既存確認 (登録済み)' : '登録完了'} (external_id=${result.externalId ?? '?'})`,
+            result_payload: {
+              ...(result.confirmed || {}),
+              ...(result.idUnverified === true
+                ? {
+                    id_unverified: true,
+                    warning: result.warning || '登録完了を確認済み。SalonBoard予約IDは後続取込で補完します。',
+                  }
+                : {}),
+            },
+            summary: `push_booking ${result.alreadyExists ? '既存確認 (登録済み)' : '登録完了'} (external_id=${result.externalId ?? '?'})${result.idUnverified === true ? ' / ID後続補完' : ''}`,
           });
           emit('log', { level: 'info', msg: `[${tag}] ✅ ${result.alreadyExists ? '既存確認(登録済み)' : '登録完了'} external_id=${result.externalId ?? '?'}${result.confirmed?.equip_assigned ? ` / 設備:${result.confirmed.equip_assigned}` : ''}`, at: new Date().toISOString() });
           emit('push:done', { bookingId: payload.booking_id, ok: true, externalId: result.externalId ?? null, detailUrl: result.detailUrl ?? null });
@@ -4847,7 +4861,39 @@ async function runPushJobs({ showBrowser } = {}) {
 }
 
 /** /api/salonboard/callback に結果を POST する。 */
+function isConfirmedRegistrationWithoutReserveId(value) {
+  const text = String(value ?? '');
+  return text.includes('登録の完了サインは出ましたが') &&
+    /reserveId\s*を確認できませんでした/.test(text);
+}
+
+function normalizeConfirmedRegistrationCallback(body) {
+  const status = body?.status;
+  const reason = body?.error || body?.summary || '';
+  if (
+    body?.job_type === 'push_booking' &&
+    status !== 'succeeded' &&
+    isConfirmedRegistrationWithoutReserveId(reason)
+  ) {
+    return {
+      ...body,
+      status: 'succeeded',
+      error_code: null,
+      error: null,
+      manual_required: false,
+      result_payload: {
+        ...(body?.result_payload || {}),
+        id_unverified: true,
+        warning: '登録完了を確認済み。SalonBoard予約IDは後続取込で補完します。',
+      },
+      summary: 'push_booking 登録完了 (external_id=? / ID後続補完)',
+    };
+  }
+  return body;
+}
+
 async function postCallback(body) {
+  body = normalizeConfirmedRegistrationCallback(body);
   // 失敗系の結果(登録/変更/キャンセル/投稿の失敗)は Slack にも通知する。
   // emit('log',{level:'error'}) を通らないケース(callbackだけで完結する失敗)も
   // 取りこぼさないための保険。成功(succeeded)は通知しない。
