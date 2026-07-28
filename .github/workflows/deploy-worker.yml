@@ -6,6 +6,7 @@ on:
     paths:
       - worker.ts
       - electron/scrapers.cjs
+      - electron/worker-process.cjs
       - salonboard-selectors.ts
       - salonboard-rescan.ts
       - canary.ts
