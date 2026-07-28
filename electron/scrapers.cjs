@@ -5149,19 +5149,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const startedAt = Date.now();
     let previous = '';
     let stableReads = 0;
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 24; i += 1) {
       const current = await token.evaluate((el) => {
         const value = 'value' in el ? String(el.value || '') : '';
         return (value || el.getAttribute('value') || el.textContent || '').trim();
       }).catch(() => '');
       if (current && current === previous) {
         stableReads += 1;
-        if (stableReads >= 2 && Date.now() - startedAt >= 1_500) return current;
+        // WAO新宿の実測では、トークン取得から登録URLがSBへ届くまで最大14秒かかる。
+        // 1.5秒の固定待機は楽観ロックの有効時間を自ら削るため、Ajax差し替えを
+        // 3連続読取(約225ms)で確認できたら直ちに使う。
+        if (stableReads >= 3 && Date.now() - startedAt >= 225) return current;
       } else {
         previous = current;
         stableReads = 0;
       }
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(75);
     }
     return previous;
   };
@@ -5333,6 +5336,19 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     u.searchParams.set('rsvMinute', startMM);
     if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
   }
+  if (rlastupdate) {
+    const m = String(rlastupdate).match(
+      /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/,
+    );
+    const tokenAt = m
+      ? Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+09:00`)
+      : NaN;
+    console.log(
+      `[pushstep] ${(p.booking_id || '').slice(0, 8)} schedule-token=${rlastupdate} ` +
+      `ageMs=${Number.isFinite(tokenAt) ? Math.max(0, Date.now() - tokenAt) : 'unknown'} ` +
+      `retry=${staleTokenRetry}`,
+    );
+  }
   try {
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     // ★高速化(要望対応): networkidle(SalonBoardは常時通信で40秒近く待つことがある)を
@@ -5346,8 +5362,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // SalonBoard側の遷移が同時更新で中断された場合は、古いrlastupdateを握ったまま
     // 続行せず、スケジュールから最新トークンを取り直して登録工程を再実行する。
     if (/ERR_ABORTED|frame (?:was )?detached|Target page, context or browser has been closed/i.test(message)
-      && staleTokenRetry < 2) {
-      await page.waitForTimeout(500 + staleTokenRetry * 500).catch(() => {});
+      && staleTokenRetry < 4) {
+      await page.waitForTimeout(150 + staleTokenRetry * 100).catch(() => {});
       return pushBookingViaForm(page, payload, {
         ...opts,
         staleTokenRetry: staleTokenRetry + 1,
@@ -5373,16 +5389,16 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // SalonBoardのrlastupdateはスケジュール変更のたびに失効する。同じ店舗で受付操作や
     // 別ジョブが直前に走ると、取得から登録フォーム遷移までの数秒でもKPCL017V01
     // (「他のユーザによって変更」)になる。手動対応へ落とさず、最新トークン取得を含む
-    // 登録工程を最初から最大2回やり直す。先頭の既存予約チェックも再実行するため、
+    // 登録工程を最初から最大4回やり直す。先頭の既存予約チェックも再実行するため、
     // 直前の試行が実は登録済みだった場合でも二重登録しない。
     const staleToken = /他のユーザによって変更|最新情報を確認|KPCL017V01/i.test(
       `${diag.body || ''} ${diag.url || ''}`,
     );
-    if (staleToken && staleTokenRetry < 2) {
+    if (staleToken && staleTokenRetry < 4) {
       console.log(
-        `[pushstep] ${(p.booking_id || '').slice(0, 8)} stale rlastupdate → 全工程再試行 ${staleTokenRetry + 1}/2`,
+        `[pushstep] ${(p.booking_id || '').slice(0, 8)} stale rlastupdate → 全工程再試行 ${staleTokenRetry + 1}/4`,
       );
-      await page.waitForTimeout(500 + staleTokenRetry * 500);
+      await page.waitForTimeout(150 + staleTokenRetry * 100);
       return pushBookingViaForm(page, payload, {
         ...opts,
         staleTokenRetry: staleTokenRetry + 1,
@@ -5395,7 +5411,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       // 渡す。pushBookingViaForm 冒頭の既存予約確認により、直前の試行が実は成功して
       // いた場合も二重登録にはならない。
       return fail(
-        `SalonBoardの更新競合(KPCL017V01)が3回続きました。最新情報から全工程を再試行します。`,
+        `SalonBoardの更新競合(KPCL017V01)が5回続きました。最新情報から全工程を再試行します。`,
         'SB_SERVER_ERROR',
         false,
       );
@@ -7211,7 +7227,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   // +81 国際形式の残骸(例 817014551257 = 12桁・0始まりでない)も国内 0 始まりへ変換する
   // (ハイフンが無くてもこの validation 文言で弾かれる。2026-07-22 YG97547036)。
   // 値そのものはログへ出さず、補正した field 名だけを後段の診断情報へ残す。
-  const normalizedHyphenFields = await page.evaluate(() => {
+  const normalizedHyphenFields = await page.evaluate((payloadPhone) => {
     const changed = [];
     const contactHint = /(tel|phone|mobile|zip|post|postal|郵便|電話)/i;
     const telHint = /(tel|phone|mobile|電話)/i;
@@ -7229,6 +7245,33 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       }
       return digits;
     };
+    const extractOriginalPhone = () => {
+      const explicit = toDomestic(toAsciiDigits(payloadPhone).replace(/[^\d]/g, ''));
+      if (explicit) return explicit;
+      const originalCandidates = [
+        '#orgCustomerTel', '#orgTel', '#orgPhone',
+        '[id*="org"][id*="tel" i]', '[id*="org"][id*="phone" i]',
+        'input[type="hidden"][name*="tel" i]', 'input[type="hidden"][name*="phone" i]',
+      ];
+      for (const selector of originalCandidates) {
+        for (const el of document.querySelectorAll(selector)) {
+          const raw = String(el.value || el.textContent || '');
+          const normalized = toDomestic(toAsciiDigits(raw).replace(/[^\d]/g, ''));
+          if (normalized && /^0\d{9,10}$/.test(normalized)) return normalized;
+        }
+      }
+      // HotPepper予約の変更画面では、元の連絡先が入力欄ではなく「予約者連絡先」
+      // の表示テキストにだけ残る版がある。日付等を拾わないよう 0 始まり10/11桁に限定。
+      const body = String(document.body?.innerText || '');
+      const labelled = body.match(
+        /(?:予約者連絡先|連絡先|電話番号)[^\d+]{0,30}((?:\+?81|0)[\d０-９\s\-‐‑‒–—―−ー－]{8,18})/i,
+      );
+      const labelledPhone = toDomestic(
+        toAsciiDigits(labelled?.[1] || '').replace(/[^\d]/g, ''),
+      );
+      return /^0\d{9,10}$/.test(labelledPhone) ? labelledPhone : '';
+    };
+    const fallbackPhone = extractOriginalPhone();
     document.querySelectorAll('input').forEach((el) => {
       const value = String(el.value || '');
       const asciiValue = toAsciiDigits(value);
@@ -7250,8 +7293,36 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       el.dispatchEvent(new Event('change', { bubbles: true }));
       changed.push({ field: el.name || el.id || '(unnamed)', digitCount: next.length });
     });
+    // reserveChange の customerTel/customerTel2 は、見た目が空でも確定POSTで再検証される。
+    // 公式ボタンのJSは表示中のHPB連絡先を customerTel へコピーするが、後段の直接
+    // formSubmit ではそのblur処理を経由しないため明示的に復元する。
+    const primaryTel = document.querySelector(
+      'input#customerTel, input[name="customerTel"], input[name="tel"], input[type="tel"]',
+    );
+    if (primaryTel) {
+      const current = toDomestic(toAsciiDigits(primaryTel.value).replace(/[^\d]/g, ''));
+      const next = /^0\d{9,10}$/.test(current) ? current : fallbackPhone;
+      if (next) {
+        primaryTel.value = next;
+        primaryTel.defaultValue = next;
+        primaryTel.classList.remove('mod_color_999999');
+        primaryTel.removeAttribute('data-empty');
+        try {
+          if (window.jQuery) window.jQuery(primaryTel).removeData('empty');
+        } catch (_e) { /* noop */ }
+        primaryTel.dispatchEvent(new Event('input', { bubbles: true }));
+        primaryTel.dispatchEvent(new Event('change', { bubbles: true }));
+        if (next !== current) {
+          changed.push({
+            field: primaryTel.name || primaryTel.id || 'customerTel',
+            digitCount: next.length,
+            restored: true,
+          });
+        }
+      }
+    }
     return changed;
-  }).catch(() => []);
+  }, normalizeJpPhoneDigits(p.customer_phone)).catch(() => []);
 
   // 4) 確定: 実DOMでは画面下部の <a id="change" class="mod_btn_50">確定する</a> が
   //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
@@ -7420,7 +7491,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // 顧客欄の blur handler が placeholder を復元し、正しいカナが空として送られる。
     // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
     // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
-    const directSubmitResult = await page.evaluate((equipmentValue) => {
+    const directSubmitResult = await page.evaluate(({ equipmentValue, customerPhone }) => {
       // ★HotPepper(ネット予約 BF...)の変更フォームは id="reserveChange"(action=/net/reserveChange)、
       //   KD由来(YG/YH)は id="extReserveChange"。設備(ベッド)を同一JSターンで再設定するには実フォームを
       //   掴む必要がある。extReserveChange 決め打ちだとネット予約でnull→直接送信が不発→ボタン送信
@@ -7449,6 +7520,51 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         el.classList.remove('mod_color_999999');
         el.removeAttribute('data-empty');
         try { jq(el).removeData('empty'); } catch (_e) { /* noop */ }
+      }
+      const toAsciiDigits = (value) => String(value || '').replace(/[０-９]/g, (ch) =>
+        String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+      const toDomestic = (raw) => {
+        const digits = toAsciiDigits(raw).replace(/[^\d]/g, '');
+        if (!digits || (digits.startsWith('0') && digits.length <= 11)) return digits;
+        for (const prefix of ['01081', '0081', '81']) {
+          if (!digits.startsWith(prefix)) continue;
+          let rest = digits.slice(prefix.length);
+          if (!rest.startsWith('0')) rest = `0${rest}`;
+          if (rest.length === 10 || rest.length === 11) return rest;
+        }
+        return digits;
+      };
+      const findOriginalPhone = () => {
+        const supplied = toDomestic(customerPhone);
+        if (/^0\d{9,10}$/.test(supplied)) return supplied;
+        for (const selector of [
+          '#orgCustomerTel', '#orgTel', '#orgPhone',
+          '[id*="org"][id*="tel" i]', '[id*="org"][id*="phone" i]',
+          'input[type="hidden"][name*="tel" i]', 'input[type="hidden"][name*="phone" i]',
+        ]) {
+          for (const el of document.querySelectorAll(selector)) {
+            const normalized = toDomestic(el.value || el.textContent || '');
+            if (/^0\d{9,10}$/.test(normalized)) return normalized;
+          }
+        }
+        const labelled = String(document.body?.innerText || '').match(
+          /(?:予約者連絡先|連絡先|電話番号)[^\d+]{0,30}((?:\+?81|0)[\d０-９\s\-‐‑‒–—―−ー－]{8,18})/i,
+        );
+        const normalized = toDomestic(labelled?.[1] || '');
+        return /^0\d{9,10}$/.test(normalized) ? normalized : '';
+      };
+      const tel = form.querySelector(
+        'input#customerTel, input[name="customerTel"], input[name="tel"], input[type="tel"]',
+      );
+      if (tel) {
+        const current = toDomestic(tel.value);
+        const next = /^0\d{9,10}$/.test(current) ? current : findOriginalPhone();
+        if (!next) return { submitted: false, reason: 'customer_phone_missing_at_submit' };
+        tel.value = next;
+        tel.defaultValue = next;
+        tel.classList.remove('mod_color_999999');
+        tel.removeAttribute('data-empty');
+        try { jq(tel).removeData('empty'); } catch (_e) { /* noop */ }
       }
       jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');
       jq('#extCouponArea select').each(function normalizeUndefinedCoupon() {
@@ -7479,7 +7595,10 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         : [];
       jq.shuhari.formSubmit(form.id || 'extReserveChange', 'doComplete');
       return { submitted: true, equipmentFields };
-    }, selectedEquipmentValue).catch((e) => ({
+    }, {
+      equipmentValue: selectedEquipmentValue,
+      customerPhone: normalizeJpPhoneDigits(p.customer_phone),
+    }).catch((e) => ({
       submitted: false,
       reason: e?.message || String(e),
     }));
@@ -7575,6 +7694,29 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           el.classList.remove('mod_color_999999');
           el.removeAttribute('data-empty');
           try { jq(el).removeData('empty'); } catch (_e) { /* noop */ }
+        }
+        // 警告画面からの再送でも customerTel のblur補完は走らない。最初の送信直前に
+        // 復元した国内形式を維持し、全角/ハイフンが戻っていれば再度数字だけにする。
+        const tel = form.querySelector(
+          'input#customerTel, input[name="customerTel"], input[name="tel"], input[type="tel"]',
+        );
+        if (tel) {
+          const ascii = String(tel.value || '').replace(/[０-９]/g, (ch) =>
+            String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
+          let digits = ascii.replace(/[^\d]/g, '');
+          for (const prefix of ['01081', '0081', '81']) {
+            if (!digits.startsWith(prefix)) continue;
+            digits = digits.slice(prefix.length);
+            if (!digits.startsWith('0')) digits = `0${digits}`;
+            break;
+          }
+          if (/^0\d{9,10}$/.test(digits)) {
+            tel.value = digits;
+            tel.defaultValue = digits;
+            tel.classList.remove('mod_color_999999');
+            tel.removeAttribute('data-empty');
+            try { jq(tel).removeData('empty'); } catch (_e) { /* noop */ }
+          }
         }
         warn.style.display = 'none';
         jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');

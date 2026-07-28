@@ -165,8 +165,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /readStableScheduleToken[\s\S]{0,1800}Date\.now\(\) - startedAt >= 1_500[\s\S]{0,800}waitForTimeout\(150\)/,
+    /readStableScheduleToken[\s\S]{0,2200}stableReads >= 3[\s\S]{0,300}Date\.now\(\) - startedAt >= 225[\s\S]{0,800}waitForTimeout\(75\)/,
     'new bookings must settle the Ajax-updated rlastupdate token without a long staff-selector wait',
+  );
+  assert.match(
+    source,
+    /schedule-token=\$\{rlastupdate\}[\s\S]{0,120}ageMs=/,
+    'new booking failures must record rlastupdate age for optimistic-lock diagnosis',
   );
   assert.doesNotMatch(
     source,
@@ -187,6 +192,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     source,
     /invalidFirstKana[\s\S]*\(\?:メイ\|名/,
     'SalonBoard first-name-kana placeholders must be replaced before booking updates',
+  );
+  assert.match(
+    source,
+    /予約者連絡先\|連絡先\|電話番号[\s\S]{0,1800}customerTel[\s\S]{0,1800}customer_phone_missing_at_submit/,
+    'booking changes must restore the displayed HotPepper phone before direct form submission',
   );
   assert.match(
     source,
