@@ -2841,14 +2841,16 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
 
   // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
   const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min))) ? Number(p.duration_min) : 60;
-  const startTotal = when.hour * 60 + when.minute;
+  const originalStartTotal = when.hour * 60 + when.minute;
+  const originalEndTotal = originalStartTotal + durMin;
+  let startTotal = originalStartTotal;
   let endTotal = startTotal + durMin;
   let endHour = Math.floor(endTotal / 60);
   let endMin = endTotal % 60;
-  const startHH = String(when.hour).padStart(2, '0');
-  const startMM = String(when.minute).padStart(2, '0');
-  const endHH = String(endHour).padStart(2, '0');
-  const endMM = String(endMin).padStart(2, '0');
+  let startHH = String(when.hour).padStart(2, '0');
+  let startMM = String(when.minute).padStart(2, '0');
+  let endHH = String(endHour).padStart(2, '0');
+  let endMM = String(endMin).padStart(2, '0');
 
   // タイトル = 理由(休憩/業務等)。メモにも理由を残す。
   const title = (String(p.block_reason || '').trim() || '予定').slice(0, 30);
@@ -2870,23 +2872,23 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // スタッフ列の描画後、値が連続して安定した時点のトークンを使う。
   const readStableRlastupdate = async () => {
     await page.waitForSelector('#rlastupdate', { timeout: 8_000 }).catch(() => {});
-    // スタッフ列セレクタは店舗/画面版によって存在しない。ここを12秒待つと、
+    // スタッフ列セレクタは店舗/画面版によって存在しない。ここを長く待つと、
     // 取得済みの rlastupdate がその待機中に失効し、WAO新宿で KPCL017V01 を
-    // 自分自身で発生させていた。Ajaxのトークン差し替えを短時間だけ監視し、
-    // 最後に安定した値を登録画面へ即座に渡す。
+    // 自分自身で発生させていた。Ajaxのトークン差し替えを75ms間隔で監視し、
+    // 3回連続で安定した値を登録画面へ即座に渡す。
     const startedAt = Date.now();
     let previous = '';
     let stableReads = 0;
-    for (let i = 0; i < 16; i += 1) {
+    for (let i = 0; i < 24; i += 1) {
       const current = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
       if (current && current === previous) {
         stableReads += 1;
-        if (stableReads >= 2 && Date.now() - startedAt >= 1_500) return current;
+        if (stableReads >= 3 && Date.now() - startedAt >= 225) return current;
       } else {
         previous = current;
         stableReads = 0;
       }
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(75);
     }
     return previous;
   };
@@ -2926,6 +2928,84 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     };
   }
 
+  // SalonBoard は既存予定と重なる区間を含む予定POSTを、HTTP 200のまま黙って
+  // 破棄する。対象区間の一部だけが既存ブロックに覆われている場合は、全区間を
+  // 再送せず「まだ覆われていない区間」だけを追加する。
+  //
+  // 例: KD=17:30-20:00、SB既存「予定あり」=16:00-19:30 の場合、
+  //     19:30-20:00 だけを登録する。これで既存予定との衝突を避けつつ、
+  //     KIREIDOTが要求する受付停止区間の和集合を一致させる。
+  const coverageBlocks = Array.isArray(existing?.blocks)
+    ? existing.blocks
+      .map((b) => ({
+        start: Math.max(originalStartTotal, Number(b.start)),
+        end: Math.min(originalEndTotal, Number(b.end)),
+      }))
+      .filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
+      .sort((a, b) => a.start - b.start)
+    : [];
+  if (coverageBlocks.length > 0) {
+    const merged = [];
+    for (const b of coverageBlocks) {
+      const last = merged[merged.length - 1];
+      if (last && b.start <= last.end) last.end = Math.max(last.end, b.end);
+      else merged.push({ ...b });
+    }
+    const uncovered = [];
+    let cursor = originalStartTotal;
+    for (const b of merged) {
+      if (b.start > cursor) uncovered.push({ start: cursor, end: b.start });
+      cursor = Math.max(cursor, b.end);
+    }
+    if (cursor < originalEndTotal) uncovered.push({ start: cursor, end: originalEndTotal });
+
+    if (uncovered.length === 0) {
+      return {
+        status: 'ok',
+        externalId: null,
+        alreadyExists: true,
+        confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
+      };
+    }
+    if (uncovered.length > 1 && !opts._splitCoverage) {
+      for (const segment of uncovered) {
+        const shiftedAt = new Date(
+          Date.parse(p.scheduled_at) + (segment.start - originalStartTotal) * 60_000,
+        ).toISOString();
+        const segmentResult = await pushScheduleViaForm(page, {
+          ...p,
+          scheduled_at: shiftedAt,
+          duration_min: segment.end - segment.start,
+        }, {
+          ...opts,
+          _splitCoverage: true,
+          _scheduleWriteAttempt: 1,
+        });
+        if (segmentResult?.status !== 'ok') return segmentResult;
+      }
+      return {
+        status: 'ok',
+        externalId: null,
+        partialCoverageCompleted: true,
+        confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
+      };
+    }
+
+    const [segment] = uncovered;
+    startTotal = segment.start;
+    endTotal = segment.end;
+    endHour = Math.floor(endTotal / 60);
+    endMin = endTotal % 60;
+    startHH = String(Math.floor(startTotal / 60)).padStart(2, '0');
+    startMM = String(startTotal % 60).padStart(2, '0');
+    endHH = String(endHour).padStart(2, '0');
+    endMM = String(endMin).padStart(2, '0');
+    console.log(
+      `[schedule] partial coverage ${originalStartTotal}-${originalEndTotal} -> ` +
+      `register uncovered ${startTotal}-${endTotal}`,
+    );
+  }
+
   // (2) 予約登録フォームを開く (予約と同じ URL + パラメータ)。
   // SalonBoard はスケジュールを表示した瞬間の rlastupdate を楽観ロックとして使う。
   // 別タブ/別利用者/SalonBoard側処理で更新されると KPCL017V01 のエラー画面へ遷移し、
@@ -2933,7 +3013,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 最新スケジュールへ戻って rlastupdate を取り直し、同じCloud処理内で再試行する。
   let staleFormError = '';
   let formOpened = false;
-  for (let formAttempt = 1; formAttempt <= 3; formAttempt += 1) {
+  for (let formAttempt = 1; formAttempt <= 5; formAttempt += 1) {
     try {
       const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
       refreshUrl.searchParams.set('date', when.yyyymmdd);
@@ -2943,9 +3023,14 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       //   取得1秒後の登録でも必ず KPCL017V01(他のユーザによって変更)を自分で誘発していた
       //   (capture: rlastupdate=20260726230620 → 23:06:21 に KPCL017)。初回取得(上の
       //   readStableRlastupdate)と実予約側(readStableScheduleToken)と同様に、AJAX確定後の
-      //   安定値を使う。安定読みは2連続一致で即返るため通常は数百msで完了する。
+      //   安定値を使う。安定読みは3連続一致で即返るため通常は数百msで完了する。
       await page.goto(refreshUrl.toString(), { waitUntil: 'commit', timeout: 25_000 });
+      const tokenReadStartedAt = Date.now();
       rlastupdate = await readStableRlastupdate();
+      console.log(
+        `[schedule] token=${rlastupdate || '(empty)'} readMs=${Date.now() - tokenReadStartedAt} ` +
+        `formAttempt=${formAttempt}`,
+      );
     } catch (e) {
       return fail(`最新の予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
     }
@@ -2986,7 +3071,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       diagnostics: { staleFormError, rlastupdate },
     });
     return fail(
-      `SalonBoardの更新競合(KPCL017V01)が3回続きました${cap ? ` (capture=${cap})` : ''}`,
+      `SalonBoardの更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
       'CONFIRMATION_MISMATCH',
       false,
     );
@@ -3138,7 +3223,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     endMin = endTotal % 60;
   }
   const timeMismatch = formState && (
-    Number(formState.hh) !== when.hour || Number(formState.mm) !== when.minute
+    Number(formState.hh) !== Math.floor(startTotal / 60) || Number(formState.mm) !== startTotal % 60
     || Number(formState.eh) !== endHour || Number(formState.em) !== endMin
   );
   if (!formState || formState.staffId !== staffExt || formState.date !== ymd || timeMismatch) {
@@ -3249,7 +3334,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
 
   // 登録POSTの瞬間にもSalonBoardの楽観ロックが更新されることがある。
   // 「他のユーザによって変更」画面を手動対応にせず、最新トークン取得を含む全工程を
-  // 同じCloud処理内で最大3回やり直す。前回POSTが実は成功していた場合は、再実行冒頭の
+  // 同じCloud処理内で最大5回やり直す。前回POSTが実は成功していた場合は、再実行冒頭の
   // 既存予定チェックが拾うため二重登録にはならない。
   const postSubmitState = await page.evaluate(() => {
     const text = document.body?.innerText?.replace(/\s+/g, ' ').trim() || '';
@@ -3260,8 +3345,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     };
   }).catch(() => ({ stale: false, explicitFailure: false, text: '' }));
   if (postSubmitState.stale) {
-    if (scheduleWriteAttempt < 3) {
-      await page.waitForTimeout(300 * scheduleWriteAttempt);
+    if (scheduleWriteAttempt < 5) {
+      await page.waitForTimeout(150 + (100 * scheduleWriteAttempt));
       return pushScheduleViaForm(page, payload, {
         ...opts,
         _scheduleWriteAttempt: scheduleWriteAttempt + 1,
@@ -3271,7 +3356,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       diagnostics: { scheduleWriteAttempt, postSubmitState },
     });
     return fail(
-      `SalonBoardの予定登録更新競合(KPCL017V01)が3回続きました${cap ? ` (capture=${cap})` : ''}`,
+      `SalonBoardの予定登録更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
       'CONFIRMATION_MISMATCH',
       false,
     );

@@ -170,6 +170,31 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /readStableRlastupdate[\s\S]{0,1800}stableReads >= 3[\s\S]{0,300}Date\.now\(\) - startedAt >= 225[\s\S]{0,800}waitForTimeout\(75\)/,
+    'schedule blocks must settle the Ajax-updated rlastupdate token before opening the registration form',
+  );
+  assert.match(
+    source,
+    /formAttempt <= 5/,
+    'schedule blocks must retry stale form opens inside one Cloud attempt',
+  );
+  assert.match(
+    source,
+    /scheduleWriteAttempt < 5/,
+    'schedule blocks must retry stale submits inside one Cloud attempt',
+  );
+  assert.match(
+    source,
+    /partial coverage[\s\S]{0,500}register uncovered/,
+    'partially covered schedule blocks must register only the uncovered interval',
+  );
+  assert.match(
+    source,
+    /partialCoverageCompleted:\s*true/,
+    'split uncovered schedule intervals must report idempotent completion',
+  );
+  assert.match(
+    source,
     /schedule-token=\$\{rlastupdate\}[\s\S]{0,120}ageMs=/,
     'new booking failures must record rlastupdate age for optimistic-lock diagnosis',
   );
