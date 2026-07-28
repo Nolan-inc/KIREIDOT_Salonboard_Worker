@@ -5393,7 +5393,14 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       } else {
         // エステ等: 従来どおり日付付き goto で #rlastupdate を取得。
         const schedUrl = new URL(`${ROOT}/schedule/salonSchedule/`, baseUrl);
-        schedUrl.searchParams.set('date', when.yyyymmdd);
+        // ★WAO新宿KPCL017対策(2026-07-29): 初回は対象日で取得(=正常店は不変)。
+        //   ただし KPCL017 再試行時(staleTokenRetry>0)は対象「未来日」の重いスケジュール
+        //   描画で取得トークンが登録GET到達時に失効している疑いがあるため、date を付けず
+        //   「当日」スケジュールから取得する。rlastupdate は日付非依存の現在時刻トークンなので
+        //   当日トークンで未来日の登録URLにも使える(hairブランチと同方針)。
+        if ((staleTokenRetry || 0) === 0) {
+          schedUrl.searchParams.set('date', when.yyyymmdd);
+        }
         // rlastupdate は画面更新の楽観ロック値。Chrome HTTP cache から古いHTMLを
         // 再利用すると、取得直後でも KPCL017V01 になるため毎回固有URLで取得する。
         schedUrl.searchParams.set('_kd_token', String(Date.now()));
