@@ -4400,6 +4400,22 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       for (const { start, end } of needed.values()) warnings.push(`要SB勤務パターン新規登録: ${start}-${end} (KD時刻・確認のみ)`);
       return;
     }
+    // ★SB勤務パターンは1店30件が上限(2026-07-29 ユーザー方針)。既存+新規で30を超える分は
+    //   「登録せずスキップ」する(近い時刻での代用はしない)。上限で push 全体を失敗させず、
+    //   作れる枠の分だけ登録し、超過分は未反映として警告に残す。恒久策として不要パターンの整理を促す。
+    const SB_PATTERN_LIMIT = 30;
+    const capacity = Math.max(0, SB_PATTERN_LIMIT - patterns.length);
+    let neededArr = Array.from(needed.values());
+    if (neededArr.length > capacity) {
+      for (const { start, end } of neededArr.slice(capacity)) {
+        warnings.push(`SB勤務パターン上限(${SB_PATTERN_LIMIT}件)超過のため未登録・未反映: ${start}-${end}(近い時刻での代用はしません。不要なパターンを削除してください)`);
+      }
+      neededArr = neededArr.slice(0, capacity);
+    }
+    if (neededArr.length === 0) {
+      // 新規登録できる枠が無い → 既存パターンのみで反映(未マッチのシフトは下流でスキップ=近似しない)
+      return;
+    }
     // ★SB「短縮名」は半角英数記号あわせて2文字以内。8桁コードは弾かれる(実機確認)。
     //   一意な2文字コードを割当てる(セル表示用)。名称(maxlength40)は可読な KD HH:MM-HH:MM。
     const usedShortNames = new Set(
@@ -4417,7 +4433,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       }
       throw new Error('勤務パターン短縮名の空きがありません');
     };
-    const toCreate = Array.from(needed.values()).map(({ start, end }) => ({
+    const toCreate = neededArr.map(({ start, end }) => ({
       // SalonBoard のシフト名称は実機上10文字まで。従来の
       // `KD 11:00-16:30` は `KD 11:00-1` に切られ、11:00開始の別パターン
       // (例 11:00-19:30) と名称重複して登録できなかった。
@@ -4440,9 +4456,11 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       createFailures.push(String(cr?.reason || cr?.error || '原因不明'));
     }
     if (createFailures.length > 0) {
-      const err = new Error(`勤務パターンを登録できませんでした: ${createFailures.join(' | ')}`);
-      err.code = 'SHIFT_PATTERN_CREATE_FAILED';
-      throw err;
+      // ★上限超過等で新規登録に失敗しても push 全体は失敗させない(2026-07-29 ユーザー方針)。
+      //   作れた分＋既存パターンで反映し、失敗分は未反映として警告に残す(近い時刻の代用はしない)。
+      for (const msg of createFailures) {
+        warnings.push(`勤務パターン新規登録に失敗・未反映(スキップ): ${msg}`);
+      }
     }
     if (registeredCount > 0) {
       warnings.push(`SBに無かった勤務パターン ${registeredCount}件を自動登録しました: ${toCreate.map((p) => p.name).join(', ')}`);
