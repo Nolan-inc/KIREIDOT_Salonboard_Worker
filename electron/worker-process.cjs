@@ -3905,6 +3905,14 @@ async function runPushJobs({ showBrowser } = {}) {
   // 店舗ごとに直列、店舗間は並列で呼ばれる。
   const runOneInner = async (job) => {
     const payload = job.payload || {};
+    // 二重登録防止: push_booking のリトライ(2回目以降の実行=attempts>1)は preflight を
+    // 強制有効化する。前回の実行が SB 登録に成功していたのに完了検知に失敗して再試行された
+    // 場合でも、登録前に既存予約を確認してから進むため、別 reserveId の重複予約
+    // (idUnverified 逆流 / mai・mei 等) を生まない。preflight は external_booking_id が
+    // あれば ID 照合、顧客名があれば一覧照合、どちらも無ければスキップ(=速度・安全性に影響なし)。
+    if (job.job_type === 'push_booking' && (job.attempts || 0) > 1) {
+      payload.preflight_required = true;
+    }
     const creds = job.credentials || {};
     const baseUrl = creds.base_url || 'https://salonboard.com/';
     const tag = `push ${String(job.id).slice(0, 8)} booking=${String(payload.booking_id || '').slice(0, 8)}`;
