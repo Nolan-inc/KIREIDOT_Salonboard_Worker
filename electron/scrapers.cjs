@@ -5455,6 +5455,12 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     );
   }
   try {
+    // ★WAO新宿のKPCL017対策(2026-07-29): rlastupdate は既に取得済みだが、直前の
+    //   スケジュール画面が常時AJAX通信を続けていると、登録フォームへの page.goto が
+    //   その保留通信の裏で最大14秒遅れ、その間に楽観ロック(rlastupdate)が失効して
+    //   KPCL017V01 を自己誘発する(WAO新宿で実測)。取得済みトークンを即使えるよう、
+    //   遷移直前にスケジュール画面の保留通信を止める。保留が無い店では実質no-opで安全。
+    await page.evaluate(() => { try { window.stop(); } catch (_) { /* noop */ } }).catch(() => {});
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     // ★高速化(要望対応): networkidle(SalonBoardは常時通信で40秒近く待つことがある)を
     //   待たず、入力に必要なフォーム要素が出た時点で即進む。広告/計測の通信完了は待たない。
