@@ -220,8 +220,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /予約者連絡先\|連絡先\|電話番号[\s\S]{0,1800}customerTel[\s\S]{0,1800}customer_phone_missing_at_submit/,
-    'booking changes must restore the displayed HotPepper phone before direct form submission',
+    /予約者連絡先\|連絡先\|電話番号[\s\S]{0,2200}if \(next\)[\s\S]{0,600}tel\.value = next/,
+    'booking changes must restore a displayed HotPepper phone when present without requiring an optional phone',
+  );
+  assert.doesNotMatch(
+    source,
+    /customer_phone_missing_at_submit/,
+    'an empty optional phone must not force ext booking updates back through the placeholder-restoring click path',
   );
   assert.match(
     source,
@@ -413,6 +418,31 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     scraperSource,
     /waitForLoadState\('networkidle'[\s\S]{0,7000}equipmentSelect\.value = equipmentValue[\s\S]{0,1200}formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
     'booking updates must re-apply equipment after availability Ajax and in the same turn as form submission',
+  );
+  assert.match(
+    scraperSource,
+    /a#mailEntry:visible[\s\S]{0,18000}form\.id === 'reserveChange'[\s\S]{0,300}net_reservation_requires_official_button/,
+    'HotPepper network reservations must use the official mailEntry change flow instead of direct doComplete submission',
+  );
+  assert.match(
+    scraperSource,
+    /errorCandidate = bodyHead[\s\S]{0,300}ハイフンなしで入力してください[\s\S]{0,450}operationStateLost/,
+    'static no-hyphen helper text must not be misclassified as a booking validation error',
+  );
+  assert.match(
+    scraperSource,
+    /ブログ確認画面が空レスポンス[\s\S]{0,300}'SB_SERVER_ERROR'[\s\S]{0,80}!blankResponse/,
+    'blank SalonBoard blog responses must remain retryable infrastructure failures',
+  );
+  assert.match(
+    scraperSource,
+    /startsAtOrAfterSalonClose[\s\S]{0,1200}'SLOT_NOT_AVAILABLE'[\s\S]{0,80}true/,
+    'schedule blocks starting after SalonBoard closing time must stop as a deterministic business conflict',
+  );
+  assert.match(
+    scraperSource,
+    /equipment_reset_before_submit[\s\S]{0,900}'EQUIPMENT_FULL',[\s\S]{0,40}true/,
+    'deterministic equipment conflicts must stop immediately for manual resolution instead of retrying Cloud',
   );
   assert.match(
     pcWorkerSource,

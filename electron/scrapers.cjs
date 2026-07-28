@@ -3212,6 +3212,26 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     ? Number(formState.eh) * 60 + Number(formState.em)
     : null;
   const salonEndTotal = formState ? parseHmTotal(formState.salonEnd) : null;
+  // SalonBoard の営業終了時刻以降に始まる予定は、開始分の option 自体が作られない。
+  // これは通信失敗ではなく対象枠が存在しない決定的な業務エラーなので、
+  // CONFIRMATION_MISMATCH として繰り返さず、その場で手動確認へ送る。
+  const startsAtOrAfterSalonClose = Number.isFinite(salonEndTotal)
+    && startTotal >= salonEndTotal;
+  if (startsAtOrAfterSalonClose) {
+    const cap = await captureScrapeDebug(page, 'schedule', `outside_business_hours_${ymd}_${staffExt}`, {
+      diagnostics: {
+        expected: { staffExt, ymd, startHH, startMM, endHH, endMM, title },
+        salonEndTotal,
+        formState,
+      },
+    });
+    const salonEndLabel = `${String(Math.floor(salonEndTotal / 60)).padStart(2, '0')}:${String(salonEndTotal % 60).padStart(2, '0')}`;
+    return fail(
+      `予定開始 ${startHH}:${startMM} がSalonBoardの営業終了 ${salonEndLabel} 以降のため登録できません${cap ? ` (capture=${cap})` : ''}`,
+      'SLOT_NOT_AVAILABLE',
+      true,
+    );
+  }
   const clampedAtSalonClose = Number.isFinite(selectedEndTotal)
     && Number.isFinite(salonEndTotal)
     && endTotal > salonEndTotal
@@ -7413,6 +7433,10 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   //    最終確定ボタン (id="change_disable" は無効時の別要素なので除外)。
   const submitBtn = page
     .locator([
+      // HotPepperネット予約(BF/BE...)は #mailEntry の公式ハンドラが
+      // 入力状態を保持して確認画面へ進める。内部doCompleteへ直送すると
+      // 「戻るボタンで入力情報が失われた」扱いになるため最優先する。
+      'a#mailEntry:visible',
       'a#change:visible',
       'a#regist:visible',
       'a.mod_btn_50:has-text("確定する"):visible',
@@ -7558,7 +7582,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       return fail(
         `SalonBoardの設備空き状況更新後に「${expectedPersistedEquipName || selectedEquipmentValue}」を再選択できませんでした${cap ? ` (capture=${cap})` : ''}`,
         'EQUIPMENT_FULL',
-        false,
+        true,
       );
     }
   }
@@ -7577,11 +7601,12 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
     // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
     const directSubmitResult = await page.evaluate(({ equipmentValue, customerPhone }) => {
-      // ★HotPepper(ネット予約 BF...)の変更フォームは id="reserveChange"(action=/net/reserveChange)、
-      //   KD由来(YG/YH)は id="extReserveChange"。設備(ベッド)を同一JSターンで再設定するには実フォームを
-      //   掴む必要がある。extReserveChange 決め打ちだとネット予約でnull→直接送信が不発→ボタン送信
-      //   フォールバックとなり、Ajax設備空き更新にベッド選択が巻き戻され「未割り当て」で保存されていた
-      //   (2026-07-27 新宿三丁目 BF37921037/BF35299811 で実害)。両IDと設備/時刻行を持つフォームから解決。
+      // HotPepperネット予約(BF/BE...)の reserveChange は、公式 #mailEntry の
+      // 専用ハンドラを経由しないとサーバ側の入力状態が作られない。doCompleteへ
+      // 直送すると「戻るボタンで入力情報が失われた」となるため、値の補正だけ行い
+      // submitted=false を返して下の公式ボタンクリックへ進める。
+      // KD由来(YG/YH)の extReserveChange だけは、blurで氏名/設備が巻き戻るのを
+      // 避けるため同一JSターンでdoCompleteへ送る。
       const form = document.getElementById('extReserveChange')
         || document.getElementById('reserveChange')
         || document.querySelector('select[name="equipIdList"], #jsiRsvHour, #rsvTime, select[name="time"]')?.form;
@@ -7644,12 +7669,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       if (tel) {
         const current = toDomestic(tel.value);
         const next = /^0\d{9,10}$/.test(current) ? current : findOriginalPhone();
-        if (!next) return { submitted: false, reason: 'customer_phone_missing_at_submit' };
-        tel.value = next;
-        tel.defaultValue = next;
-        tel.classList.remove('mod_color_999999');
-        tel.removeAttribute('data-empty');
-        try { jq(tel).removeData('empty'); } catch (_e) { /* noop */ }
+        // ext予約の電話番号は任意。値が無い予約で公式clickへ戻すと、その間のblurで
+        // 修復済みカナがplaceholderへ巻き戻り必須エラーになる。電話番号が取得できた
+        // 場合だけ正規化し、空なら氏名修復を保持したまま直接submitを続行する。
+        if (next) {
+          tel.value = next;
+          tel.defaultValue = next;
+          tel.classList.remove('mod_color_999999');
+          tel.removeAttribute('data-empty');
+          try { jq(tel).removeData('empty'); } catch (_e) { /* noop */ }
+        }
       }
       jq('#extCouponArea select[disabled="disabled"]').removeAttr('disabled');
       jq('#extCouponArea select').each(function normalizeUndefinedCoupon() {
@@ -7678,6 +7707,13 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           .filter(([name]) => /^equip/i.test(String(name)))
           .map(([name, value]) => [String(name), String(value)])
         : [];
+      if (form.id === 'reserveChange') {
+        return {
+          submitted: false,
+          reason: 'net_reservation_requires_official_button',
+          equipmentFields,
+        };
+      }
       jq.shuhari.formSubmit(form.id || 'extReserveChange', 'doComplete');
       return { submitted: true, equipmentFields };
     }, {
@@ -7710,7 +7746,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       return fail(
         `SalonBoard送信直前に設備「${expectedPersistedEquipName || selectedEquipmentValue}」の選択が失われました${cap ? ` (capture=${cap})` : ''}`,
         'EQUIPMENT_FULL',
-        false,
+        true,
       );
     }
     directFormSubmitted = directSubmitResult.submitted === true;
@@ -7758,9 +7794,9 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         const warn = document.getElementById('warnArea');
         if (!warn || getComputedStyle(warn).display === 'none') return false;
         const jq = window.jQuery;
-        const form = document.getElementById('extReserveChange')
-          || document.getElementById('reserveChange')
-          || document.querySelector('select[name="equipIdList"], #jsiRsvHour, #rsvTime, select[name="time"]')?.form;
+        // reserveChange(BF/BE...)は警告後も公式ボタン/acceptに任せる。
+        // doComplete直送はサーバ側入力状態を失わせるため禁止する。
+        const form = document.getElementById('extReserveChange');
         if (!form || !jq?.shuhari || typeof jq.shuhari.formSubmit !== 'function') return false;
         const mappings = [
           ['nmSeiKana', 'orgNmSeiKana', 'ヨヤク'],
@@ -7852,7 +7888,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
   const looksDone = /変更しました|変更が完了|更新しました|受け付けました|登録しました/.test(bodyText);
   const bodyHead = bodyText.slice(0, 1400);
-  const looksError = /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(bodyHead) && !looksDone;
+  // 「※ハイフンなしで入力してください」は入力欄に常時表示される説明文であり、
+  // validationエラーではない。実際のエラー判定から除外する。
+  const errorCandidate = bodyHead
+    .replace(/※?\s*ハイフンなしで入力してください。?/g, '')
+    .replace(/ハイフンを入れずに入力してください。?/g, '');
+  const operationStateLost =
+    /操作の途中でブラウザの「?戻る」?ボタン|入力情報が失われた/.test(errorCandidate);
+  const looksError =
+    /エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/.test(errorCandidate)
+    && !looksDone;
   const warningStillOpen = await page.locator('#warnArea:visible').count().catch(() => 0);
   if (!looksDone && warningStillOpen > 0) {
     const warningCap = await captureScrapeDebug(page, 'change', `warning_not_confirmed_${reserveId}`, {
@@ -7869,9 +7914,16 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       false,
     );
   }
+  if (operationStateLost) {
+    return fail(
+      `SalonBoardが予約変更の入力状態を失いました。公式変更フローで自動再試行します${cap2 ? ` (capture=${cap2})` : ''}`,
+      'SB_SERVER_ERROR',
+      false,
+    );
+  }
   if (looksError) {
     // 通知画像が画面上部だけにならないよう、実際のvalidation文言へスクロールして撮り直す。
-    const errorLocator = page.getByText(/ハイフンなし|エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
+    const errorLocator = page.getByText(/エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま/).last();
     await errorLocator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => {});
     const hyphenFields = await page.evaluate(() => Array.from(document.querySelectorAll('input'))
       .filter((el) => /[-‐‑‒–—―−]/.test(String(el.value || '')))
@@ -7915,7 +7967,7 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const fieldHint = hyphenFields.length
       ? `, ハイフン残存field=${hyphenFields.map((x) => `${x.field}(${x.digitCount}桁)`).join(',')}`
       : '';
-    return fail(`変更時にエラー表示 (${(bodyHead.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
+    return fail(`変更時にエラー表示 (${(errorCandidate.match(/.{0,40}(エラー|失敗|できませんでした|入力してください|空いて|満員|埋ま).{0,40}/)?.[0] || '').trim()}${fieldHint}${cap2 ? `, capture=${cap2}` : ''})`, 'UNKNOWN_ERROR', true);
   }
   if (!looksDone && !confirmClicked && !nativeDialogAccepted) {
     // SalonBoard は保存後も完了文言を出さず詳細画面へ戻る場合がある。曖昧成功にせず、
@@ -9874,8 +9926,23 @@ async function postBlogViaForm(page, payload, opts = {}) {
   }
   // フォームに到達しているか
   if ((await page.locator('input#blogTitle, textarea#blogContents1').count().catch(() => 0)) === 0) {
-    const cap = await captureScrapeDebug(page, 'blog', `no_form`, { diagnostics: { url: page.url(), title: await page.title().catch(() => '') } });
-    return fail(`ブログ投稿フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    const blankState = await page.evaluate(() => ({
+      title: document.title || '',
+      bodyLength: String(document.body?.innerText || '').trim().length,
+      inputCount: document.querySelectorAll('input,textarea,select,button,a').length,
+    })).catch(() => ({ title: '', bodyLength: 0, inputCount: 0 }));
+    const cap = await captureScrapeDebug(page, 'blog', `no_form`, {
+      diagnostics: { url: page.url(), ...blankState },
+    });
+    const blankResponse =
+      !blankState.title && blankState.bodyLength === 0 && blankState.inputCount === 0;
+    return fail(
+      blankResponse
+        ? `SalonBoardブログ画面が空レスポンスでした。新しいセッションで自動再試行します (capture=${cap || '?'})`
+        : `ブログ投稿フォームに到達できませんでした (capture=${cap || '?'})`,
+      blankResponse ? 'SB_SERVER_ERROR' : 'UNKNOWN_ERROR',
+      !blankResponse,
+    );
   }
 
   // 入力: タイトル / 本文 / 投稿者 / カテゴリ (投稿者・カテゴリ・本文は SalonBoard 必須)
@@ -10058,8 +10125,23 @@ async function postBlogViaForm(page, payload, opts = {}) {
       }
     }
     if (!clickedConfirm && (await confirmBtn.count().catch(() => 0)) === 0) {
-      const cap = await captureScrapeDebug(page, 'blog', `no_confirm`, { diagnostics: { url: page.url() } });
-      return fail(`ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+      const blankState = await page.evaluate(() => ({
+        title: document.title || '',
+        bodyLength: String(document.body?.innerText || '').trim().length,
+        inputCount: document.querySelectorAll('input,textarea,select,button,a').length,
+      })).catch(() => ({ title: '', bodyLength: 0, inputCount: 0 }));
+      const cap = await captureScrapeDebug(page, 'blog', `no_confirm`, {
+        diagnostics: { url: page.url(), ...blankState },
+      });
+      const blankResponse =
+        !blankState.title && blankState.bodyLength === 0 && blankState.inputCount === 0;
+      return fail(
+        blankResponse
+          ? `SalonBoardブログ確認画面が空レスポンスでした。新しいセッションで自動再試行します (capture=${cap || '?'})`
+          : `ブログの「確認する」ボタンが見つかりませんでした (capture=${cap || '?'})`,
+        blankResponse ? 'SB_SERVER_ERROR' : 'UNKNOWN_ERROR',
+        !blankResponse,
+      );
     }
     // フォールバックで既にクリック済みなら再クリックしない。
     if (!clickedConfirm) {
