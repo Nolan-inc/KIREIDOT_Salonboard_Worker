@@ -608,6 +608,9 @@ type SalonboardErrorCode =
 type PushBookingPayload = {
   booking_id: string;
   action?: "create" | "update" | "cancel";
+  // DB enqueue/claim 時に bookings.status から付与する。来店処理済み予約は
+  // SalonBoard 側で変更フォームを開けないため、無限再試行せず対象外終了にする。
+  booking_status?: "confirmed" | "cancelled" | "completed" | "no_show" | "pending" | null;
   external_booking_id?: string | null;
   preflight_required?: boolean;
   customer_name?: string | null;
@@ -853,6 +856,25 @@ async function reportScraperResult(
     return;
   }
   // failed
+  if (result.errorCode === "SB_UPLOAD_HELD") {
+    const retryAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    await report(
+      {
+        job_id: job.id,
+        job_type: jobType,
+        status: "deferred",
+        error_code: result.errorCode,
+        error: result.reason,
+        retry_at: retryAt,
+        summary:
+          `${jobType}: SalonBoard画像アップロード応答待ちのため失敗確定せず ${retryAt} 以降へ延期`,
+        ...extra,
+      } as unknown as CallbackBody,
+      capturePage,
+    );
+    console.log(`[job] deferred ${tag} (SB_UPLOAD_HELD until ${retryAt})`);
+    return;
+  }
   const cap = job.max_attempts || MAX_PUSH_ATTEMPTS;
   // job.attempts は claim RPC がインクリメント済みの値 (=今回が何回目の試行か)。
   // +1 すると1回分リトライを取りこぼす (max_attempts=3 が実質2回になる)。
@@ -1527,6 +1549,30 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
+      const isTerminalBookingUpdate =
+        payload.action === "update" &&
+        ["completed", "cancelled", "no_show"].includes(String(payload.booking_status || ""));
+      if (isTerminalBookingUpdate) {
+        await report({
+          job_id: job.id,
+          job_type: "push_booking",
+          status: "cancelled",
+          booking_id: payload.booking_id,
+          external_booking_id: payload.external_booking_id ?? null,
+          summary:
+            `push_booking: KIREIDOT予約が${payload.booking_status}のため変更対象外として終了`,
+          result_payload: {
+            confirmed_customer_name: payload.customer_name ?? null,
+            confirmed_staff_name: payload.staff_name ?? null,
+            confirmed_menu_name: payload.salonboard_menu_name ?? payload.menu_name ?? null,
+            confirmed_scheduled_at: payload.scheduled_at ?? null,
+          },
+        });
+        console.log(
+          `[job] done  ${tag} (push_booking update skipped: booking_status=${payload.booking_status})`,
+        );
+        return;
+      }
       // KIREIDOT の休憩・業務枠は SalonBoard の「予約」ではなく「予定」。
       // 通常予約フォームへ送ると設備行が自動追加され、設備を使わない予定でも
       // 「× フリー設備」等を選択して誤って EQUIPMENT_FULL になる。

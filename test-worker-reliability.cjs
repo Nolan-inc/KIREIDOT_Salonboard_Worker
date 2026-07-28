@@ -134,10 +134,19 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260728005416_route_photo_style_jobs_to_cloud.sql'),
     'utf8',
   );
+  const bookingStatusMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260728124500_enrich_booking_status_and_recover_cloud_writes.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
     'merged schedule blocks must count as confirmed when they contain the requested interval',
+  );
+  assert.match(
+    source,
+    /matchedStartMin[\s\S]{0,900}hh:\s*String\(matchedStartHour\)/,
+    'schedule deletion must verify the exact block selected from the grid, including containing blocks',
   );
   assert.match(
     source,
@@ -156,8 +165,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /readStableScheduleToken[\s\S]{0,1800}scheduleMainHead[\s\S]{0,1800}stableReads >= 2/,
-    'new bookings must wait for the Ajax-updated stable rlastupdate token',
+    /readStableScheduleToken[\s\S]{0,1800}Date\.now\(\) - startedAt >= 1_500[\s\S]{0,800}waitForTimeout\(150\)/,
+    'new bookings must settle the Ajax-updated rlastupdate token without a long staff-selector wait',
+  );
+  assert.doesNotMatch(
+    source,
+    /readStableScheduleToken[\s\S]{0,900}waitForSelector\([\s\S]{0,300}scheduleMainHead/,
+    'new bookings must not age rlastupdate while waiting for a shop-specific staff selector',
   );
   assert.match(
     source,
@@ -389,6 +403,26 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     photoCloudMigration,
     /where job_type = 'push_photo_gallery'[\s\S]{0,120}status in \('queued', 'running', 'retryable_failed'\)/,
     'unfinished legacy PC photo/style jobs must be recovered to Cloud',
+  );
+  assert.match(
+    cloudSource,
+    /isTerminalBookingUpdate[\s\S]{0,900}status:\s*"cancelled"/,
+    'updates for completed/cancelled/no-show bookings must terminate without retrying an unavailable SalonBoard form',
+  );
+  assert.match(
+    cloudSource,
+    /result\.errorCode === "SB_UPLOAD_HELD"[\s\S]{0,700}status:\s*"deferred"/,
+    'Cloud image-upload holds must be deferred instead of recorded as terminal failures',
+  );
+  assert.match(
+    bookingStatusMigration,
+    /salonboard_enrich_job_booking_status[\s\S]{0,1600}\{booking_status\}/,
+    'queued booking writes must carry the current KIREIDOT booking status',
+  );
+  assert.match(
+    bookingStatusMigration,
+    /RECOVER_LEGACY_PC_TO_CLOUD[\s\S]{0,1000}executor = 'playwright'/,
+    'unresolved legacy desktop writes must be recovered to the current Cloud worker',
   );
   assert.match(
     pcWorkerSource,

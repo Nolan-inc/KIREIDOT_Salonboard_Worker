@@ -2869,23 +2869,24 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // Ajax更新直前の古いトークンになり KPCL017V01 を誘発する店舗がある。
   // スタッフ列の描画後、値が連続して安定した時点のトークンを使う。
   const readStableRlastupdate = async () => {
-    await page.waitForSelector('#rlastupdate', { timeout: 12_000 }).catch(() => {});
-    await page.waitForSelector(
-      `.scheduleMainHead[id^="STAFF_"], .jscScheduleMainTableStaff`,
-      { state: 'attached', timeout: 12_000 },
-    ).catch(() => {});
+    await page.waitForSelector('#rlastupdate', { timeout: 8_000 }).catch(() => {});
+    // スタッフ列セレクタは店舗/画面版によって存在しない。ここを12秒待つと、
+    // 取得済みの rlastupdate がその待機中に失効し、WAO新宿で KPCL017V01 を
+    // 自分自身で発生させていた。Ajaxのトークン差し替えを短時間だけ監視し、
+    // 最後に安定した値を登録画面へ即座に渡す。
+    const startedAt = Date.now();
     let previous = '';
     let stableReads = 0;
-    for (let i = 0; i < 12; i += 1) {
+    for (let i = 0; i < 16; i += 1) {
       const current = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
       if (current && current === previous) {
         stableReads += 1;
-        if (stableReads >= 2) return current;
+        if (stableReads >= 2 && Date.now() - startedAt >= 1_500) return current;
       } else {
         previous = current;
         stableReads = 0;
       }
-      await page.waitForTimeout(250);
+      await page.waitForTimeout(150);
     }
     return previous;
   };
@@ -3032,6 +3033,16 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       diagnostics,
     });
     const currentUrl = page.url();
+    const staleToken = /KPCL017V01|他のユーザによって変更|最新情報を確認/i.test(
+      `${diagnostics?.bodyText || ''} ${currentUrl}`,
+    );
+    if (staleToken) {
+      return fail(
+        `SalonBoardの更新競合(KPCL017V01)により予定登録ボタンを表示できませんでした。最新情報から全工程を再試行します${cap ? ` (capture=${cap})` : ''}`,
+        'SB_SERVER_ERROR',
+        false,
+      );
+    }
     return fail(
       `「予定を登録する」ボタンが見つかりません (url=${currentUrl}${cap ? `, capture=${cap}` : ''})`,
       'CONFIRMATION_MISMATCH',
@@ -3520,7 +3531,12 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     return fail(`予定変更画面に到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
   }
 
-  // (4) 誤削除防止: 変更画面の日付・開始時刻・スタッフが対象と一致するか検証
+  // (4) 誤削除防止: 変更画面の日付・開始時刻・スタッフが、上で一意に選んだ
+  // 実ブロックと一致するか検証する。タイトル一致かつ対象時刻を内包する統合ブロックを
+  // 救済した場合、KD元時刻ではなく found.start が変更画面の正しい開始時刻になる。
+  const matchedStartMin = Number.isFinite(Number(found.start)) ? Number(found.start) : startMin;
+  const matchedStartHour = Math.floor(matchedStartMin / 60);
+  const matchedStartMinute = matchedStartMin % 60;
   const formCheck = await page.evaluate(
     ({ ymd, hh, mm, staffExt }) => {
       const v = (sel) => document.querySelector(sel)?.value ?? null;
@@ -3535,7 +3551,12 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
         date, sh, sm, st,
       };
     },
-    { ymd: when.yyyymmdd, hh: String(when.hour), mm: String(when.minute).padStart(2, '0'), staffExt },
+    {
+      ymd: when.yyyymmdd,
+      hh: String(matchedStartHour),
+      mm: String(matchedStartMinute).padStart(2, '0'),
+      staffExt,
+    },
   ).catch(() => null);
   if (!formCheck || !formCheck.dateOk || !formCheck.startOk || !formCheck.staffOk) {
     return fail(
@@ -5121,26 +5142,26 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 連続して安定するまで待つ。input/value 形式の画面にも対応する。
   const readStableScheduleToken = async () => {
     const token = page.locator('#rlastupdate').first();
-    await token.waitFor({ state: 'attached', timeout: 12_000 }).catch(() => {});
-    await page.waitForSelector(
-      `.scheduleMainHead[id^="STAFF_"], .jscScheduleMainTableStaff, [id^="STAFF_"]`,
-      { state: 'attached', timeout: 12_000 },
-    ).catch(() => {});
+    await token.waitFor({ state: 'attached', timeout: 8_000 }).catch(() => {});
+    // 画面版によってスタッフ列のDOMが異なるため、その出現を待ってはいけない。
+    // WAO新宿ではセレクタ不一致の12秒待機が rlastupdate を期限切れにしていた。
+    // Ajaxによる値の差し替えだけを短時間監視し、安定後すぐ登録URLへ進む。
+    const startedAt = Date.now();
     let previous = '';
     let stableReads = 0;
-    for (let i = 0; i < 16; i += 1) {
+    for (let i = 0; i < 20; i += 1) {
       const current = await token.evaluate((el) => {
         const value = 'value' in el ? String(el.value || '') : '';
         return (value || el.getAttribute('value') || el.textContent || '').trim();
       }).catch(() => '');
       if (current && current === previous) {
         stableReads += 1;
-        if (stableReads >= 2) return current;
+        if (stableReads >= 2 && Date.now() - startedAt >= 1_500) return current;
       } else {
         previous = current;
         stableReads = 0;
       }
-      await page.waitForTimeout(250);
+      await page.waitForTimeout(150);
     }
     return previous;
   };
