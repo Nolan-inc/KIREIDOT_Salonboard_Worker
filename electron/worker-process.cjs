@@ -53,6 +53,7 @@ const {
   deleteBlogViaForm,
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
+  deletePhotoGalleryViaForm,
   scrapePhotoGallery,
   getLastErrorShot,
   resetLastErrorShot,
@@ -1042,6 +1043,7 @@ const JOB_LABEL = {
   push_blog: 'ブログ投稿',
   delete_blog: 'ブログ削除',
   push_photo_gallery: 'フォトギャラリー投稿',
+  delete_photo_gallery: 'フォトギャラリー/スタイル削除',
   push_review_reply: '口コミ返信',
   push_shifts: 'シフト反映',
   fetch_shift_patterns: '勤務パターン取得',
@@ -1611,7 +1613,7 @@ function subscribeToPushJobs() {
         { event: 'INSERT', schema: 'public', table: 'salonboard_sync_jobs' },
         (payload) => {
           const jt = payload?.new?.job_type;
-          if (jt !== 'push_photo_gallery') return;
+          if (jt !== 'push_photo_gallery' && jt !== 'delete_photo_gallery') return;
           log(`Realtime: ${jt} ジョブを検知 → push 処理を予約 (デバウンス)`, 'info');
           if (pushTriggerTimer) clearTimeout(pushTriggerTimer);
           pushTriggerTimer = setTimeout(() => {
@@ -4136,6 +4138,7 @@ async function runPushJobs({ showBrowser } = {}) {
       const isBlog = job.job_type === 'push_blog';
       const isBlogDelete = job.job_type === 'delete_blog';
       const isPhotoGallery = job.job_type === 'push_photo_gallery';
+      const isPhotoGalleryDelete = job.job_type === 'delete_photo_gallery';
       const isReviewReply = job.job_type === 'push_review_reply';
       const isShifts = job.job_type === 'push_shifts';
       const isFetchShiftPatterns = job.job_type === 'fetch_shift_patterns';
@@ -4255,6 +4258,9 @@ async function runPushJobs({ showBrowser } = {}) {
             job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',
             content_post_id: null,
             external_id: result.externalId ?? null,
+            // SalonBoard 側の削除に使うID (スタイル=styleId L... / フォトギャラリー=storePhotogalleryId PG...)。
+            // これを保存しておかないと後で SB 側から自動削除できない。
+            delete_key: result.deleteKey ?? null,
             summary: 'push_photo_gallery 投稿完了',
           });
           emit('log', { level: 'info', msg: `[${tag}] ✅ フォトギャラリー投稿完了${result.externalId ? ` (id=${result.externalId})` : ''}`, at: new Date().toISOString() });
@@ -4274,6 +4280,39 @@ async function runPushJobs({ showBrowser } = {}) {
             error_code: result.errorCode, error: result.reason, manual_required: toManual,
           });
           emit('log', { level: 'warn', msg: `[${tag}] フォトギャラリー: ${result.reason}`, at: new Date().toISOString() });
+        }
+      } else if (isPhotoGalleryDelete) {
+        // ---- フォトギャラリー/スタイル削除 (KIREIDOT で削除 → SalonBoard 側も削除) ----
+        const result = await deletePhotoGalleryViaForm(page, payload, {
+          baseUrl,
+          enableDelete: enablePush,
+          salonId: creds.salon_id ?? null,
+          shopName: job.shop_name ?? null,
+          genre: jobGenre,
+        });
+        if (result.status === 'ok') {
+          await postCallback({
+            job_id: job.id, job_type: 'delete_photo_gallery', status: 'succeeded',
+            external_id: result.externalId ?? payload.delete_key ?? null,
+            summary: result.alreadyAbsent ? 'delete_photo_gallery 完了 (既にSB上に無し)' : 'delete_photo_gallery 完了',
+          });
+          emit('log', { level: 'info', msg: `[${tag}] ✅ SalonBoard フォト/スタイル削除完了${result.alreadyAbsent ? ' (既に無し)' : ''}`, at: new Date().toISOString() });
+        } else if (result.status === 'confirm_only') {
+          await postCallback({
+            job_id: job.id, job_type: 'delete_photo_gallery', status: 'manual_required',
+            error_code: 'PUSH_DISABLED',
+            error: '削除対象を検出しましたが、実登録(実書込)が無効のため削除していません。設定で有効化してください。',
+            manual_required: true,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🟡 フォト/スタイル削除未実行 (実登録OFF)`, at: new Date().toISOString() });
+        } else {
+          const toManual = shouldPromoteToManual(result.manualRequired, exhausted, result.errorCode);
+          await postCallback({
+            job_id: job.id, job_type: 'delete_photo_gallery',
+            status: result.errorCode === 'RECAPTCHA_REQUIRED' ? 'captcha_detected' : toManual ? 'manual_required' : 'retryable_failed',
+            error_code: result.errorCode, error: result.reason, manual_required: toManual,
+          });
+          emit('log', { level: 'warn', msg: `[${tag}] 🔴 フォト/スタイル削除失敗: [${result.errorCode}] ${result.reason}`, at: new Date().toISOString() });
         }
       } else if (isFetchShiftPatterns) {
         // ---- 勤務パターン取得 (シフトパターン設定の「SalonBoardから同期」ボタン) ----
@@ -4808,6 +4847,7 @@ async function runPushJobs({ showBrowser } = {}) {
       'cancel_booking',
       'push_shifts',
       'push_photo_gallery',
+      'delete_photo_gallery',
     ]);
     const handled = [];
     for (const j of claimedJobs) {

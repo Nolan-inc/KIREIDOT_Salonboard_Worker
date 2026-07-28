@@ -66,6 +66,7 @@ type ScrapersModule = {
   pushShiftsViaForm: ScraperFn;
   postPhotoGalleryViaForm: ScraperFn;
   deleteBlogViaForm: ScraperFn;
+  deletePhotoGalleryViaForm: ScraperFn;
   postReviewReplyViaForm: ScraperFn;
   pushEquipmentViaForm: ScraperFn;
   pushStaffViaForm: ScraperFn;
@@ -451,6 +452,7 @@ type JobType =
   | "push_blog"
   | "push_shifts"
   | "push_photo_gallery"
+  | "delete_photo_gallery"
   | "delete_blog"
   | "push_review_reply"
   // 設定系 write (KIREIDOT→SB)。SB編集フォームへ書き込む (設備/スタッフ/メニュー/クーポン)。
@@ -984,7 +986,7 @@ async function handleJob(job: Job): Promise<void> {
     //   residential を強制したい場合のみ SB_WRITE_VIA_RESIDENTIAL=1。
     const WRITE_JOBS = new Set([
       "push_booking", "cancel_booking", "push_shifts", "push_shift_patterns",
-      "push_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
+      "push_photo_gallery", "delete_photo_gallery", "push_blog", "delete_blog", "push_review_reply",
       "push_equipment", "push_staff", "push_menu", "push_coupon",
       "push_salon", "push_kodawari", "push_feature", "push_acceptance",
       "configure_notice_mail",
@@ -1866,7 +1868,41 @@ async function handleJob(job: Job): Promise<void> {
         shopName,
         genre,
       });
-      await reportScraperResult(job, "push_photo_gallery", result, {}, page);
+      await reportScraperResult(
+        job,
+        "push_photo_gallery",
+        result,
+        // delete_key: SalonBoard 側の削除に使うID
+        // (スタイル=styleId L... / フォトギャラリー=storePhotogalleryId PG...)。
+        // これを保存しておかないと後で SB 側から自動削除できない。
+        // 成功時のみ送る (confirm_only/failed では回収していない)。
+        result.status === "ok"
+          ? { delete_key: (result as { deleteKey?: string | null }).deleteKey ?? null }
+          : {},
+        page,
+      );
+      return;
+    }
+
+    if (job.job_type === "delete_photo_gallery") {
+      const p = job.payload as Record<string, unknown>;
+      const result = await scrapers.deletePhotoGalleryViaForm(page, p, {
+        baseUrl,
+        enableDelete: ENABLE_PUSH,
+        salonId,
+        shopName,
+        genre,
+      });
+      await reportScraperResult(
+        job,
+        "delete_photo_gallery",
+        result,
+        // external_id は ok 時のみ (delete_blog と同じ理由)。
+        result.status === "ok"
+          ? { external_id: result.externalId ?? p.delete_key ?? null }
+          : {},
+        page,
+      );
       return;
     }
 

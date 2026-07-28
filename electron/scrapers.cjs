@@ -10999,6 +10999,265 @@ async function deleteBlogViaForm(page, payload, opts = {}) {
 }
 
 // =====================================================================
+// フォトギャラリー/スタイル削除 (delete_photo_gallery)
+//
+// 削除対象は payload.delete_key で指定する (投稿時に回収して保存したID):
+//   - kind="style"         … styleId (L...)         → /CNB/draft/styleList/ の delStyle
+//   - kind="photo_gallery" … storePhotogalleryId (PG...) → /CNK/draft/photoGalleryEdit の枠を
+//                             クリア(jscClearImg)して再登録(doRegister)
+//
+// ★フォトギャラリーは「記事」ではなく1フォームに並ぶ枠なので、削除=枠を空にして
+//   フォーム全体を再登録する。他の枠は触らない (値をそのまま再送する)。
+//
+// payload: { delete_key, kind, genre, external_id? }
+// opts: { baseUrl, enableDelete, salonId, shopName }
+// 戻り値: { status:'ok', alreadyAbsent? } | { status:'confirm_only' }
+//        | { status:'failed', reason, errorCode, manualRequired }
+// =====================================================================
+async function deletePhotoGalleryViaForm(page, payload, opts = {}) {
+  const p = payload || {};
+  const kind = String(p.kind || '').trim() === 'style' ? 'style' : 'photo_gallery';
+  const deleteKey = String(p.delete_key || '').trim();
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  if (!deleteKey) {
+    return fail('削除対象のID (delete_key) がありません。SalonBoard 側は手動で削除してください。', 'UNKNOWN_ERROR', true);
+  }
+  return kind === 'style'
+    ? deleteHairStyleViaForm(page, { ...p, delete_key: deleteKey }, opts)
+    : deleteEstheticPhotoGalleryViaForm(page, { ...p, delete_key: deleteKey }, opts);
+}
+
+// ---- 美容室: /CNB/draft/styleList/ から styleId(L...) の行を削除 ----
+async function deleteHairStyleViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enableDelete = opts.enableDelete !== false;
+  const styleId = String(payload.delete_key || '').trim();
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  let listUrl;
+  try { listUrl = draftUrl('hair', 'styleList', baseUrl); } catch (_e) { listUrl = STYLE_LIST_URL; }
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  // グループ店舗で groupTop に跳ね返された場合はサロンを選び直す。
+  {
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, genre: 'hair', baseUrl });
+    if (!sel.ok) {
+      return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason})`, 'STORE_SELECT_REQUIRED', true);
+    }
+    if (sel.selected) {
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+  }
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+
+  const isPresent = () => page.evaluate((id) => {
+    const hidden = Array.from(document.querySelectorAll('input[name*="].styleId"]'))
+      .some((el) => String(el.value || '').trim() === id);
+    const onclick = Array.from(document.querySelectorAll('a[onclick*="delStyle"]'))
+      .some((a) => (a.getAttribute('onclick') || '').includes(id));
+    return hidden || onclick;
+  }, styleId).catch(() => false);
+
+  if (!(await isPresent())) {
+    // 既に SalonBoard 上に無い = 冪等に成功扱い
+    return { status: 'ok', alreadyAbsent: true };
+  }
+  if (!enableDelete) {
+    return { status: 'confirm_only' };
+  }
+
+  // 削除リンク: <a onclick="delStyle(event, 'L...', '0', '0')">
+  const marked = await page.evaluate((id) => {
+    const a = Array.from(document.querySelectorAll('a[onclick*="delStyle"]'))
+      .find((el) => (el.getAttribute('onclick') || '').includes(id));
+    if (!a) return false;
+    a.setAttribute('data-kireidot-del', '1');
+    a.scrollIntoView({ block: 'center' });
+    return true;
+  }, styleId).catch(() => false);
+
+  if (!marked) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', `no_del_style_${styleId}`, { diagnostics: { styleId, url: page.url() } });
+    return fail(`スタイル削除ボタンが見つかりませんでした (styleId=${styleId}, capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  let confirmClicked = false;
+  try {
+    await page.locator('a[data-kireidot-del="1"]').first().click({ timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(800);
+    // 確認ダイアログ (HTML) が出る場合は「はい/削除する」を押す
+    const yesBtn = page
+      .locator('a.accept:visible, .buttons a.accept, a:has-text("削除する"):visible, a:has-text("はい"):visible, input[type="submit"][value*="削除"]:visible')
+      .first();
+    await yesBtn.waitFor({ state: 'visible', timeout: 6_000 }).catch(() => {});
+    if ((await yesBtn.count().catch(() => 0)) > 0) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        yesBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      confirmClicked = true;
+    }
+    await page.waitForTimeout(1200);
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'photo_gallery', `deleted_style_${styleId}`, {
+    diagnostics: { styleId, confirmClicked, nativeDialogAccepted, url: page.url() },
+  });
+
+  // 検証: 一覧を再読込して該当 styleId が消えたか
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if (!(await isPresent())) {
+    return { status: 'ok', externalId: styleId };
+  }
+
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  if (/エラー|失敗/.test(bodyText)) {
+    return fail(`スタイル削除でエラー (${(bodyText.match(/.{0,30}(エラー|失敗).{0,30}/)?.[0] || '').trim()}, capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  return fail(`スタイル削除の完了を確認できませんでした (styleId=${styleId}, capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+}
+
+// ---- エステ等: /CNK/draft/photoGalleryEdit の枠をクリアして再登録 ----
+async function deleteEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  const enableDelete = opts.enableDelete !== false;
+  const pgId = String(payload.delete_key || '').trim();
+  const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
+
+  let formUrl;
+  try { formUrl = draftUrl(opts.genre || payload.genre, 'photoGalleryEdit', baseUrl); } catch (_e) { formUrl = PHOTO_GALLERY_EDIT_URL; }
+  await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  {
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, baseUrl });
+    if (!sel.ok) {
+      return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason})`, 'STORE_SELECT_REQUIRED', true);
+    }
+    if (sel.selected) {
+      await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+  }
+
+  if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
+    return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
+  }
+  if ((await page.locator('form#photoGalleryEditForm').count().catch(() => 0)) === 0) {
+    const cap = await captureScrapeDebug(page, 'photo_gallery', 'del_no_form', { diagnostics: { url: page.url() } });
+    return fail(`フォトギャラリー編集フォームに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+
+  // 対象枠(storePhotogalleryId === PG...)の index を探す。
+  const findIdx = () => page.evaluate((id) => {
+    const els = Array.from(document.querySelectorAll('input.jscStorePhotogalleryId'));
+    for (const el of els) {
+      if (String(el.value || '').trim() !== id) continue;
+      const m = (el.getAttribute('name') || '').match(/^frmPhotoGalleryInfoDtoList\[(\d+)\]\./);
+      if (m) return Number(m[1]);
+    }
+    return -1;
+  }, pgId).catch(() => -1);
+
+  const idx = await findIdx();
+  if (idx < 0) {
+    // 既に SalonBoard 上に無い = 冪等に成功扱い
+    return { status: 'ok', alreadyAbsent: true };
+  }
+  if (!enableDelete) {
+    return { status: 'confirm_only' };
+  }
+
+  // 枠の「削除」(img.jscClearImg) を押して画像をクリアし、タイトル/キャプションも空にする。
+  // ★他の枠には触らない (フォームの既存値をそのまま再送する)。
+  const rowTable = page.locator(`input[name="frmPhotoGalleryInfoDtoList[${idx}].photogalleryPhoto"]`).first()
+    .locator('xpath=ancestor::table[contains(@class,"jscTableBody")][1]');
+  await rowTable.evaluate((el) => { el.classList.remove('dn'); el.scrollIntoView({ block: 'center' }); }).catch(() => {});
+
+  let nativeDialogAccepted = false;
+  const onDialog = async (d) => { nativeDialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
+  page.on('dialog', onDialog);
+  try {
+    const clearBtn = rowTable.locator('img.jscClearImg').first();
+    if ((await clearBtn.count().catch(() => 0)) > 0) {
+      await clearBtn.click({ timeout: 8_000 }).catch(() => {});
+      await page.waitForTimeout(600);
+    }
+    // クリックで消えない実装に備え、hidden 値も直接空にする。
+    await page.evaluate((i) => {
+      const q = (sel) => document.querySelector(sel);
+      const photo = q(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryPhoto"]`);
+      if (photo) photo.value = '';
+      const str = document.getElementById(`photogalleryPhoto${i}`);
+      if (str) str.textContent = '';
+      const title = q(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryTitle"]`);
+      if (title) title.value = '';
+      const cap = q(`textarea[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryCaption"]`);
+      if (cap) cap.value = '';
+    }, idx).catch(() => {});
+
+    // 「登録」(img.jscButtonRegister) でフォーム全体を再登録 → 該当枠が空になる。
+    const regBtn = page.locator('img.jscButtonRegister, .jscButtonRegister').first();
+    if ((await regBtn.count().catch(() => 0)) === 0) {
+      const cap = await captureScrapeDebug(page, 'photo_gallery', 'del_no_register', { diagnostics: { url: page.url(), idx } });
+      return fail(`フォトギャラリーの「登録」ボタンが見つかりませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    }
+    await Promise.all([
+      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+      regBtn.click({ timeout: 12_000 }).catch(() => {}),
+    ]);
+    await page.waitForTimeout(1500);
+    const finalBtn = page.locator('a:has-text("登録する"):visible, a.accept:visible, input[type="submit"][value*="登録"]:visible').first();
+    if ((await finalBtn.count().catch(() => 0)) > 0 && (await finalBtn.isVisible().catch(() => false))) {
+      await Promise.all([
+        page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
+        finalBtn.click({ timeout: 10_000 }).catch(() => {}),
+      ]);
+      await page.waitForTimeout(1200);
+    }
+  } finally {
+    page.off('dialog', onDialog);
+  }
+
+  const cap2 = await captureScrapeDebug(page, 'photo_gallery', `deleted_pg_${pgId}`, {
+    diagnostics: { pgId, idx, nativeDialogAccepted, url: page.url() },
+  });
+
+  // 検証: フォームを開き直し、該当 PG... が消えた(または枠の画像が空)か確認する。
+  await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  const stillIdx = await findIdx();
+  if (stillIdx < 0) {
+    return { status: 'ok', externalId: pgId };
+  }
+  const stillHasImage = await page.evaluate((i) => {
+    const el = document.querySelector(`input[name="frmPhotoGalleryInfoDtoList[${i}].photogalleryPhoto"]`);
+    return !!(el && String(el.value || '').trim());
+  }, stillIdx).catch(() => true);
+  if (!stillHasImage) {
+    return { status: 'ok', externalId: pgId };
+  }
+
+  const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+  if (/エラー|失敗|入力してください|必須/.test(bodyText)) {
+    return fail(`フォトギャラリー削除でエラー (${(bodyText.match(/.{0,40}(エラー|失敗|入力してください|必須).{0,40}/)?.[0] || '').trim()}, capture=${cap2 || '?'})`, 'UNKNOWN_ERROR', true);
+  }
+  return fail(`フォトギャラリー削除の完了を確認できませんでした (PG=${pgId}, capture=${cap2 || '?'})。SalonBoard で確認してください。`, 'UNKNOWN_ERROR', true);
+}
+
+// =====================================================================
 // グループ店舗(1ログイン複数サロン)対応:
 // 現在 /(CNC|KLP)/groupTop/ (サロン選択画面) に居る場合、対象サロンを選んで店舗文脈に入る。
 // worker-process.cjs の ensureStoreSelected と同等の処理を scrapers 内でも使えるようにする。
@@ -11469,7 +11728,33 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
 
   // external_id: 割り当てられた画像ID(C...) を回収できれば返す。
   let externalId = uploaded.imageId || null;
-  return { status: 'ok', externalId };
+
+  // deleteKey: 後で SalonBoard 側から削除するために storePhotogalleryId(PG...) を回収する。
+  // 画像ID(C...) は枠を一意に指せない(差し替えで変わる)ため削除には使えない。
+  // 登録後にフォームを開き直し、今アップロードした画像ID を持つ枠の PG... を読む。
+  let deleteKey = null;
+  if (externalId) {
+    try {
+      await page.goto(formUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      deleteKey = await page.evaluate((imgId) => {
+        const els = Array.from(document.querySelectorAll('input.jscPhotogalleryPhotoId'));
+        for (const el of els) {
+          if (String(el.value || '').trim() !== imgId) continue;
+          const m = (el.getAttribute('name') || '').match(/^frmPhotoGalleryInfoDtoList\[(\d+)\]\./);
+          if (!m) continue;
+          const pg = document.querySelector(
+            `input[name="frmPhotoGalleryInfoDtoList[${m[1]}].storePhotogalleryId"]`,
+          );
+          const v = pg && String(pg.value || '').trim();
+          if (v) return v;
+        }
+        return null;
+      }, externalId).catch(() => null);
+    } catch (_e) { /* 回収失敗は投稿成功を妨げない (削除は手動になる) */ }
+  }
+
+  return { status: 'ok', externalId, deleteKey };
 }
 
 /**
@@ -12051,7 +12336,41 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
   }
 
   // external_id: FRONT 画像ID(B...) を回収。
-  return { status: 'ok', externalId: uploaded.imageId || null };
+  const externalId = uploaded.imageId || null;
+
+  // deleteKey: 後で SalonBoard 側から削除するために styleId(L...) を回収する。
+  // styleList の削除は delStyle(event,'L...') を呼ぶため L... が必須で、
+  // 画像ID(B...) では削除対象を指せない。
+  // スタイル一覧を開き、今アップロードした FRONT 画像(B...) を持つ行の styleId を読む。
+  // 画像IDが取れなかった場合は「最も新しい行 = sortNo 最小(先頭)」ではなく諦める
+  // (誤った行を削除するより手動削除の方が安全)。
+  let deleteKey = null;
+  if (externalId) {
+    try {
+      let listUrl;
+      try { listUrl = draftUrl('hair', 'styleList', baseUrl); } catch (_e) { listUrl = STYLE_LIST_URL; }
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      deleteKey = await page.evaluate((imgId) => {
+        // 各スタイル行は hidden の styleId と、同じ行内に画像(B...)を持つ。
+        const hidden = Array.from(
+          document.querySelectorAll('input[name*="].styleId"]'),
+        );
+        for (const el of hidden) {
+          const sid = String(el.value || '').trim();
+          if (!/^L\d+$/i.test(sid)) continue;
+          // 同一スタイルの行グループ(rowspan)は同じ tbody/tr 起点に画像がある。
+          const scope = el.closest('tr') || el.parentElement;
+          if (!scope) continue;
+          const html = (scope.closest('tbody') || scope).innerHTML || '';
+          if (html.includes(imgId)) return sid;
+        }
+        return null;
+      }, externalId).catch(() => null);
+    } catch (_e) { /* 回収失敗は投稿成功を妨げない (削除は手動になる) */ }
+  }
+
+  return { status: 'ok', externalId, deleteKey };
 }
 
 /**
@@ -14664,6 +14983,7 @@ module.exports = {
   deleteBlogViaForm,
   postReviewReplyViaForm,
   postPhotoGalleryViaForm,
+  deletePhotoGalleryViaForm,
   pushEquipmentViaForm,
   pushStaffViaForm,
   pushMenuViaForm,
