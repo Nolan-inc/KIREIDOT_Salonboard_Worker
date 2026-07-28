@@ -130,6 +130,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260727171841_gate_pc_fallback_on_compatible_worker.sql'),
     'utf8',
   );
+  const photoCloudMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260728005416_route_photo_style_jobs_to_cloud.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -375,6 +379,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     cloudSource,
     /postPhotoGalleryViaForm\(page, job\.payload,[\s\S]{0,220}genre,/,
     'Cloud photo/style posting must propagate the shop genre to salon selection',
+  );
+  assert.match(
+    photoCloudMigration,
+    /including[\s\S]{0,80}push_photo_gallery[\s\S]{0,500}new\.executor := 'playwright_cloud'/,
+    'the database boundary must route normal photo/style reflection jobs to Cloud',
+  );
+  assert.match(
+    photoCloudMigration,
+    /where job_type = 'push_photo_gallery'[\s\S]{0,120}status in \('queued', 'running', 'retryable_failed'\)/,
+    'unfinished legacy PC photo/style jobs must be recovered to Cloud',
   );
   assert.match(
     pcWorkerSource,
