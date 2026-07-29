@@ -5514,6 +5514,26 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     break;
   }
 
+  // ★KPCL017V01 根治(2026-07-29 実画面検証): rlastupdate は「現在時刻トークン」で足りる。
+  //   SalonBoard の空き枠クリックUIは、クリック時点の現在時刻(例 20260729212902)を rlastupdate に
+  //   載せて登録フォームURLへ即遷移しており、それで正常に開く。実機で
+  //   `/KLP/reserve/ext/extReserveRegist/?staffId=..&date=..&rsvHour=..&rsvMinute=..&rlastupdate=<現在時刻>`
+  //   のURLが KPCL017 を出さず即開くことを確認した(WAO新宿)。
+  //   従来は #rlastupdate(スケジュールのレンダー時刻)を読み、登録URL到達までの遷移遅延
+  //   (WAO新宿で最大~14秒)でトークンが失効して KPCL017V01 を自己誘発していた。楽観ロックは
+  //   「提出トークンが最新更新時刻以降か」を見るだけなので、送信直前に生成した現在時刻(JST)は常に有効。
+  //   → スケジュール由来の読取値ではなく、常に現在時刻(JST)を rlastupdate として使う。
+  {
+    const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    rlastupdate =
+      jst.getUTCFullYear().toString()
+      + String(jst.getUTCMonth() + 1).padStart(2, '0')
+      + String(jst.getUTCDate()).padStart(2, '0')
+      + String(jst.getUTCHours()).padStart(2, '0')
+      + String(jst.getUTCMinutes()).padStart(2, '0')
+      + String(jst.getUTCSeconds()).padStart(2, '0');
+  }
+
   // 登録フォームを URL で開く。ジャンル別ルート + ジャンル別パラメータ。
   //   美容室(hair): /CLP/bt/reserve/ext/extReserveRegist/?date=YYYYMMDD&time=HHMM&stylistId=T...&rlastupdate=...
   //   エステ等     : /KLP/reserve/ext/extReserveRegist/?staffId=..&date=..&rsvHour=..&rsvMinute=..&rlastupdate=..
