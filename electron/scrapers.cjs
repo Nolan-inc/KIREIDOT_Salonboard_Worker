@@ -2116,12 +2116,41 @@ async function gotoWithSalonContext(page, targetUrl, opts = {}) {
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
 
-  const selected = await ensureSalonSelected(page, {
+  let selected = await ensureSalonSelected(page, {
     salonId: opts.salonId,
     shopName: opts.shopName,
     genre: opts.genre,
     baseUrl: opts.baseUrl,
   });
+  // 非hairの単一店舗アカウントは groupTop に店舗リンクを持たない場合がある。
+  // その場合は KLP 管理TOPで店舗文脈を温め直してから目的画面へ戻る。
+  if (
+    !selected.ok &&
+    opts.genre !== 'hair' &&
+    selected.reason === 'group_top_no_stores'
+  ) {
+    const topUrl = new URL(
+      '/KLP/top/',
+      opts.baseUrl || targetUrl || 'https://salonboard.com/',
+    ).toString();
+    await page.goto(topUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const topReady = await page
+      .evaluate(() => {
+        const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+        return {
+          hasMgmt: /予約管理|掲載管理/.test(body),
+          hasPassword: !!document.querySelector('input[type="password"]'),
+          errored: /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+            `${document.title || ''}${body.slice(0, 600)}`,
+          ),
+        };
+      })
+      .catch(() => ({ hasMgmt: false, hasPassword: true, errored: true }));
+    if (topReady.hasMgmt && !topReady.hasPassword && !topReady.errored) {
+      selected = { ok: true, selected: true, reason: 'single_salon_top_restored' };
+    }
+  }
   if (!selected.ok) {
     const err = new Error(`SalonBoard店舗選択に失敗しました: ${selected.reason || 'unknown'}`);
     err.code = 'SALON_CONTEXT_INVALID';
@@ -11396,6 +11425,24 @@ async function ensureSalonSelected(page, opts = {}) {
     // groupTop を読み直して再取得(AJAX遅延/瞬断/セッション温め直し)。
     await page
       .goto(page.url(), { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      .catch(() => {});
+    await page
+      .waitForSelector('a[id^="H"]', { timeout: 8_000 })
+      .catch(() => {});
+    await page.waitForTimeout(800);
+    stores = await readStores();
+  }
+  if (!stores.length) {
+    // 非hairでもグループ選択の実体が /CNC/groupTop/ にあるアカウントがある。
+    // 現在の groupTop と反対側を1回だけ確認し、KLP/CNCどちらの構成にも対応する。
+    const currentIsKlp = /\/KLP\/groupTop/i.test(page.url());
+    const alternatePath = currentIsKlp ? '/CNC/groupTop/' : '/KLP/groupTop/';
+    const alternateUrl = new URL(
+      alternatePath,
+      opts.baseUrl || page.url() || 'https://salonboard.com/',
+    ).toString();
+    await page
+      .goto(alternateUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
       .catch(() => {});
     await page
       .waitForSelector('a[id^="H"]', { timeout: 8_000 })
