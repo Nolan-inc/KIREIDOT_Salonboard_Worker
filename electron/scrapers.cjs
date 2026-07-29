@@ -8809,8 +8809,23 @@ async function scrapeSalonInfo(page, opts = {}) {
     };
     return { storeId, hoursText, holidayText, cancel, flags, title: document.title };
   }).catch(() => null);
-  if (!data || !data.storeId) {
-    return { rows: [], debug: { storeId: data && data.storeId, reason: 'no_store_id' } };
+  // 非hairの単一店舗アカウントでは salonSetup が STORE_ID をHTMLへ出さない。
+  // gotoWithSalonContext で対象店舗の文脈は検証済みなので、認証情報に紐づく
+  // 公開サロンIDをフォールバックとして利用する。
+  const resolvedStoreId =
+    data?.storeId ||
+    (/^H\d{6,}$/.test(String(opts.salonId || '').trim())
+      ? String(opts.salonId).trim()
+      : null);
+  if (!data || !resolvedStoreId) {
+    return {
+      rows: [],
+      debug: {
+        storeId: data && data.storeId,
+        reason: 'no_store_id',
+        hasSalonIdFallback: !!opts.salonId,
+      },
+    };
   }
 
   // ★掲載プロフィール (2026-07-11): 掲載管理→サロン(/CNK/draft/salonEdit)から
@@ -8881,7 +8896,7 @@ async function scrapeSalonInfo(page, opts = {}) {
 
   const rows = [
     {
-      external_id: String(data.storeId),
+      external_id: resolvedStoreId,
       business_hours: data.hoursText || null,
       holidays: data.holidayText || null,
       cancel_policy: data.cancel || null,
@@ -8895,7 +8910,15 @@ async function scrapeSalonInfo(page, opts = {}) {
       raw: { title: data.title, profile },
     },
   ];
-  return { rows, debug: { storeId: data.storeId, hasHours: !!data.hoursText, hasProfile: !!(profile && (profile.catch_copy || profile.pr_copy)) } };
+  return {
+    rows,
+    debug: {
+      storeId: resolvedStoreId,
+      storeIdSource: data.storeId ? 'page' : 'credential',
+      hasHours: !!data.hoursText,
+      hasProfile: !!(profile && (profile.catch_copy || profile.pr_copy)),
+    },
+  };
 }
 
 // =====================================================================
