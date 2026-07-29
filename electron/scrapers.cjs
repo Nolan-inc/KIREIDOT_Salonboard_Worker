@@ -2107,6 +2107,52 @@ function cleanText(s) {
 // ----------------- メニュー一覧 (menuEdit) -----------------
 
 /**
+ * サロンIDを持つ店舗向けの安全な画面遷移。
+ * 編集画面へ直行して「ユーザエラー」になった場合は ensureSalonSelected が
+ * groupTop へ戻って対象サロンを選び直す。選択後は目的画面を開き直し、
+ * 店舗文脈エラーが残っていないことまで確認する。
+ */
+async function gotoWithSalonContext(page, targetUrl, opts = {}) {
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+  const selected = await ensureSalonSelected(page, {
+    salonId: opts.salonId,
+    shopName: opts.shopName,
+    genre: opts.genre,
+    baseUrl: opts.baseUrl,
+  });
+  if (!selected.ok) {
+    const err = new Error(`SalonBoard店舗選択に失敗しました: ${selected.reason || 'unknown'}`);
+    err.code = 'SALON_CONTEXT_INVALID';
+    throw err;
+  }
+  if (selected.selected) {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  }
+
+  const invalid = await page
+    .evaluate(() => {
+      const title = document.title || '';
+      const body = ((document.body && document.body.innerText) || '')
+        .replace(/\s+/g, '')
+        .slice(0, 600);
+      return /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+        `${title}${body}`,
+      );
+    })
+    .catch(() => false);
+  if (invalid) {
+    const err = new Error(
+      `SalonBoard店舗文脈を確立できませんでした (url=${page.url()}, title=${await page.title().catch(() => '')})`,
+    );
+    err.code = 'SALON_CONTEXT_INVALID';
+    throw err;
+  }
+}
+
+/**
  * SalonBoard のメニュー編集画面からメニュー一覧を取得する。
  * 実 DOM (menu.html) より、各メニューは
  *   <textarea name="frmMenuEditMenuDetailList[N].menuName">メニュー名</textarea>
@@ -2119,17 +2165,7 @@ function cleanText(s) {
 async function scrapeMenus(page, opts = {}) {
   // 掲載管理は美容室=/CNB/、その他=/CNK/。スタイルは scrapeStyles で別に取得する。
   const menuEditUrl = draftUrl(opts.genre, 'menuEdit', opts.baseUrl);
-  await page.goto(menuEditUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-
-  const selected = await ensureSalonSelected(page, {
-    salonId: opts.salonId,
-    shopName: opts.shopName,
-  });
-  if (selected.selected) {
-    await page.goto(menuEditUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  }
+  await gotoWithSalonContext(page, menuEditUrl, opts);
 
   const raw = await page.evaluate(() => {
     // 非hair: frmMenuEditMenuDetailList[N].field
@@ -2243,8 +2279,7 @@ async function scrapeCoupons(page, opts = {}) {
   // 掲載管理はジャンルで URL 接頭辞が違う(hair=/CNB/、他=/CNK/)。genre を受けないと
   // hair 店でも /CNK/ を見て 0 件になる(ADER 開発店で判明 2026-07-12)。
   const couponListUrl = draftUrl(opts.genre, 'couponList', opts.baseUrl);
-  await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(page, couponListUrl, opts);
   // 一覧テーブルが描画されるまで少し待つ (couponId hidden が現れるか、最大8秒)
   await page
     .waitForSelector('input[name^="frmCouponListDto"]', { timeout: 8_000 })
@@ -8494,14 +8529,7 @@ async function scrapePhotoGallery(page, opts = {}) {
   const MAX_ITEMS = 100;
   let url;
   try { url = draftUrl(opts.genre, 'photoGalleryEdit', opts.baseUrl); } catch (_e) { url = PHOTO_GALLERY_EDIT_URL; }
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  // グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
-  const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
-  if (sel.selected) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  }
+  await gotoWithSalonContext(page, url, opts);
 
   const pageData = await page.evaluate(() => {
     function txt(el) { return el ? (el.textContent || '').trim() : ''; }
@@ -8599,8 +8627,7 @@ async function scrapeEquipment(page, opts = {}) {
       debug: { skipped: 'hair_genre_no_equipment', itemsFound: 0, parsed: 0 },
     };
   }
-  await page.goto(EQUIP_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(page, EQUIP_LIST_URL, opts);
 
   const raw = await page.evaluate(() => {
     function val(el) {
@@ -8664,13 +8691,11 @@ async function scrapeEquipment(page, opts = {}) {
  */
 async function scrapeSalonInfo(page, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
-  await page
-    .goto(new URL('/KLP/set/salonSetup/', baseUrl).toString(), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    })
-    .catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(
+    page,
+    new URL('/KLP/set/salonSetup/', baseUrl).toString(),
+    { ...opts, baseUrl },
+  );
   const data = await page.evaluate(() => {
     const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const val = (name) => {
@@ -9144,15 +9169,11 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
 // =====================================================================
 async function scrapeKodawari(page, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
-  // グループ店舗(1ログイン複数サロン)は先にサロンを選ぶ。
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-  await page
-    .goto(draftUrl(opts.genre, 'kodawariList', baseUrl), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    })
-    .catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(
+    page,
+    draftUrl(opts.genre, 'kodawariList', baseUrl),
+    { ...opts, baseUrl },
+  );
 
   // 一覧から各こだわりページの pageId / タイトル / 掲載状態 / 並び順を拾う。
   // ★実DOM(2026-07-11): データ行は th 無しの table に「上へ N 下へ | <タイトル>」形式で並ぶ。
@@ -9278,14 +9299,11 @@ async function scrapeKodawari(page, opts = {}) {
 // =====================================================================
 async function scrapeFeature(page, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
-  await page
-    .goto(draftUrl(opts.genre, 'specialList', baseUrl), {
-      waitUntil: 'domcontentloaded',
-      timeout: 30_000,
-    })
-    .catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(
+    page,
+    draftUrl(opts.genre, 'specialList', baseUrl),
+    { ...opts, baseUrl },
+  );
 
   const rows = await page
     .evaluate(() => {
@@ -9341,8 +9359,7 @@ async function scrapeStaff(page, opts = {}) {
   if (opts.genre === 'hair') {
     return scrapeStylists(page, opts);
   }
-  await page.goto(STAFF_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(page, STAFF_LIST_URL, opts);
 
   // ----------------------------------------------------------------
   // SalonBoard 「スタッフ掲載情報一覧」の DOM 仕様 (確認済み):
@@ -10372,8 +10389,7 @@ async function scrapeBlogs(page, opts = {}) {
   const maxDetails = Number.isFinite(opts.maxDetails) ? opts.maxDetails : 60;
   // ブログ一覧もジャンルで異なる: hair=/CLP/bt/blog/blogList/、エステ=/KLP/blog/blogList/。
   const blogListUrl = `https://salonboard.com${reservePathRoot(opts.genre)}/blog/blogList/`;
-  await page.goto(blogListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  await gotoWithSalonContext(page, blogListUrl, opts);
 
   // ----------------------------------------------------------------
   // SalonBoard ブログ一覧の DOM 仕様 (確認済み):
@@ -11313,6 +11329,46 @@ async function ensureSalonSelected(page, opts = {}) {
       .count()
       .then((n) => n > 0)
       .catch(() => false);
+  }
+  // サロンID付きのグループ店舗では、店舗文脈が未確立のまま /CNB|CNK/draft/*
+  // へ直行すると groupTop へ戻されず「ユーザエラー」に着地する個体がある。
+  // その状態では従来の groupTop 判定を通過できず、空一覧を正常データとして返していた。
+  // 対象店舗の手掛かりがある場合だけ明示的に groupTop へ戻し、選択処理をやり直す。
+  if (!onGroupTop && (salonId || shopName)) {
+    const invalidContext = await page
+      .evaluate(() => {
+        const title = document.title || '';
+        const body = ((document.body && document.body.innerText) || '')
+          .replace(/\s+/g, '')
+          .slice(0, 600);
+        return /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+          `${title}${body}`,
+        );
+      })
+      .catch(() => false);
+    if (invalidContext) {
+      const inferredHair =
+        opts.genre === 'hair' ||
+        /\/(?:CLP|CNB)\//i.test(page.url());
+      const groupTopPath = inferredHair ? '/CNC/groupTop/' : '/KLP/groupTop/';
+      const groupTopUrl = new URL(
+        groupTopPath,
+        opts.baseUrl || page.url() || 'https://salonboard.com/',
+      ).toString();
+      await page
+        .goto(groupTopUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 })
+        .catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
+      if (!onGroupTop) {
+        onGroupTop = await page
+          .locator('#biyouStoreInfoArea, #kireiStoreInfoArea, table.mod_table19 a[id^="H"]')
+          .first()
+          .count()
+          .then((n) => n > 0)
+          .catch(() => false);
+      }
+    }
   }
   if (!onGroupTop) {
     return { ok: true, selected: false };
@@ -13170,8 +13226,12 @@ async function scrapeReviews(page, opts = {}) {
   let url = listUrl;
 
   for (let i = 0; i < maxPages; i++) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    if (i === 0) {
+      await gotoWithSalonContext(page, url, { ...opts, baseUrl, genre });
+    } else {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
     await page.waitForSelector('table.mod_table03', { timeout: 8_000 }).catch(() => {});
     visited++;
 

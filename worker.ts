@@ -2370,9 +2370,28 @@ async function handleJob(job: Job): Promise<void> {
             password: job.credentials.password,
           });
           const rows = (res?.rows ?? []) as unknown[];
+          const debugJson = res?.debug
+            ? JSON.stringify(res.debug).slice(0, 3000)
+            : "";
+          // 店舗文脈が未確立の「ユーザエラー」や STORE_ID 未取得は、
+          // 取得対象が本当に0件なのではなく誤った画面を読んでいる。
+          // 0件成功にすると SuperAdmin/Admin が空データを正として表示してしまうため、
+          // セッションを作り直して再試行させる。
+          if (
+            rows.length === 0 &&
+            /ユーザエラー|no_store_id|salon_id_not_in_group|group_top_(?:no_stores|no_target|name_unmatched)|still_on_group_top|context_not_established/i.test(
+              debugJson,
+            )
+          ) {
+            const err = new Error(
+              `SalonBoard店舗文脈を確立できませんでした: ${debugJson.slice(0, 1200)}`,
+            ) as Error & { code?: string };
+            err.code = "SALON_CONTEXT_INVALID";
+            throw err;
+          }
           const emptyDebug =
             rows.length === 0 && res?.debug
-              ? ` debug=${JSON.stringify(res.debug).slice(0, 1500)}`
+              ? ` debug=${debugJson.slice(0, 1500)}`
               : "";
           await report({
             job_id: job.id,
