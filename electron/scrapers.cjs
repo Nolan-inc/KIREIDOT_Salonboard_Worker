@@ -3136,7 +3136,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     });
     return fail(
       `SalonBoardの更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
-      'CONFIRMATION_MISMATCH',
+      'SB_SERVER_ERROR',
       false,
     );
   }
@@ -3441,7 +3441,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     });
     return fail(
       `SalonBoardの予定登録更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
-      'CONFIRMATION_MISMATCH',
+      'SB_SERVER_ERROR',
       false,
     );
   }
@@ -3855,9 +3855,21 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
       'DELETE_NOT_CONFIRMED', false,
     );
   }
+  // SalonBoard の削除APIが 204 を返した時点で削除は受理済み。直後にCloud
+  // ブラウザが閉じて再確認だけ失敗したケースをPCフォールバックへ送ると、既に
+  // 消えた予定を延々探すことになる。肯定的な「まだ存在する」結果が無く2xxなら
+  // 冪等成功として扱う（次回fetchでも最終状態は照合される）。
+  if (Number(responseStatus) >= 200 && Number(responseStatus) < 300) {
+    return {
+      status: 'ok',
+      externalId: null,
+      summary: `予定削除API受理済み (HTTP ${responseStatus}; 再確認のみ未完了)`,
+      warnings: ['削除後の画面再確認はCloud終了により未完了'],
+    };
+  }
   return fail(
     `予定削除後の再確認に失敗しました (response=${responseStatus}, error=${verifyError?.message ?? 'unknown'}${capture ? `, capture=${capture}` : ''})。自動で再試行します。`,
-    'DELETE_VERIFY_FAILED', false,
+    'SB_SERVER_ERROR', false,
   );
 }
 
@@ -7135,7 +7147,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         true, // 手動対応が必要 (リトライしても状況は変わらない)
       );
     }
-    return fail(`予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`, 'UNKNOWN_ERROR', true);
+    return fail(
+      `予約変更フォームに到達できませんでした (reserveId=${reserveId}${cap1 ? `, capture=${cap1}` : ''})`,
+      'SB_SERVER_ERROR',
+      false,
+    );
   }
 
   // 2) 担当 (指定があれば更新)。
@@ -7223,119 +7239,154 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     const hasEquipArea =
       (await page.locator('#equipArea, #equipAdd, a.equipAdd, select[name="equipIdList"]').first().count().catch(() => 0)) > 0;
     if (!hasEquipArea) {
-      const cap = await captureScrapeDebug(page, 'change', `equipment_area_missing_${reserveId}`, {
-        diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, url: page.url() },
-      });
-      return fail(
-        `KDで設備「${wantedEquipName || wantedEquipExtId}」が指定されていますが、SalonBoardの予約変更フォームに設備欄がありません${cap ? ` (capture=${cap})` : ''}`,
-        'EQUIPMENT_FULL',
-        true,
-      );
-    }
-
-    if ((await page.locator(equipSelector).count().catch(() => 0)) === 0) {
-      const addBtn = page.locator('#equipAdd, a[id="equipAdd"], a.equipAdd').first();
-      if ((await addBtn.count().catch(() => 0)) > 0) {
-        await addBtn.click({ timeout: 5_000 }).catch(() => {});
-        await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
+      // 予約種別によって変更フォームに設備UIを出さない版がある。その場合でも
+      // 既存のSalonBoard割当がKD希望設備と一致していれば、設備を触る必要はなく
+      // 担当/日時変更を継続できる。同じBrowserContextの別ページで詳細を読み、
+      // 元の変更フォームを壊さず肯定確認する。
+      let existingEquipName = null;
+      let probe = null;
+      try {
+        probe = await page.context().newPage();
+        existingEquipName = await readReservationEquipmentName(probe, reserveId, { baseUrl });
+      } catch (_e) {
+        existingEquipName = null;
+      } finally {
+        await probe?.close().catch(() => {});
       }
-    }
-    const equipSelects = page.locator(equipSelector);
-    const equipCount = await equipSelects.count().catch(() => 0);
-    if (equipCount === 0) {
-      const cap = await captureScrapeDebug(page, 'change', `equipment_row_missing_${reserveId}`, {
-        diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, url: page.url() },
-      });
-      return fail(
-        `SalonBoardの予約変更フォームに設備選択行を作成できませんでした${cap ? ` (capture=${cap})` : ''}`,
-        'EQUIPMENT_FULL',
-        true,
-      );
-    }
-
-    // 予約には設備を1台だけ割り当てる。2行目以降は空へ戻し、解除不能なら停止する。
-    for (let i = 1; i < equipCount; i++) {
-      const extra = equipSelects.nth(i);
-      const emptyValue = await extra.evaluate((el) => {
-        const option = Array.from(el.options).find((o) => !o.value);
-        return option ? option.value : null;
-      }).catch(() => null);
-      if (emptyValue === null) {
+      const normEquip = (value) => String(value || '')
+        .normalize('NFKC')
+        .replace(/[○×\s　]/g, '')
+        .replace(/ベット/g, 'ベッド');
+      if (
+        existingEquipName
+        && wantedEquipName
+        && normEquip(existingEquipName) === normEquip(wantedEquipName)
+      ) {
+        expectedPersistedEquipName = wantedEquipName;
+        console.log(
+          `[change] ${reserveId} 変更フォーム設備欄なし・既存割当「${existingEquipName}」一致のため継続`,
+        );
+      } else {
+        const cap = await captureScrapeDebug(page, 'change', `equipment_area_missing_${reserveId}`, {
+          diagnostics: {
+            reserveId,
+            wantedEquipExtId,
+            wantedEquipName,
+            existingEquipName,
+            url: page.url(),
+          },
+        });
         return fail(
-          '複数の設備行があり、余分な設備割当を解除できないため予約変更を停止しました。',
+          `KDで設備「${wantedEquipName || wantedEquipExtId}」が指定されていますが、SalonBoardの予約変更フォームに設備欄がありません（既存割当=${existingEquipName || '確認不能'}）${cap ? ` (capture=${cap})` : ''}`,
           'EQUIPMENT_FULL',
           true,
         );
       }
-      await extra.selectOption({ value: emptyValue }, { timeout: 3_000 }).catch(() => {});
-      await extra.evaluate((el) => {
+    } else {
+      if ((await page.locator(equipSelector).count().catch(() => 0)) === 0) {
+        const addBtn = page.locator('#equipAdd, a[id="equipAdd"], a.equipAdd').first();
+        if ((await addBtn.count().catch(() => 0)) > 0) {
+          await addBtn.click({ timeout: 5_000 }).catch(() => {});
+          await page.waitForSelector(equipSelector, { timeout: 5_000 }).catch(() => {});
+        }
+      }
+      const equipSelects = page.locator(equipSelector);
+      const equipCount = await equipSelects.count().catch(() => 0);
+      if (equipCount === 0) {
+        const cap = await captureScrapeDebug(page, 'change', `equipment_row_missing_${reserveId}`, {
+          diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, url: page.url() },
+        });
+        return fail(
+          `SalonBoardの予約変更フォームに設備選択行を作成できませんでした${cap ? ` (capture=${cap})` : ''}`,
+          'EQUIPMENT_FULL',
+          true,
+        );
+      }
+
+      // 予約には設備を1台だけ割り当てる。2行目以降は空へ戻し、解除不能なら停止する。
+      for (let i = 1; i < equipCount; i++) {
+        const extra = equipSelects.nth(i);
+        const emptyValue = await extra.evaluate((el) => {
+          const option = Array.from(el.options).find((o) => !o.value);
+          return option ? option.value : null;
+        }).catch(() => null);
+        if (emptyValue === null) {
+          return fail(
+            '複数の設備行があり、余分な設備割当を解除できないため予約変更を停止しました。',
+            'EQUIPMENT_FULL',
+            true,
+          );
+        }
+        await extra.selectOption({ value: emptyValue }, { timeout: 3_000 }).catch(() => {});
+        await extra.evaluate((el) => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(() => {});
+      }
+
+      const equipSelect = equipSelects.first();
+      const picked = await equipSelect.evaluate((el, args) => {
+        const { wantId, wantName } = args;
+        const options = Array.from(el.options);
+        const norm = (value) => String(value || '')
+          .normalize('NFKC')
+          .replace(/[○×\s　]/g, '')
+          .replace(/ベット/g, 'ベッド');
+        // 変更前から同じ設備が選択されている場合は、その予約自身の占有により
+        // 「×」表示でも維持してよい。未選択の×設備を新たに割り当てることはしない。
+        const available = (option) =>
+          option.selected || !/×/.test(option.textContent || '');
+        if (wantId) {
+          const option = options.find((candidate) =>
+            candidate.value === wantId && available(candidate));
+          if (option) return { value: option.value, label: norm(option.textContent) };
+        }
+        if (wantName) {
+          const option = options.find((candidate) =>
+            norm(candidate.textContent) === norm(wantName) && available(candidate));
+          if (option) return { value: option.value, label: norm(option.textContent) };
+        }
+        return null;
+      }, { wantId: wantedEquipExtId, wantName: wantedEquipName }).catch(() => null);
+      if (!picked?.value) {
+        const options = await equipSelect.evaluate((el) =>
+          Array.from(el.options).map((option) => ({
+            value: option.value,
+            label: (option.textContent || '').trim(),
+            selected: option.selected,
+          })).slice(0, 20)).catch(() => []);
+        const cap = await captureScrapeDebug(page, 'change', `equipment_unavailable_${reserveId}`, {
+          diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, options, url: page.url() },
+        });
+        return fail(
+          `KDの設備「${wantedEquipName || wantedEquipExtId}」をSalonBoardで選択できません（満床または設備マッピング不一致）${cap ? ` (capture=${cap})` : ''}`,
+          'EQUIPMENT_FULL',
+          true,
+        );
+      }
+      await equipSelect.selectOption({ value: picked.value }, { timeout: 4_000 }).catch(() => {});
+      await equipSelect.evaluate((el) => {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }).catch(() => {});
-    }
-
-    const equipSelect = equipSelects.first();
-    const picked = await equipSelect.evaluate((el, args) => {
-      const { wantId, wantName } = args;
-      const options = Array.from(el.options);
-      const norm = (value) => String(value || '')
-        .normalize('NFKC')
-        .replace(/[○×\s　]/g, '')
-        .replace(/ベット/g, 'ベッド');
-      // 変更前から同じ設備が選択されている場合は、その予約自身の占有により
-      // 「×」表示でも維持してよい。未選択の×設備を新たに割り当てることはしない。
-      const available = (option) =>
-        option.selected || !/×/.test(option.textContent || '');
-      if (wantId) {
-        const option = options.find((candidate) =>
-          candidate.value === wantId && available(candidate));
-        if (option) return { value: option.value, label: norm(option.textContent) };
+      await page.waitForTimeout(300);
+      const applied = await equipSelect.evaluate((el) => ({
+        value: el.value,
+        label: String(el.options[el.selectedIndex]?.textContent || '')
+          .normalize('NFKC')
+          .replace(/[○×\s　]/g, '')
+          .replace(/ベット/g, 'ベッド'),
+      })).catch(() => ({ value: '', label: '' }));
+      if (applied.value !== picked.value) {
+        return fail(
+          `KDの設備「${wantedEquipName || wantedEquipExtId}」を予約変更フォームへ反映できませんでした`,
+          'EQUIPMENT_FULL',
+          true,
+        );
       }
-      if (wantName) {
-        const option = options.find((candidate) =>
-          norm(candidate.textContent) === norm(wantName) && available(candidate));
-        if (option) return { value: option.value, label: norm(option.textContent) };
-      }
-      return null;
-    }, { wantId: wantedEquipExtId, wantName: wantedEquipName }).catch(() => null);
-    if (!picked?.value) {
-      const options = await equipSelect.evaluate((el) =>
-        Array.from(el.options).map((option) => ({
-          value: option.value,
-          label: (option.textContent || '').trim(),
-          selected: option.selected,
-        })).slice(0, 20)).catch(() => []);
-      const cap = await captureScrapeDebug(page, 'change', `equipment_unavailable_${reserveId}`, {
-        diagnostics: { reserveId, wantedEquipExtId, wantedEquipName, options, url: page.url() },
-      });
-      return fail(
-        `KDの設備「${wantedEquipName || wantedEquipExtId}」をSalonBoardで選択できません（満床または設備マッピング不一致）${cap ? ` (capture=${cap})` : ''}`,
-        'EQUIPMENT_FULL',
-        true,
-      );
+      selectedEquipmentValue = picked.value;
+      expectedPersistedEquipName = picked.label || applied.label || wantedEquipName;
     }
-    await equipSelect.selectOption({ value: picked.value }, { timeout: 4_000 }).catch(() => {});
-    await equipSelect.evaluate((el) => {
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }).catch(() => {});
-    await page.waitForTimeout(300);
-    const applied = await equipSelect.evaluate((el) => ({
-      value: el.value,
-      label: String(el.options[el.selectedIndex]?.textContent || '')
-        .normalize('NFKC')
-        .replace(/[○×\s　]/g, '')
-        .replace(/ベット/g, 'ベッド'),
-    })).catch(() => ({ value: '', label: '' }));
-    if (applied.value !== picked.value) {
-      return fail(
-        `KDの設備「${wantedEquipName || wantedEquipExtId}」を予約変更フォームへ反映できませんでした`,
-        'EQUIPMENT_FULL',
-        true,
-      );
-    }
-    selectedEquipmentValue = picked.value;
-    expectedPersistedEquipName = picked.label || applied.label || wantedEquipName;
   }
 
   if (!enableChange) {

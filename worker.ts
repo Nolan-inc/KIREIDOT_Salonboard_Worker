@@ -1551,30 +1551,9 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "push_booking") {
       const payload = job.payload as PushBookingPayload;
-      const isTerminalBookingUpdate =
-        payload.action === "update" &&
-        ["completed", "cancelled", "no_show"].includes(String(payload.booking_status || ""));
-      if (isTerminalBookingUpdate) {
-        await report({
-          job_id: job.id,
-          job_type: "push_booking",
-          status: "cancelled",
-          booking_id: payload.booking_id,
-          external_booking_id: payload.external_booking_id ?? null,
-          summary:
-            `push_booking: KIREIDOT予約が${payload.booking_status}のため変更対象外として終了`,
-          result_payload: {
-            confirmed_customer_name: payload.customer_name ?? null,
-            confirmed_staff_name: payload.staff_name ?? null,
-            confirmed_menu_name: payload.salonboard_menu_name ?? payload.menu_name ?? null,
-            confirmed_scheduled_at: payload.scheduled_at ?? null,
-          },
-        });
-        console.log(
-          `[job] done  ${tag} (push_booking update skipped: booking_status=${payload.booking_status})`,
-        );
-        return;
-      }
+      // 完了/no-show/過去日時でも SalonBoard との履歴同期は必要。ここで状態だけを
+      // 理由に捨てず、実画面へ反映を試みる。SalonBoard が個別レコードを変更不可に
+      // している場合だけ、scraper が具体的な理由付きで manual_required を返す。
       // KIREIDOT の休憩・業務枠は SalonBoard の「予約」ではなく「予定」。
       // 通常予約フォームへ送ると設備行が自動追加され、設備を使わない予定でも
       // 「× フリー設備」等を選択して誤って EQUIPMENT_FULL になる。
@@ -1730,7 +1709,7 @@ async function handleJob(job: Job): Promise<void> {
         // 一過性インフラ失敗(500着地/doComplete未確定)は上限超過でも manual に昇格させず
         // retryable のまま維持する(Akamai 回復後の自動再投入に委ねる)。実枠競合(SLOT_NOT_AVAILABLE)
         // や確認画面不一致等の「実データ/セレクタ起因」は従来どおり上限超過で manual に倒す。
-        const infraTransient = isInfraTransientError(result.errorCode);
+        const infraTransient = isInfraTransientError(result.errorCode, result.reason);
         const toManual = result.manualRequired || (exhausted && !infraTransient);
         const isCaptcha = result.errorCode === "RECAPTCHA_REQUIRED";
         await report(

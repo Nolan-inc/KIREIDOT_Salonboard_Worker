@@ -138,6 +138,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260728124500_enrich_booking_status_and_recover_cloud_writes.sql'),
     'utf8',
   );
+  const historicalSyncMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260731154951_sync_past_booking_writes_and_staff_mapping.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -182,6 +186,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     source,
     /scheduleWriteAttempt < 5/,
     'schedule blocks must retry stale submits inside one Cloud attempt',
+  );
+  assert.match(
+    source,
+    /更新競合\(KPCL017V01\)[\s\S]{0,260}'SB_SERVER_ERROR'/,
+    'exhausted schedule optimistic-lock conflicts must remain transient',
   );
   assert.match(
     source,
@@ -469,10 +478,25 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /where job_type = 'push_photo_gallery'[\s\S]{0,120}status in \('queued', 'running', 'retryable_failed'\)/,
     'unfinished legacy PC photo/style jobs must be recovered to Cloud',
   );
-  assert.match(
+  assert.doesNotMatch(
     cloudSource,
     /isTerminalBookingUpdate[\s\S]{0,900}status:\s*"cancelled"/,
-    'updates for completed/cancelled/no-show bookings must terminate without retrying an unavailable SalonBoard form',
+    'completed/no-show/past booking writes must not be silently discarded',
+  );
+  assert.match(
+    cloudSource,
+    /isInfraTransientError\(result\.errorCode, result\.reason\)/,
+    'push booking retries must classify transient failures using both code and reason',
+  );
+  assert.match(
+    source,
+    /Number\(responseStatus\) >= 200[\s\S]{0,260}予定削除API受理済み/,
+    'a 2xx schedule-delete response must survive a browser-close verification failure',
+  );
+  assert.match(
+    source,
+    /page\.context\(\)\.newPage\(\)[\s\S]{0,500}readReservationEquipmentName[\s\S]{0,700}変更フォーム設備欄なし・既存割当/,
+    'booking changes without an equipment editor must continue when the persisted assignment already matches',
   );
   assert.match(
     cloudSource,
@@ -488,6 +512,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     bookingStatusMigration,
     /RECOVER_LEGACY_PC_TO_CLOUD[\s\S]{0,1000}executor = 'playwright'/,
     'unresolved legacy desktop writes must be recovered to the current Cloud worker',
+  );
+  assert.match(
+    historicalSyncMigration,
+    /salonboard_enrich_job_booking_status[\s\S]{0,2600}salonboard_staff_external_id[\s\S]{0,800}return new/,
+    'job hydration must recover the canonical SalonBoard staff mapping',
+  );
+  assert.doesNotMatch(
+    historicalSyncMigration,
+    /TERMINAL_BOOKING_PUSH_SKIPPED|PAST_ORPHAN_RETIRED/,
+    'historical synchronization migration must not retire terminal or past writes',
+  );
+  assert.match(
+    historicalSyncMigration,
+    /drop trigger if exists trg_zzzzz_deprioritize_past_writes/,
+    'past writes must keep the normal retry policy',
   );
   assert.match(
     pcWorkerSource,
