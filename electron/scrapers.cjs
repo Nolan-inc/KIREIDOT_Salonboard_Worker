@@ -2526,8 +2526,7 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   // 毎回 groupTop を開き直すと、同画面の店舗リンクが一時的に0件になる個体で
   // 正しい店舗文脈まで捨てて STORE_SELECT_REQUIRED にしてしまう。現在ページの
   // フッターに対象Hコードまたは店舗名が明示されている場合だけ安全にスキップする。
-  if (!/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
-    const alreadySelected = await page.evaluate(({ salonId, shopName }) => {
+  const pageMatchesTarget = () => page.evaluate(({ salonId, shopName }) => {
       const norm = (value) => String(value || '')
         .normalize('NFKC')
         .replace(/[\s\u3000]+/g, '')
@@ -2537,7 +2536,23 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
       const name = norm(shopName);
       return (id.length >= 6 && body.includes(id)) || (name.length >= 6 && body.includes(name));
     }, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => false);
+  if (!/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
+    const alreadySelected = await pageMatchesTarget();
     if (alreadySelected) return { ok: true, selected: false, verifiedCurrentContext: true };
+
+    // WAO新宿など単一店舗アカウントは /CNC/groupTop/ に店舗リンクを持たず、
+    // 直接スケジュールへ入ると正しい店舗文脈になる。店舗ID/名称を画面フッターで
+    // 肯定確認できた場合だけ採用し、別店舗なら下のgroupTop選択へ進む。
+    const schedulePath = opts.genre === 'hair'
+      ? '/CLP/bt/schedule/salonSchedule/'
+      : '/KLP/schedule/salonSchedule/';
+    await page.goto(new URL(schedulePath, baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 25_000,
+    }).catch(() => {});
+    if (await pageMatchesTarget()) {
+      return { ok: true, selected: false, verifiedDirectSchedule: true };
+    }
   }
   let last = { ok: false, selected: false, reason: 'unknown' };
   for (let attempt = 1; attempt <= 2; attempt += 1) {
