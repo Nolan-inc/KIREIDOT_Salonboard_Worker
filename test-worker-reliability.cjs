@@ -193,6 +193,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /window\.stop\(\)[\s\S]{0,900}formAttempt % 2 === 1[\s\S]{0,1000}source=\$\{tokenSource\}/,
+    'schedule blocks must stop pending Ajax and alternate current/official optimistic-lock tokens',
+  );
+  assert.match(
+    source,
     /scheduleWriteAttempt < 5/,
     'schedule blocks must retry stale submits inside one Cloud attempt',
   );

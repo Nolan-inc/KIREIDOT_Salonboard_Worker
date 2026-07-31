@@ -3112,8 +3112,28 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     u.searchParams.set('date', when.yyyymmdd);
     u.searchParams.set('rsvHour', startHH);
     u.searchParams.set('rsvMinute', startMM);
-    if (rlastupdate) u.searchParams.set('rlastupdate', rlastupdate);
     try {
+      // スケジュール画面は Ajax/長時間通信を継続する店舗があり、これを残したまま
+      // page.goto すると登録フォームへのリクエスト開始が十数秒遅れて、取得直後の
+      // rlastupdate でも KPCL017V01 になる。通常予約経路と同様に通信を止めてから
+      // 即遷移する。奇数試行は送信直前の現在時刻、偶数試行は画面の正規値を使い、
+      // 店舗ごとの楽観ロック判定差も自動で吸収する。
+      await page.evaluate(() => { try { window.stop(); } catch (_) { /* noop */ } }).catch(() => {});
+      let formToken = rlastupdate;
+      let tokenSource = 'schedule';
+      if (formAttempt % 2 === 1) {
+        const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+        formToken =
+          jst.getUTCFullYear().toString()
+          + String(jst.getUTCMonth() + 1).padStart(2, '0')
+          + String(jst.getUTCDate()).padStart(2, '0')
+          + String(jst.getUTCHours()).padStart(2, '0')
+          + String(jst.getUTCMinutes()).padStart(2, '0')
+          + String(jst.getUTCSeconds()).padStart(2, '0');
+        tokenSource = 'current';
+      }
+      if (formToken) u.searchParams.set('rlastupdate', formToken);
+      console.log(`[schedule] form-token=${formToken || '(empty)'} source=${tokenSource} formAttempt=${formAttempt}`);
       await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       await page.waitForSelector('form#extReserveRegist, #fnc_schedule, #regist', { timeout: 15_000 }).catch(() => {});
     } catch (e) {
