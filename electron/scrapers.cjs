@@ -3918,6 +3918,7 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   let nativeDialogAccepted = false;
   let htmlDialogAccepted = false;
   let submitResponse = null;
+  let postDeleteState = null;
   const onDialog = async (d) => {
     nativeDialogAccepted = true;
     try { await d.accept(); } catch (_e) { /* noop */ }
@@ -3967,6 +3968,37 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
       page.waitForTimeout(5_000).then(() => null),
     ]);
 
+    // 削除画面の版によっては a#delete の後に独自確認画面へ遷移し、従来の
+    // .accept / 「はい」セレクタに一致しない。再現時にその画面を失わないよう、
+    // スケジュールへ戻る前にURL・フォーム・可視操作を記録する。
+    postDeleteState = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      forms: Array.from(document.forms).map((form) => ({
+        id: form.id,
+        name: form.name,
+        action: form.action,
+        method: form.method,
+      })).slice(0, 10),
+      controls: Array.from(document.querySelectorAll('a,button,input[type="button"],input[type="submit"]'))
+        .filter((el) => {
+          const style = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        })
+        .map((el) => ({
+          tag: el.tagName,
+          id: el.id,
+          name: el.getAttribute('name'),
+          className: el.className,
+          text: (el.textContent || el.getAttribute('value') || '').replace(/\s+/g, ' ').trim(),
+          href: el.getAttribute('href'),
+        }))
+        .filter((entry) => /削除|はい|いいえ|OK|実行|確定|キャンセル/i.test(`${entry.text} ${entry.id || ''} ${entry.name || ''}`))
+        .slice(0, 20),
+      body: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 1200),
+    })).catch(() => null);
+
     // 完了サイン (フォーム離脱 / 完了文言 / エラー領域) を最大10秒ポーリング。
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -4014,6 +4046,8 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     nativeDialogAccepted,
     htmlDialogAccepted,
     responseStatus,
+    responseUrl: submitResponse?.url?.() || null,
+    postDeleteState,
     verifyError: verifyError?.message ?? null,
     lastStill,
   };
