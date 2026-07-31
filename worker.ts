@@ -2347,6 +2347,16 @@ async function handleJob(job: Job): Promise<void> {
             shopName,
             loginId: job.credentials.login_id,
             password: job.credentials.password,
+            // ジョブ開始時は認証済みでも、groupTop 選択や掲載管理の深い画面で
+            // セッションが失効することがある。scraper 内で同じ工程を一度だけ
+            // fresh login からやり直せるよう、予約系と同じ自己回復関数を渡す。
+            relogin: makeRelogin(
+              page,
+              baseUrl,
+              job.credentials,
+              job.shop_id,
+              launch.proxy?.server ?? "direct",
+            ),
           });
           const rows = (res?.rows ?? []) as unknown[];
           const debugJson = res?.debug

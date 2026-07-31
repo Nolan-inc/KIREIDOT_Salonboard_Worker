@@ -2113,71 +2113,107 @@ function cleanText(s) {
  * 店舗文脈エラーが残っていないことまで確認する。
  */
 async function gotoWithSalonContext(page, targetUrl, opts = {}) {
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-
-  let selected = await ensureSalonSelected(page, {
+  const selectTarget = () => ensureSalonSelected(page, {
     salonId: opts.salonId,
     shopName: opts.shopName,
     genre: opts.genre,
     baseUrl: opts.baseUrl,
   });
-  // 非hairの単一店舗アカウントは groupTop に店舗リンクを持たない場合がある。
-  // その場合は KLP 管理TOPで店舗文脈を温め直してから目的画面へ戻る。
-  if (
-    !selected.ok &&
-    opts.genre !== 'hair' &&
-    selected.reason === 'group_top_no_stores'
-  ) {
-    const topUrl = new URL(
-      '/KLP/top/',
-      opts.baseUrl || targetUrl || 'https://salonboard.com/',
-    ).toString();
-    await page.goto(topUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-    const topReady = await page
-      .evaluate(() => {
-        const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
-        return {
-          hasMgmt: /予約管理|掲載管理/.test(body),
-          hasPassword: !!document.querySelector('input[type="password"]'),
-          errored: /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
-            `${document.title || ''}${body.slice(0, 600)}`,
-          ),
-        };
-      })
-      .catch(() => ({ hasMgmt: false, hasPassword: true, errored: true }));
-    if (topReady.hasMgmt && !topReady.hasPassword && !topReady.errored) {
-      selected = { ok: true, selected: true, reason: 'single_salon_top_restored' };
-    }
-  }
-  if (!selected.ok) {
-    const err = new Error(`SalonBoard店舗選択に失敗しました: ${selected.reason || 'unknown'}`);
-    err.code = 'SALON_CONTEXT_INVALID';
-    throw err;
-  }
-  if (selected.selected) {
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
-  }
-
-  const invalid = await page
+  const inspectContext = () => page
     .evaluate(() => {
       const title = document.title || '';
       const body = ((document.body && document.body.innerText) || '')
         .replace(/\s+/g, '')
         .slice(0, 600);
-      return /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
-        `${title}${body}`,
-      );
+      return {
+        invalid: /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+          `${title}${body}`,
+        ),
+        expired: /有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|操作されなかった/.test(
+          `${title}${body}`,
+        ),
+      };
     })
-    .catch(() => false);
-  if (invalid) {
-    const err = new Error(
-      `SalonBoard店舗文脈を確立できませんでした (url=${page.url()}, title=${await page.title().catch(() => '')})`,
+    .catch(() => ({ invalid: false, expired: false }));
+  const expiredReason = (reason) =>
+    /有効期限|expired|ログインしなお|再度ログイン|ログインへ|操作されなかった/i.test(
+      String(reason || ''),
     );
-    err.code = 'SALON_CONTEXT_INVALID';
-    throw err;
+
+  // ジョブ開始時の認証確認を通った後でも、groupTop の店舗選択POSTや掲載管理への
+  // 深い遷移でセッションが失効することがある。予約系と同じ relogin を使い、目的画面
+  // への遷移から一度だけやり直す。これをしないと取込系だけ5分おきに同じ期限切れを
+  // 繰り返し、最終的に manual_required になっていた (2026-08-01 ADER鯖江)。
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+
+    let selected = await selectTarget();
+    // 非hairの単一店舗アカウントは groupTop に店舗リンクを持たない場合がある。
+    // その場合は KLP 管理TOPで店舗文脈を温め直してから目的画面へ戻る。
+    if (
+      !selected.ok &&
+      opts.genre !== 'hair' &&
+      selected.reason === 'group_top_no_stores'
+    ) {
+      const topUrl = new URL(
+        '/KLP/top/',
+        opts.baseUrl || targetUrl || 'https://salonboard.com/',
+      ).toString();
+      await page.goto(topUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      const topReady = await page
+        .evaluate(() => {
+          const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '');
+          return {
+            hasMgmt: /予約管理|掲載管理/.test(body),
+            hasPassword: !!document.querySelector('input[type="password"]'),
+            errored: /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+              `${document.title || ''}${body.slice(0, 600)}`,
+            ),
+          };
+        })
+        .catch(() => ({ hasMgmt: false, hasPassword: true, errored: true }));
+      if (topReady.hasMgmt && !topReady.hasPassword && !topReady.errored) {
+        selected = { ok: true, selected: true, reason: 'single_salon_top_restored' };
+      }
+    }
+
+    if (!selected.ok) {
+      if (
+        attempt === 0 &&
+        expiredReason(selected.reason) &&
+        typeof opts.relogin === 'function' &&
+        await opts.relogin().catch(() => false)
+      ) {
+        continue;
+      }
+      const err = new Error(`SalonBoard店舗選択に失敗しました: ${selected.reason || 'unknown'}`);
+      err.code = 'SALON_CONTEXT_INVALID';
+      throw err;
+    }
+    if (selected.selected) {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+
+    const context = await inspectContext();
+    if (
+      context.expired &&
+      attempt === 0 &&
+      typeof opts.relogin === 'function' &&
+      await opts.relogin().catch(() => false)
+    ) {
+      continue;
+    }
+    if (context.invalid || context.expired) {
+      const err = new Error(
+        `SalonBoard店舗文脈を確立できませんでした (url=${page.url()}, title=${await page.title().catch(() => '')}, expired=${context.expired})`,
+      );
+      err.code = 'SALON_CONTEXT_INVALID';
+      throw err;
+    }
+    return;
   }
 }
 
