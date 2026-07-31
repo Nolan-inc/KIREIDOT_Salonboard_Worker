@@ -489,6 +489,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'push booking retries must classify transient failures using both code and reason',
   );
   assert.match(
+    cloudSource,
+    /has been closed\|ProcessSingleton\|profile directory\.\*in use/,
+    'persistent Chrome profile locks must kill the orphan process and retry once',
+  );
+  assert.match(
     source,
     /Number\(responseStatus\) >= 200[\s\S]{0,260}予定削除API受理済み/,
     'a 2xx schedule-delete response must survive a browser-close verification failure',

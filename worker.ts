@@ -3122,7 +3122,10 @@ async function launchStealthContext(opts: {
   try {
     ctx = await chromium.launchPersistentContext(userDataDir, launchOptions);
   } catch (e) {
-    if (!/has been closed/.test(String(e))) throw e;
+    const launchError = String(e);
+    if (!/(has been closed|ProcessSingleton|profile directory.*in use)/i.test(launchError)) {
+      throw e;
+    }
     // JOB_TIMEOUT で宙に浮いた前ジョブの孤児 Chrome が SingletonLock を握っていると、
     // 新しい Chrome はプロファイル使用中と判断して即終了し、この形の起動失敗になる
     // (2026-07-02 新宿三丁目/WAO表参道で連鎖)。per-shop mutex により同店舗で正当に
