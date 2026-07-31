@@ -120,6 +120,11 @@ function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
     /isGuardTimeoutReport[\s\S]*reportError\.includes\("\[JOB_TIMEOUT\]"\)/,
     'the final guard timeout callback must pass through late-callback suppression',
   );
+  assert.match(
+    source,
+    /function cleanupOldDebugCaptures[\s\S]{0,1800}salonboard-debug[\s\S]{0,1800}rmSync\(capturePath, \{ recursive: true, force: true \}\)[\s\S]{0,900}cleanupOldDebugCaptures\(\)/,
+    'Cloud startup must prune expired debug capture directories before disk exhaustion crashes Chrome',
+  );
 }
 
 function testKnownSalonBoardRecoveryBranchesStayEnabled() {

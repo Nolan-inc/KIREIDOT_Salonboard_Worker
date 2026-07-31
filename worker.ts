@@ -6017,12 +6017,47 @@ async function keepaliveOnce(): Promise<void> {
   }
 }
 
+// Cloud の診断キャプチャは失敗時に HTML/PNG/meta を保存するため、障害が連続すると
+// writable layer を数GBまで消費する。ディスク枯渇は Chrome の Page crashed を誘発し、
+// 元の業務エラーをさらに増幅するので、起動時に期限切れの「各ジョブ用ディレクトリ」だけ
+// を削除する。当日分や Chrome profile/cookie は対象外（再ログイン嵐を起こさない）。
+function cleanupOldDebugCaptures(): void {
+  if (!isCloudWorker()) return;
+  const configured = Number(process.env.SB_DEBUG_RETENTION_DAYS ?? 7);
+  const retentionDays = Number.isFinite(configured)
+    ? Math.max(1, Math.min(30, Math.floor(configured)))
+    : 7;
+  const root = join(homedir(), ".kireidot", "salonboard-debug");
+  if (!existsSync(root)) return;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  try {
+    for (const channel of readdirSync(root, { withFileTypes: true })) {
+      if (!channel.isDirectory()) continue;
+      const channelPath = join(root, channel.name);
+      for (const capture of readdirSync(channelPath, { withFileTypes: true })) {
+        if (!capture.isDirectory()) continue;
+        const capturePath = join(channelPath, capture.name);
+        if (statSync(capturePath).mtimeMs >= cutoff) continue;
+        rmSync(capturePath, { recursive: true, force: true });
+        removed += 1;
+      }
+    }
+    if (removed > 0) {
+      console.log(`[boot] debug capture cleanup: ${removed} dirs older than ${retentionDays}d removed`);
+    }
+  } catch (e) {
+    console.warn(`[boot] debug capture cleanup failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 async function main() {
   console.log(
     `[boot] api=${API} mode=${WORKER_MODE} worker=${WORKER_ID} device=${
       WORKER_MODE === "device" ? DEVICE_ID.slice(0, 8) : "-"
     } version=${APP_VERSION} platform=${PLATFORM} dry_run=${DRY_RUN} once=${RUN_ONCE} poll=${POLL_MS}ms`
   );
+  cleanupOldDebugCaptures();
 
   // 直接スクレイプモード (キュー非依存・検証用)。
   const directShop = process.env.SALONBOARD_DIRECT_SCRAPE_SHOP;
