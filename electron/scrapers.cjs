@@ -2941,6 +2941,12 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     // 実予約側と同じく attached だけを待ち、value/text の両画面版に対応する。
     const token = page.locator('#rlastupdate').first();
     await token.waitFor({ state: 'attached', timeout: 8_000 }).catch(() => {});
+    // commit/DOMContentLoaded 直後は初期トークンだけ先にあり、スタッフ表の Ajax 描画完了時に
+    // 値が更新される。銀座店では初期値を即利用すると毎回 KPCL017V01 になった。
+    // 店舗差で表セレクタが無い場合もあるため最大1.5秒に限定し、長時間は待たない。
+    await page.waitForSelector('.jscScheduleMainTableStaff', {
+      state: 'attached', timeout: 1_500,
+    }).catch(() => {});
     // スタッフ列セレクタは店舗/画面版によって存在しない。ここを長く待つと、
     // 取得済みの rlastupdate がその待機中に失効し、WAO新宿で KPCL017V01 を
     // 自分自身で発生させていた。Ajaxのトークン差し替えを75ms間隔で監視し、
@@ -5373,6 +5379,9 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // 画面版によってスタッフ列のDOMが異なるため、その出現を待ってはいけない。
     // WAO新宿ではセレクタ不一致の12秒待機が rlastupdate を期限切れにしていた。
     // Ajaxによる値の差し替えだけを短時間監視し、安定後すぐ登録URLへ進む。
+    await page.waitForSelector('.jscScheduleMainTableStaff', {
+      state: 'attached', timeout: 1_500,
+    }).catch(() => {});
     const startedAt = Date.now();
     let previous = '';
     let stableReads = 0;

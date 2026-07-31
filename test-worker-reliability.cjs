@@ -193,6 +193,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /readStableRlastupdate[\s\S]{0,1200}jscScheduleMainTableStaff[\s\S]{0,180}timeout: 1_500/,
+    'schedule blocks must wait briefly for the Ajax-rendered staff grid before reading rlastupdate',
+  );
+  assert.match(
+    source,
     /formAttempt <= 5/,
     'schedule blocks must retry stale form opens inside one Cloud attempt',
   );
@@ -245,6 +250,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     source,
     /readStableScheduleToken[\s\S]{0,1200}getAttribute\('value'\)/,
     'rlastupdate reading must support both text and input value variants',
+  );
+  assert.match(
+    source,
+    /readStableScheduleToken[\s\S]{0,1200}jscScheduleMainTableStaff[\s\S]{0,180}timeout: 1_500/,
+    'new bookings must wait briefly for the Ajax-rendered staff grid before reading rlastupdate',
   );
   assert.match(
     source,
