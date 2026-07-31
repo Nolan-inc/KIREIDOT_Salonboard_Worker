@@ -2522,17 +2522,29 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   if (!opts || (!opts.salonId && !opts.shopName)) {
     return { ok: true, selected: false };
   }
-  try {
-    await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    return await ensureSalonSelected(page, {
-      salonId: opts.salonId,
-      shopName: opts.shopName,
-      genre: opts.genre,
-      baseUrl,
-    }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
-  } catch (e) {
-    return { ok: false, selected: false, reason: e?.message ?? String(e) };
+  let last = { ok: false, selected: false, reason: 'unknown' };
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      last = await ensureSalonSelected(page, {
+        salonId: opts.salonId,
+        shopName: opts.shopName,
+        genre: opts.genre,
+        baseUrl,
+      }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
+      if (last.ok) return last;
+      // groupTop の店舗リンクはログイン直後に一度だけ空になることがある。
+      // 誤店舗へ進むことはせず、同じ選択工程をfresh navigationで1回だけ再試行する。
+      if (attempt === 1 && /group_top_no_stores|still_on_group_top/.test(String(last.reason || ''))) {
+        await page.waitForTimeout(800).catch(() => {});
+        continue;
+      }
+      return last;
+    } catch (e) {
+      last = { ok: false, selected: false, reason: e?.message ?? String(e) };
+    }
   }
+  return last;
 }
 
 // 同一ログインで複数店舗を扱うアカウントでは、前ジョブの店舗コンテキストと
@@ -2542,7 +2554,13 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
 // これは楽観ロックの再試行より前に行う必要がある。
 async function resolveScheduleStaffExternalId(page, configuredExternalId, staffName) {
   return page.evaluate(({ configured, wantedName }) => {
-    const norm = (value) => String(value || '').normalize('NFKC').replace(/[\s\u3000]+/g, '').toLowerCase();
+    // KIREIDOT表示名には rimi💕 / himari🌻 のような装飾絵文字が入る一方、
+    // SalonBoard側は rimi / Himari だけの場合がある。文字・数字以外の装飾を
+    // 除いて比較し、表記差だけなら現在店舗のIDへ安全に補正する。
+    const norm = (value) => String(value || '')
+      .normalize('NFKC')
+      .replace(/[^\p{L}\p{N}]/gu, '')
+      .toLowerCase();
     const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"], .jscScheduleMainHead[id^="STAFF_"]'));
     const parsed = heads.map((head) => {
       const match = String(head.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
@@ -2962,7 +2980,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
 
   const selectedContext = await ensureReserveSalonContext(page, baseUrl, opts);
   if (selectedContext?.ok === false) {
-    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${selectedContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', true);
+    const transient = /group_top_no_stores|still_on_group_top|timeout|navigation/i.test(String(selectedContext.reason || ''));
+    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${selectedContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', !transient);
   }
 
   // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
@@ -5529,7 +5548,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 別店舗スタッフIDで KPCL017V01 へ落ちる。
   const initialContext = await ensureReserveSalonContext(page, baseUrl, opts);
   if (initialContext?.ok === false) {
-    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${initialContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', true);
+    const transient = /group_top_no_stores|still_on_group_top|timeout|navigation/i.test(String(initialContext.reason || ''));
+    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${initialContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', !transient);
   }
 
   // --- 二重登録防止プリフライト (§6.4) ---
