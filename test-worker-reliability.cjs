@@ -151,6 +151,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260731162519_hydrate_cancel_booking_jobs.sql'),
     'utf8',
   );
+  const parityMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260731234938_guarantee_schedule_shift_booking_parity.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -161,10 +165,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /matchedStartMin[\s\S]{0,900}hh:\s*String\(matchedStartHour\)/,
     'schedule deletion must verify the exact block selected from the grid, including containing blocks',
   );
-  assert.match(
+  assert.doesNotMatch(
     source,
     /isDayOff && start <= startTotal && end >= endTotal[\s\S]{0,120}found = true/,
-    'a SalonBoard day-off covering the requested block must be idempotent success',
+    'a SalonBoard day-off must not hide a missing KIREIDOT business block',
   );
   assert.match(
     source,
@@ -221,20 +225,25 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /KPCL017 grid-drag fallback[\s\S]{0,500}openedByGridDrag/,
     'schedule blocks must fall back to SalonBoard native grid drag when direct registration URLs stay stale',
   );
-  assert.match(
+  assert.doesNotMatch(
     source,
-    /partial coverage[\s\S]{0,500}register uncovered/,
-    'partially covered schedule blocks must register only the uncovered interval',
+    /partial coverage|partialCoverageCompleted|register uncovered/,
+    'partial coverage must not split or falsely complete an exact business block',
+  );
+  assert.doesNotMatch(
+    source,
+    /merged\.some\(\(m\) => m\.start <= startTotal && m\.end >= endTotal\)/,
+    'unrelated schedules and customer reservations must not satisfy exact block verification',
   );
   assert.match(
     source,
-    /scheduleReservation, \.jscScheduleReservation[\s\S]{0,1200}isReservation: true[\s\S]{0,1600}merged\.some/,
-    'existing customer reservations must count as schedule-block coverage instead of surfacing KPCL017',
+    /const appliedStaff =[\s\S]{0,1800}'CONFIRMATION_MISMATCH'/,
+    'booking changes must reject a form that did not accept the requested staff',
   );
   assert.match(
     source,
-    /partialCoverageCompleted:\s*true/,
-    'split uncovered schedule intervals must report idempotent completion',
+    /wantStaffExt[\s\S]{0,1800}staffOk[\s\S]{0,900}persistedState\?\.staffOk/,
+    'booking updates must re-read and verify the persisted SalonBoard staff',
   );
   assert.match(
     source,
@@ -606,6 +615,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     cancelHydrationMigration,
     /new\.job_type not in \('push_booking', 'cancel_booking'\)[\s\S]{0,2600}'customer_name', v_booking\.customer_name/,
     'cancel retries must hydrate the canonical customer and booking snapshot',
+  );
+  assert.match(
+    parityMigration,
+    /new\.salonboard_staff_external_id := v_staff_external_id[\s\S]{0,120}new\.salonboard_staff_name := v_staff_name/,
+    'staff reassignment must replace stale SalonBoard identity fields',
+  );
+  assert.match(
+    parityMigration,
+    /'salonboard_staff_external_id', coalesce\([\s\S]{0,120}v_staff_external_id[\s\S]{0,240}'salonboard_staff_name', coalesce\([\s\S]{0,120}v_staff_name/,
+    'job hydration must prioritize the currently assigned staff',
+  );
+  assert.match(
+    parityMigration,
+    /salonboard_credentials_catchup_shifts_on_push_enable[\s\S]{0,1200}salonboard_recheck_blocks_after_shift_write/,
+    'push re-enable and shift completion must automatically repair skipped shifts and business blocks',
   );
   assert.match(
     pcWorkerSource,
