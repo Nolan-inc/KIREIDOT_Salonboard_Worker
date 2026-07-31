@@ -3871,6 +3871,20 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
   if ((await page.locator('form#scheduleChange').count().catch(() => 0)) === 0) {
     return fail(`予定変更画面に到達できませんでした (url=${page.url()})`, 'CONFIRMATION_MISMATCH', true);
   }
+  // DOM本体は先に描画され、末尾scriptで #delete のclick handlerが後から
+  // バインドされる。attached直後に押すと見た目上はクリックできても何も起きず、
+  // 予定が残り続ける。DOMContentLoadedとjQueryイベント初期化を待ってから操作する。
+  await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+  await page.waitForFunction(() => {
+    const el = document.getElementById('delete');
+    if (!el) return false;
+    if (typeof el.onclick === 'function') return true;
+    const jq = window.jQuery;
+    if (!jq || typeof jq._data !== 'function') return false;
+    const events = jq._data(el, 'events');
+    return !!(events && events.click && events.click.length);
+  }, null, { timeout: 6_000 }).catch(() => {});
+  await page.waitForTimeout(250).catch(() => {});
 
   // (4) 誤削除防止: 変更画面の日付・開始時刻・スタッフが、上で一意に選んだ
   // 実ブロックと一致するか検証する。タイトル一致かつ対象時刻を内包する統合ブロックを
@@ -3930,7 +3944,9 @@ async function deleteScheduleViaForm(page, payload, opts = {}) {
     // 未送信なのに「予定が残っている」とだけ報告していた。
     const responsePromise = page.waitForResponse((res) => {
       const req = res.request();
-      return req.method() !== 'GET' && /schedule|yotei|todo/i.test(res.url());
+      let sameSalonBoard = false;
+      try { sameSalonBoard = new URL(res.url()).hostname === new URL(baseUrl).hostname; } catch (_e) { /* noop */ }
+      return sameSalonBoard && req.method() !== 'GET' && /schedule|yotei|todo/i.test(res.url());
     }, { timeout: 18_000 }).catch(() => null);
 
     await delBtn.click({ timeout: 12_000 });
