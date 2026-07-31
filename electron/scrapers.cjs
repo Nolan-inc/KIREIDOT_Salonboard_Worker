@@ -6740,10 +6740,28 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
 
   // 詳細に到達できず groupTop / login へ戻された場合は「キャンセル不可」ではなく、
   // セッションまたは店舗文脈の一時障害。ボタン欠落として手動停止すると、再ログイン後に
-  // 自動復旧できる HotPepper(BF) 予約まで滞留するため retryable に戻す。
+  // 自動復旧できる HotPepper(BF) 予約まで滞留する。hair系では予約詳細の直リンクを
+  // TOPへ戻す店舗があるため、実装済みのスケジュール・ポップアップ動線へフォールバックする。
   if (!onDetail) {
+    const scheduleFallback = await cancelViaSchedulePopup(page, p, {
+      ...opts,
+      baseUrl,
+      enableCancel,
+    }).catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    if (scheduleFallback.ok) {
+      if (scheduleFallback.confirmOnly) return { status: 'confirm_only' };
+      return {
+        status: 'ok',
+        externalId: reserveId,
+        recoveredReserveId: p._recoveredReserveId || null,
+        alreadyAbsent: scheduleFallback.already === true,
+      };
+    }
     return fail(
-      `予約詳細に到達できませんでした (reserveId=${reserveId}, url=${page.url()}${cap1 ? `, capture=${cap1}` : ''})`,
+      `予約詳細に到達できず、スケジュール経由の取消も完了できませんでした (reserveId=${reserveId}, url=${page.url()}, fallback=${scheduleFallback.reason || 'unknown'}${cap1 ? `, capture=${cap1}` : ''})`,
       'SB_SERVER_ERROR',
       false,
     );

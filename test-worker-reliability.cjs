@@ -142,6 +142,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260731154951_sync_past_booking_writes_and_staff_mapping.sql'),
     'utf8',
   );
+  const cancelHydrationMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260731162519_hydrate_cancel_booking_jobs.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -500,8 +504,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /if \(!onDetail\)[\s\S]{0,400}予約詳細に到達できませんでした[\s\S]{0,160}'SB_SERVER_ERROR'[\s\S]{0,40}false/,
-    'a cancellation redirected to groupTop/login must retry instead of requiring manual handling',
+    /if \(!onDetail\)[\s\S]{0,500}cancelViaSchedulePopup/,
+    'a cancellation redirected to groupTop/login must use the schedule fallback before retrying',
+  );
+  assert.match(
+    source,
+    /スケジュール経由の取消も完了できませんでした[\s\S]{0,300}'SB_SERVER_ERROR'[\s\S]{0,40}false/,
+    'an unavailable cancellation fallback must remain retryable',
   );
   assert.match(
     source,
@@ -537,6 +546,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     historicalSyncMigration,
     /drop trigger if exists trg_zzzzz_deprioritize_past_writes/,
     'past writes must keep the normal retry policy',
+  );
+  assert.match(
+    cancelHydrationMigration,
+    /new\.job_type not in \('push_booking', 'cancel_booking'\)[\s\S]{0,2600}'customer_name', v_booking\.customer_name/,
+    'cancel retries must hydrate the canonical customer and booking snapshot',
   );
   assert.match(
     pcWorkerSource,
