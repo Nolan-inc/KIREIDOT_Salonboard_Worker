@@ -3108,6 +3108,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // 最新スケジュールへ戻って rlastupdate を取り直し、同じCloud処理内で再試行する。
   let staleFormError = '';
   let formOpened = false;
+  let openedByGridDrag = false;
   for (let formAttempt = 1; formAttempt <= 5; formAttempt += 1) {
     try {
       const refreshUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
@@ -3182,14 +3183,50 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     break;
   }
   if (!formOpened && staleFormError) {
-    const cap = await captureScrapeDebug(page, 'schedule', `stale_form_${ymd}_${p.salonboard_staff_external_id}`, {
-      diagnostics: { staleFormError, rlastupdate },
-    });
-    return fail(
-      `SalonBoardの更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
-      'SB_SERVER_ERROR',
-      false,
-    );
+    // 埋まっている枠や画面版によって extReserveRegist の直URLは KPCL017 を返す。
+    // SalonBoard 本来のUI（「予定」チップをスタッフ行へドラッグ）なら、楽観ロックを
+    // 画面側JSが正しく引き継いで scheduleRegist を開けるため、最後にUI経路へフォールバック。
+    try {
+      const schedUrl = new URL('/KLP/schedule/salonSchedule/', baseUrl);
+      schedUrl.searchParams.set('date', when.yyyymmdd);
+      schedUrl.searchParams.set('_kd_drag', String(Date.now()));
+      await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+      await page.waitForSelector('.jscScheduleMainTableStaff, #newPlan', {
+        state: 'attached', timeout: 5_000,
+      }).catch(() => {});
+      const staffIndex = await page.evaluate((ext) => {
+        const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]'));
+        return heads.findIndex((el) => (el.id || '').toUpperCase().startsWith(`STAFF_${ext}_`));
+      }, String(p.salonboard_staff_external_id).toUpperCase()).catch(() => -1);
+      const source = page.locator('#newPlan, .jscNewPlan').first();
+      const rows = page.locator('.jscScheduleMainTableStaff .jscScheduleMainTableLine');
+      const row = staffIndex >= 0 ? rows.nth(staffIndex) : rows.first();
+      const target = row.locator('.jscScheduleSetArea, .scheduleSetArea').first();
+      if ((await source.count().catch(() => 0)) > 0 && (await target.count().catch(() => 0)) > 0) {
+        await source.dragTo(target, {
+          sourcePosition: { x: 5, y: 5 },
+          targetPosition: { x: 12, y: 12 },
+          timeout: 12_000,
+        }).catch(() => {});
+        await page.waitForSelector('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour', {
+          timeout: 10_000,
+        }).catch(() => {});
+        openedByGridDrag = (await page
+          .locator('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour')
+          .first().count().catch(() => 0)) > 0;
+      }
+      console.log(`[schedule] KPCL017 grid-drag fallback opened=${openedByGridDrag} staffIndex=${staffIndex}`);
+    } catch (_e) { /* 下で従来エラーへ */ }
+    if (!openedByGridDrag) {
+      const cap = await captureScrapeDebug(page, 'schedule', `stale_form_${ymd}_${p.salonboard_staff_external_id}`, {
+        diagnostics: { staleFormError, rlastupdate, gridDragFallback: false },
+      });
+      return fail(
+        `SalonBoardの更新競合(KPCL017V01)が5回続きました${cap ? ` (capture=${cap})` : ''}`,
+        'SB_SERVER_ERROR',
+        false,
+      );
+    }
   }
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA on register form', 'RECAPTCHA_REQUIRED', true);
@@ -3198,7 +3235,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // (3) 「予定を登録する」ボタンを押して予定登録画面へ遷移。
   // SalonBoard の店舗契約/画面版によって a#fnc_schedule ではなく
   // button/input、または「予定を追加する」表記になるため、文言でも救済する。
-  const schedBtn = page.locator([
+  if (!openedByGridDrag) {
+    const schedBtn = page.locator([
     'a#fnc_schedule',
     'button#fnc_schedule',
     'input#fnc_schedule',
@@ -3256,7 +3294,8 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     ]);
   } catch (_e) { /* 続行して下で formReady を検証 */ }
   // 遷移待ち (クリックでページ遷移する場合に備える)。
-  await page.waitForSelector('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour', { timeout: 12_000 }).catch(() => {});
+    await page.waitForSelector('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour', { timeout: 12_000 }).catch(() => {});
+  }
 
   const formReady = (await page.locator('#jsiScheduleRegist, input[name="schTitle"], #jsiSchEndHour').first().count().catch(() => 0)) > 0;
   if (!formReady) {

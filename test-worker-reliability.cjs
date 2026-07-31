@@ -218,6 +218,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /KPCL017 grid-drag fallback[\s\S]{0,500}openedByGridDrag/,
+    'schedule blocks must fall back to SalonBoard native grid drag when direct registration URLs stay stale',
+  );
+  assert.match(
+    source,
     /partial coverage[\s\S]{0,500}register uncovered/,
     'partially covered schedule blocks must register only the uncovered interval',
   );
