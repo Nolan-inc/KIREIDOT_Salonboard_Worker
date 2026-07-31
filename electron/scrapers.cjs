@@ -5527,6 +5527,18 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         continue;
       }
     }
+    if (schedTry === 1 && genre !== 'hair') {
+      // 既存予約プリフライトは reserveList/search に遷移する。店舗/画面版によっては
+      // その直後の schedule 直URLが空レスポンスで元ページへ戻され、正規
+      // #rlastupdate を取得できない。KLPトップを一度経由して画面文脈を戻し、
+      // 2回目の schedule 読み込みを行う（現在時刻の代替トークンだけで進めない）。
+      await page.goto(new URL(`${ROOT}/top/`, baseUrl).toString(), {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+      }).catch(() => {});
+      await page.waitForTimeout(150).catch(() => {});
+      continue;
+    }
     // 診断キャプチャを残してループ終了 (rlastupdate 無しでも下の登録フォーム開きで最終判定)。
     await captureScrapeDebug(page, 'bookings', 'sched_no_rlastupdate', {
       diagnostics: { url: page.url(), title: await page.title().catch(() => ''), genre, schedTry },
@@ -5542,8 +5554,11 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   //   従来は #rlastupdate(スケジュールのレンダー時刻)を読み、登録URL到達までの遷移遅延
   //   (WAO新宿で最大~14秒)でトークンが失効して KPCL017V01 を自己誘発していた。楽観ロックは
   //   「提出トークンが最新更新時刻以降か」を見るだけなので、送信直前に生成した現在時刻(JST)は常に有効。
-  //   → スケジュール由来の読取値ではなく、常に現在時刻(JST)を rlastupdate として使う。
-  {
+  //   店舗によってはサーバが「スケジュール画面に埋め込まれた正規値との完全一致」を
+  //   要求し、現在時刻だけでは KPCL017V01 になる（銀座店で実測）。正規値が取得できた
+  //   初回はそれを優先し、KPCL 再試行の奇数回だけ現在時刻へ切り替える。これにより
+  //   正規値必須店と、短命トークンで現在時刻が有効な WAO 系の両方を自動復旧する。
+  if (!rlastupdate || staleTokenRetry % 2 === 1) {
     const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
     rlastupdate =
       jst.getUTCFullYear().toString()

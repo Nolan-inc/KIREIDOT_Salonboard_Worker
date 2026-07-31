@@ -216,6 +216,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /schedule-token=\$\{rlastupdate\}[\s\S]{0,120}ageMs=/,
     'new booking failures must record rlastupdate age for optimistic-lock diagnosis',
   );
+  assert.match(
+    source,
+    /schedTry === 1 && genre !== 'hair'[\s\S]{0,700}`\$\{ROOT\}\/top\/`[\s\S]{0,500}continue/,
+    'new booking must restore KLP page context when schedule token is missing after reserve-list preflight',
+  );
+  assert.match(
+    source,
+    /if \(!rlastupdate \|\| staleTokenRetry % 2 === 1\)/,
+    'new booking must alternate an official schedule token with a current-time fallback across stale retries',
+  );
   assert.doesNotMatch(
     source,
     /readStableScheduleToken[\s\S]{0,900}waitForSelector\([\s\S]{0,300}scheduleMainHead/,
