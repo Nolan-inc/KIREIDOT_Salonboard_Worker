@@ -11828,7 +11828,7 @@ async function ensureSalonSelected(page, opts = {}) {
         const body = ((document.body && document.body.innerText) || '')
           .replace(/\s+/g, '')
           .slice(0, 600);
-        return /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択/.test(
+        return /ユーザエラー|サロンが選択されていません|サロン一覧からサロンを選択|有効期限が切れ|有効期限切れ|再度ログイン|ログインしなおし|操作されなかった/.test(
           `${title}${body}`,
         );
       })
