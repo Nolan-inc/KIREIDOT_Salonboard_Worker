@@ -183,6 +183,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /readStableRlastupdate[\s\S]{0,900}token\.waitFor\(\{ state: 'attached', timeout: 8_000 \}\)[\s\S]{0,900}'value' in el/,
+    'schedule blocks must not age a hidden rlastupdate token while waiting for visibility',
+  );
+  assert.match(
+    source,
     /formAttempt <= 5/,
     'schedule blocks must retry stale form opens inside one Cloud attempt',
   );

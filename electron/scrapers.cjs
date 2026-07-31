@@ -2935,7 +2935,12 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   // Ajax更新直前の古いトークンになり KPCL017V01 を誘発する店舗がある。
   // スタッフ列の描画後、値が連続して安定した時点のトークンを使う。
   const readStableRlastupdate = async () => {
-    await page.waitForSelector('#rlastupdate', { timeout: 8_000 }).catch(() => {});
+    // #rlastupdate は画面上には表示されない hidden/input の店舗がある。
+    // Playwright の既定 state=visible で待つと、要素自体は既に存在するのに毎回8秒
+    // タイムアウトし、その間に楽観ロック値が失効して KPCL017V01 を自己誘発する。
+    // 実予約側と同じく attached だけを待ち、value/text の両画面版に対応する。
+    const token = page.locator('#rlastupdate').first();
+    await token.waitFor({ state: 'attached', timeout: 8_000 }).catch(() => {});
     // スタッフ列セレクタは店舗/画面版によって存在しない。ここを長く待つと、
     // 取得済みの rlastupdate がその待機中に失効し、WAO新宿で KPCL017V01 を
     // 自分自身で発生させていた。Ajaxのトークン差し替えを75ms間隔で監視し、
@@ -2944,7 +2949,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     let previous = '';
     let stableReads = 0;
     for (let i = 0; i < 24; i += 1) {
-      const current = (await page.locator('#rlastupdate').first().textContent().catch(() => ''))?.trim() || '';
+      const current = await token.evaluate((el) => {
+        const value = 'value' in el ? String(el.value || '') : '';
+        return (value || el.getAttribute('value') || el.textContent || '').trim();
+      }).catch(() => '');
       if (current && current === previous) {
         stableReads += 1;
         if (stableReads >= 3 && Date.now() - startedAt >= 225) return current;
