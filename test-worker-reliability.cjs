@@ -498,6 +498,16 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     'persistent Chrome profile locks must kill the orphan process and retry once',
   );
   assert.match(
+    cloudSource,
+    /pwInput\.waitFor\(\{ state: "visible", timeout: 15_000 \}\)/,
+    'Cloud login must wait for delayed password fields',
+  );
+  assert.match(
+    cloudSource,
+    /missingInputState\.imageAuth[\s\S]{0,200}IMAGE_AUTH_REQUIRED/,
+    'a missing password field must distinguish image authentication',
+  );
+  assert.match(
     source,
     /Number\(responseStatus\) >= 200[\s\S]{0,260}予定削除API受理済み/,
     'a 2xx schedule-delete response must survive a browser-close verification failure',

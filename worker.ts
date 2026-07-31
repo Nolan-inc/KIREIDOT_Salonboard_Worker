@@ -3441,6 +3441,10 @@ async function tryLogin(
     .locator('input[name="password"], input[type="password"]')
     .first();
   await idInput.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
+  // SalonBoard は負荷時に ID 欄を先に描画し、パスワード欄を遅れて差し込むことがある。
+  // ID だけ待って即入力すると pw=false を恒久的なフォーム欠落と誤判定するため、
+  // パスワード欄も同じ上限で明示的に待つ。
+  await pwInput.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
 
   // bot 検知を避けるため 1 文字ずつ入力 (失敗したら fill にフォールバック)。PC と同じ。
   const typeInto = async (
@@ -3471,9 +3475,25 @@ async function tryLogin(
   const okId = await typeInto(idInput, c.loginId);
   const okPw = await typeInto(pwInput, c.password);
   if (!okId || !okPw) {
+    const missingInputState = await page.evaluate(() => {
+      const body = document.body?.innerText || "";
+      return {
+        url: location.href,
+        title: document.title || "",
+        imageAuth: /画像認証|イラストを完成|パーツをドラッグ/.test(body),
+      };
+    }).catch(() => ({ url: page.url(), title: "", imageAuth: false }));
+    if (missingInputState.imageAuth) {
+      return {
+        status: "failed",
+        reason: "[IMAGE_AUTH_REQUIRED] SalonBoard画像認証が表示されました",
+      };
+    }
     return {
       status: "failed",
-      reason: `cannot find login inputs (id=${okId}, pw=${okPw})`,
+      reason:
+        `cannot find login inputs (id=${okId}, pw=${okPw}, ` +
+        `url=${missingInputState.url}, title=${missingInputState.title.slice(0, 60)})`,
     };
   }
 
