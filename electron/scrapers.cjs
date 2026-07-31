@@ -2522,6 +2522,23 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   if (!opts || (!opts.salonId && !opts.shopName)) {
     return { ok: true, selected: false };
   }
+  // ジョブ冒頭で既に対象店舗が選択済みなら、その肯定情報を利用する。
+  // 毎回 groupTop を開き直すと、同画面の店舗リンクが一時的に0件になる個体で
+  // 正しい店舗文脈まで捨てて STORE_SELECT_REQUIRED にしてしまう。現在ページの
+  // フッターに対象Hコードまたは店舗名が明示されている場合だけ安全にスキップする。
+  if (!/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
+    const alreadySelected = await page.evaluate(({ salonId, shopName }) => {
+      const norm = (value) => String(value || '')
+        .normalize('NFKC')
+        .replace(/[\s\u3000]+/g, '')
+        .toLowerCase();
+      const body = norm(document.body?.innerText || '');
+      const id = norm(salonId);
+      const name = norm(shopName);
+      return (id.length >= 6 && body.includes(id)) || (name.length >= 6 && body.includes(name));
+    }, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => false);
+    if (alreadySelected) return { ok: true, selected: false, verifiedCurrentContext: true };
+  }
   let last = { ok: false, selected: false, reason: 'unknown' };
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
