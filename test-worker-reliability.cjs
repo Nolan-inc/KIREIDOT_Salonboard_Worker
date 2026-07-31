@@ -223,6 +223,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /scheduleReservation, \.jscScheduleReservation[\s\S]{0,1200}isReservation: true[\s\S]{0,1600}merged\.some/,
+    'existing customer reservations must count as schedule-block coverage instead of surfacing KPCL017',
+  );
+  assert.match(
+    source,
     /partialCoverageCompleted:\s*true/,
     'split uncovered schedule intervals must report idempotent completion',
   );

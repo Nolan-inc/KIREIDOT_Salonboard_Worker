@@ -2872,7 +2872,24 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
       if (tCore.length >= 3 && (tCore === nameCore(actualTitle) || tCore === nameCore(actualMemo))) found = true;
     }
   }
-  // SB は既存予定と重複する予定POSTを黙って破棄する。既存予定(タイトル問わず。
+  // 予定ブロックだけでなく、既存の顧客予約もそのスタッフの受付を既に止めている。
+  // 埋まった予約枠へ extReserveRegist を直開きすると SalonBoard は空き不足ではなく
+  // KPCL017V01 を返すため、これをトークン競合として再試行し続けない。既存予約の
+  // 時間帯も coverage に加え、全被覆なら冪等成功、部分被覆なら未被覆区間だけを追加する。
+  for (const el of Array.from(line.querySelectorAll('.scheduleReservation, .jscScheduleReservation'))) {
+    if (el.classList.contains('jscScheduleToDo') || el.closest('.jscScheduleToDo')) continue;
+    const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
+    const m = tz.match(/"(\d{1,2}):(\d{2})"\s*,\s*"(\d{1,2}):(\d{2})"/);
+    if (!m) continue;
+    const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+    if (blocks.some((b) => b.start === start && b.end === end)) continue;
+    const reservationName = norm(
+      el.querySelector('.scheduleReserveName, .reserveCustomerName, .todoTitle')?.textContent,
+    );
+    blocks.push({ start, end, title: reservationName, isDayOff: false, isReservation: true });
+  }
+  // SB は既存予定/予約と重複する予定POSTを黙って破棄する。既存枠(タイトル問わず。
   // 「予定あり」=無題や旧予定方式の「土日祝早番」等も含む)の結合区間が登録区間を
   // 完全被覆しているなら、受付停止という目的は既に達成済み=冪等成功として扱う
   // (2026-07-26 WAO新宿 休憩/閉め・代官山 研修・中目黒で実害)。隣接2予定の合算被覆も
