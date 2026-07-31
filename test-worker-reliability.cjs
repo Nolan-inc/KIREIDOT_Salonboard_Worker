@@ -500,6 +500,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /if \(!onDetail\)[\s\S]{0,400}予約詳細に到達できませんでした[\s\S]{0,160}'SB_SERVER_ERROR'[\s\S]{0,40}false/,
+    'a cancellation redirected to groupTop/login must retry instead of requiring manual handling',
+  );
+  assert.match(
+    source,
     /page\.context\(\)\.newPage\(\)[\s\S]{0,500}readReservationEquipmentName[\s\S]{0,700}変更フォーム設備欄なし・既存割当/,
     'booking changes without an equipment editor must continue when the persisted assignment already matches',
   );

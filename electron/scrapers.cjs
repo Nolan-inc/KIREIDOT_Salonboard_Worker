@@ -6738,6 +6738,17 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     diagnostics: { reserveId, onDetail, url: page.url() },
   });
 
+  // 詳細に到達できず groupTop / login へ戻された場合は「キャンセル不可」ではなく、
+  // セッションまたは店舗文脈の一時障害。ボタン欠落として手動停止すると、再ログイン後に
+  // 自動復旧できる HotPepper(BF) 予約まで滞留するため retryable に戻す。
+  if (!onDetail) {
+    return fail(
+      `予約詳細に到達できませんでした (reserveId=${reserveId}, url=${page.url()}${cap1 ? `, capture=${cap1}` : ''})`,
+      'SB_SERVER_ERROR',
+      false,
+    );
+  }
+
   // 既にキャンセル済みなら成功扱い (冪等)
   const detailText = (await page.locator('body').innerText().catch(() => '')) || '';
   // キャンセルボタンは 電話/ext=#fnc_cancel、ネット/net=#jsiCancelFeeConfirmButton の2系統。
