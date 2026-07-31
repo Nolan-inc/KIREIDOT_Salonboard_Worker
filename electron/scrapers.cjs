@@ -2519,16 +2519,55 @@ function reservePathRoot(genre) {
 // 未選択のまま schedule/reserve に入ると「SALON BOARD : エラー」/セッション切れになる。
 // 単一店(salonId 無し)は no-op。best-effort(失敗しても後続の goto を試す)。
 async function ensureReserveSalonContext(page, baseUrl, opts) {
-  if (!opts || !opts.salonId) return;
+  if (!opts || (!opts.salonId && !opts.shopName)) {
+    return { ok: true, selected: false };
+  }
   try {
     await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await ensureSalonSelected(page, {
+    return await ensureSalonSelected(page, {
       salonId: opts.salonId,
       shopName: opts.shopName,
       genre: opts.genre,
       baseUrl,
-    }).catch(() => {});
-  } catch (_e) { /* best-effort */ }
+    }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
+  } catch (e) {
+    return { ok: false, selected: false, reason: e?.message ?? String(e) };
+  }
+}
+
+// 同一ログインで複数店舗を扱うアカウントでは、前ジョブの店舗コンテキストと
+// payload に焼かれたスタッフ external_id が食い違うことがある。対象店舗の
+// スケジュールに external_id が存在しなければ、表示名の完全一致から現在店舗の
+// IDを引き直す。別店舗IDのまま extReserveRegist を開くと KPCL017V01 になるため、
+// これは楽観ロックの再試行より前に行う必要がある。
+async function resolveScheduleStaffExternalId(page, configuredExternalId, staffName) {
+  return page.evaluate(({ configured, wantedName }) => {
+    const norm = (value) => String(value || '').normalize('NFKC').replace(/[\s\u3000]+/g, '').toLowerCase();
+    const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"], .jscScheduleMainHead[id^="STAFF_"]'));
+    const parsed = heads.map((head) => {
+      const match = String(head.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
+      const name = head.querySelector('.scheduleLink[title]')?.getAttribute('title')
+        || head.querySelector('.scheduleLinkInner')?.textContent
+        || head.textContent
+        || '';
+      return { externalId: match ? match[1].toUpperCase() : '', name: String(name).trim() };
+    }).filter((entry) => entry.externalId);
+    const configuredId = String(configured || '').trim().toUpperCase();
+    if (configuredId && parsed.some((entry) => entry.externalId === configuredId)) {
+      return { externalId: configuredId, changed: false, candidates: parsed };
+    }
+    const wanted = norm(wantedName);
+    if (!wanted) return { externalId: configuredId || null, changed: false, candidates: parsed };
+    const exact = parsed.filter((entry) => norm(entry.name) === wanted);
+    if (exact.length === 1) {
+      return { externalId: exact[0].externalId, changed: exact[0].externalId !== configuredId, candidates: parsed };
+    }
+    return { externalId: configuredId || null, changed: false, candidates: parsed };
+  }, { configured: configuredExternalId, wantedName: staffName }).catch(() => ({
+    externalId: configuredExternalId || null,
+    changed: false,
+    candidates: [],
+  }));
 }
 
 /**
@@ -2910,7 +2949,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const scheduleWriteAttempt = Number(opts._scheduleWriteAttempt || 1);
-  const p = payload || {};
+  const p = { ...(payload || {}) };
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
   if (!p.scheduled_at) return fail('予定の日時(scheduled_at)がありません', 'UNKNOWN_ERROR', true);
@@ -2918,6 +2957,11 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
   if (!when) return fail(`invalid scheduled_at: ${p.scheduled_at}`, 'UNKNOWN_ERROR', true);
   if (!p.salonboard_staff_external_id) {
     return fail('SalonBoard スタッフ external_id が未指定です(予定はスタッフ単位)', 'STAFF_MAPPING_NOT_FOUND', true);
+  }
+
+  const selectedContext = await ensureReserveSalonContext(page, baseUrl, opts);
+  if (selectedContext?.ok === false) {
+    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${selectedContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', true);
   }
 
   // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
@@ -3002,6 +3046,15 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     schedUrl.searchParams.set('_kd_token', String(Date.now()));
     await page.goto(schedUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
     rlastupdate = await readStableRlastupdate();
+    const resolvedStaff = await resolveScheduleStaffExternalId(
+      page,
+      p.salonboard_staff_external_id,
+      p.salonboard_staff_name || p.staff_name,
+    );
+    if (resolvedStaff.changed) {
+      console.log(`[schedule] staff external_id corrected ${p.salonboard_staff_external_id} -> ${resolvedStaff.externalId} (${p.salonboard_staff_name || p.staff_name || '?'})`);
+      p.salonboard_staff_external_id = resolvedStaff.externalId;
+    }
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
   }
@@ -5378,7 +5431,7 @@ function normalizeJpPhoneDigits(raw) {
 async function pushBookingViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
-  const p = payload || {};
+  const p = { ...(payload || {}) };
   const staleTokenRetry = Number(opts.staleTokenRetry || 0);
   const fail = async (reason, errorCode, manualRequired) => {
     // 失敗した「まさにその画面」を撮って result に載せる(per-job=店舗レーン並行でも混線しない)。
@@ -5460,6 +5513,14 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     }
     return previous;
   };
+
+  // preflight の予約一覧も必ず対象店舗で行う。ログイン直後に前ジョブの店舗が
+  // 選択されたままだと、別店舗を検索して「候補0件」になり、その後の登録も
+  // 別店舗スタッフIDで KPCL017V01 へ落ちる。
+  const initialContext = await ensureReserveSalonContext(page, baseUrl, opts);
+  if (initialContext?.ok === false) {
+    return fail(`対象店舗のSalonBoardコンテキストを選択できません (${initialContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', true);
+  }
 
   // --- 二重登録防止プリフライト (§6.4) ---
   // payload.preflight_required (孤児再enqueue / 手動「SB連携」リトライ / sweep 再enqueue
@@ -5596,6 +5657,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       // 要素の初期値ではなく、Ajaxによるスタッフ列描画後の安定値を使う。
       // networkidle は常時通信があるため待たず、DOMの意味的な完了を待つ。
       rlastupdate = await readStableScheduleToken();
+      const resolvedStaff = await resolveScheduleStaffExternalId(
+        page,
+        p.salonboard_staff_external_id,
+        p.salonboard_staff_name || p.staff_name,
+      );
+      if (resolvedStaff.changed) {
+        console.log(`[pushstep] ${(p.booking_id || '').slice(0, 8)} staff external_id corrected ${p.salonboard_staff_external_id} -> ${resolvedStaff.externalId} (${p.salonboard_staff_name || p.staff_name || '?'})`);
+        p.salonboard_staff_external_id = resolvedStaff.externalId;
+      }
     } catch (e) {
       if (schedTry === 2 || typeof opts.relogin !== 'function') {
         return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);

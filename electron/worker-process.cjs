@@ -4167,6 +4167,12 @@ async function runPushJobs({ showBrowser } = {}) {
 
       const cap = job.max_attempts || 3;
       const exhausted = (job.attempts || 0) + 1 >= cap;
+      const reservationContext = {
+        baseUrl,
+        salonId: creds.salon_id ?? null,
+        shopName: job.shop_name ?? null,
+        genre: jobGenre,
+      };
 
       if (isBlogDelete) {
         // ---- ブログ削除 ----
@@ -4582,7 +4588,7 @@ async function runPushJobs({ showBrowser } = {}) {
         // 予定そのものを削除する (deleteScheduleViaForm)。
         const isBlockSchedule = payload.booking_type === 'block';
         const result = isBlockSchedule
-          ? await deleteScheduleViaForm(page, payload, { baseUrl, enableDelete: enablePush })
+          ? await deleteScheduleViaForm(page, payload, { ...reservationContext, enableDelete: enablePush })
           : await cancelBookingViaForm(page, payload, { baseUrl, enableCancel: enablePush, salonId: creds.salon_id ?? null, shopName: job.shop_name ?? null, genre: jobGenre });
         if (result.status === 'ok') {
           await postCallback({
@@ -4623,7 +4629,7 @@ async function runPushJobs({ showBrowser } = {}) {
         const isBlockSchedule = payload.booking_type === 'block';
         const result = isBlockSchedule
           ? await changeScheduleViaForm(page, payload, {
-              baseUrl,
+              ...reservationContext,
               enableChange: enablePush,
             })
           : await changeBookingViaForm(page, payload, {
@@ -4681,8 +4687,8 @@ async function runPushJobs({ showBrowser } = {}) {
         // (scheduleRegist)として登録する。設備(ベッド)を埋めず受付だけ停止する枠。
         const isBlockSchedule = payload.booking_type === 'block';
         const result = isBlockSchedule
-          ? await pushScheduleViaForm(page, payload, { baseUrl, enablePush })
-          : await pushBookingViaForm(page, payload, { baseUrl, enablePush });
+          ? await pushScheduleViaForm(page, payload, { ...reservationContext, enablePush })
+          : await pushBookingViaForm(page, payload, { ...reservationContext, enablePush });
         if (result.status === 'ok') {
           await postCallback({
             job_id: job.id, job_type: 'push_booking', status: 'succeeded',
