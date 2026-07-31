@@ -2554,18 +2554,19 @@ async function resolveScheduleStaffExternalId(page, configuredExternalId, staffN
     }).filter((entry) => entry.externalId);
     const configuredId = String(configured || '').trim().toUpperCase();
     if (configuredId && parsed.some((entry) => entry.externalId === configuredId)) {
-      return { externalId: configuredId, changed: false, candidates: parsed };
+      return { externalId: configuredId, changed: false, valid: true, candidates: parsed };
     }
     const wanted = norm(wantedName);
-    if (!wanted) return { externalId: configuredId || null, changed: false, candidates: parsed };
+    if (!wanted) return { externalId: configuredId || null, changed: false, valid: false, candidates: parsed };
     const exact = parsed.filter((entry) => norm(entry.name) === wanted);
     if (exact.length === 1) {
-      return { externalId: exact[0].externalId, changed: exact[0].externalId !== configuredId, candidates: parsed };
+      return { externalId: exact[0].externalId, changed: exact[0].externalId !== configuredId, valid: true, candidates: parsed };
     }
-    return { externalId: configuredId || null, changed: false, candidates: parsed };
+    return { externalId: configuredId || null, changed: false, valid: false, candidates: parsed };
   }, { configured: configuredExternalId, wantedName: staffName }).catch(() => ({
     externalId: configuredExternalId || null,
     changed: false,
+    valid: null,
     candidates: [],
   }));
 }
@@ -3054,6 +3055,15 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     if (resolvedStaff.changed) {
       console.log(`[schedule] staff external_id corrected ${p.salonboard_staff_external_id} -> ${resolvedStaff.externalId} (${p.salonboard_staff_name || p.staff_name || '?'})`);
       p.salonboard_staff_external_id = resolvedStaff.externalId;
+    }
+    if (resolvedStaff.valid === false) {
+      const candidates = resolvedStaff.candidates.map((entry) => entry.name).filter(Boolean).join(', ');
+      return fail(
+        `対象店舗のSalonBoardに担当「${p.salonboard_staff_name || p.staff_name || p.salonboard_staff_external_id}」が見つかりません` +
+        `${candidates ? ` (店舗側スタッフ: ${candidates})` : ''}。スタッフ連携または予約担当を確認してください。`,
+        'STAFF_MAPPING_NOT_FOUND',
+        true,
+      );
     }
   } catch (e) {
     return fail(`予約スケジュールを開けません: ${e?.message ?? e}`, 'UNKNOWN_ERROR', false);
@@ -5665,6 +5675,15 @@ async function pushBookingViaForm(page, payload, opts = {}) {
       if (resolvedStaff.changed) {
         console.log(`[pushstep] ${(p.booking_id || '').slice(0, 8)} staff external_id corrected ${p.salonboard_staff_external_id} -> ${resolvedStaff.externalId} (${p.salonboard_staff_name || p.staff_name || '?'})`);
         p.salonboard_staff_external_id = resolvedStaff.externalId;
+      }
+      if (resolvedStaff.valid === false) {
+        const candidates = resolvedStaff.candidates.map((entry) => entry.name).filter(Boolean).join(', ');
+        return fail(
+          `対象店舗のSalonBoardに担当「${p.salonboard_staff_name || p.staff_name || p.salonboard_staff_external_id}」が見つかりません` +
+          `${candidates ? ` (店舗側スタッフ: ${candidates})` : ''}。スタッフ連携または予約担当を確認してください。`,
+          'STAFF_MAPPING_NOT_FOUND',
+          true,
+        );
       }
     } catch (e) {
       if (schedTry === 2 || typeof opts.relogin !== 'function') {
