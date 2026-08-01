@@ -637,7 +637,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     staffBackfillMigration,
-    /canonical_staff_identity_backfill[\s\S]{0,1600}salonboard_sync_status = 'pending_push'/,
+    /staff_was_mismatched[\s\S]{0,2400}canonical_staff_identity_backfill[\s\S]{0,700}staff_was_mismatched is true[\s\S]{0,1600}salonboard_sync_status = 'pending_push'/,
     'future reservations with stale staff snapshots must be requeued for canonical staff correction',
   );
   assert.match(
