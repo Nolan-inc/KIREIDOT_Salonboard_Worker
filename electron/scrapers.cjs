@@ -4748,7 +4748,12 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       const info = await page.evaluate(() => {
         const sel = document.querySelector('#shiftId');
         const selText = sel && sel.selectedIndex >= 0 ? (sel.options[sel.selectedIndex]?.textContent || '').trim() : '';
-        const rows = Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic')).map((row) => {
+        const padT = (t) => {
+          const m = /^(\d{1,2}):(\d{2})$/.exec(String(t).trim());
+          return m ? `${m[1].padStart(2, '0')}:${m[2]}` : null;
+        };
+        // esthetic(/KLP)モーダル: 時・分が別select (.jscSchStartHours 等)
+        let rows = Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic')).map((row) => {
           const v = (s) => row.querySelector(s)?.value ?? '';
           const pad = (x) => String(x).padStart(2, '0');
           const sh = v('.jscSchStartHours'); const sm = v('.jscSchStartMinutes');
@@ -4759,6 +4764,24 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
             title: (row.querySelector('input[name="titles"]')?.value || '').trim(),
           };
         }).filter((r) => r.start && r.end);
+        // hair(/CLP/bt)モーダル: 「18:00」-「21:00」の結合型select。
+        // モーダルform内のselectから選択中がHH:MM形式のものを文書順に拾い、
+        // (開始,終了)のペアに畳む。#shiftId(全日等)は時刻形式でないため混入しない。
+        if (rows.length === 0) {
+          const root = document.querySelector('#yoteiArea')
+            || document.querySelector('#yoteiSet')?.closest('form')
+            || document;
+          const times = Array.from(root.querySelectorAll('select'))
+            .map((s) => (s.selectedIndex >= 0 ? (s.options[s.selectedIndex]?.textContent || '') : (s.value || '')))
+            .map(padT)
+            .filter(Boolean);
+          const titles = Array.from(root.querySelectorAll('input[name="titles"]'))
+            .map((t) => (t.value || '').trim());
+          rows = [];
+          for (let i = 0; i + 1 < times.length; i += 2) {
+            rows.push({ start: times[i], end: times[i + 1], title: titles[rows.length] || '' });
+          }
+        }
         return { selText, rows };
       }).catch(() => null);
       await page.locator('#cancel:visible').first().click({ timeout: 3_000 }).catch(() => {});
