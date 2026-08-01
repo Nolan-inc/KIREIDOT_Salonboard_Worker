@@ -5154,9 +5154,11 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
             diagnostics: { staff: plan.staffName, ymd, patternId: plan.patternId, rows },
           }).catch(() => null);
           await page.locator('#cancel:visible').first().click({ timeout: 3_000 }).catch(() => {});
-          throw new Error(
+          const conflictError = new Error(
             `シフト設定エラー: ${errText.slice(0, 100)} (rows=${JSON.stringify(rows).slice(0, 200)}${cap ? `, capture=${cap}` : ''})`,
           );
+          conflictError.scheduleRows = rows;
+          throw conflictError;
         }
       }
       if ((await page.locator('#yoteiSet:visible').count().catch(() => 0)) === 0) return;
@@ -5167,6 +5169,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   // 1日の失敗で月全体を止めない: 失敗日は記録して他の日を続行し、最後に
   // まとめて失敗を報告する(リトライはdiffベースなので失敗日だけ再試行される)。
   const dayFailures = [];
+  const erasedScheduleRows = [];
   try {
     for (const plan of plans) {
       if (plan.kind === 'work') {
@@ -5186,9 +5189,20 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
               // 警告に残す。KD由来のブロックは後続の push_booking 再実行で復元できる。
               try {
                 await applyChunk(plan, [d], `${month}${d}`);
+                const rowsToRestore = Array.isArray(e?.scheduleRows)
+                  ? e.scheduleRows.filter((row) => row?.start && row?.end)
+                  : [];
+                if (rowsToRestore.length > 0) {
+                  erasedScheduleRows.push({
+                    staffExt: plan.staffExt,
+                    staffName: plan.staffName,
+                    ymd: `${month}${d}`,
+                    rows: rowsToRestore,
+                  });
+                }
                 warnings.push(
                   `${plan.staffName} ${month}${d}: 既存予定が勤務時間と重複しモーダル保存不可→一括入力で設定`
-                  + ` (この日のSB予定は消えたため要復元。${msg.replace(/^[\s\S]*?rows=/, '消えた予定行=').slice(0, 200)})`,
+                  + ` (この日のSB予定${rowsToRestore.length}件を退避し自動復元。${msg.replace(/^[\s\S]*?rows=/, '予定行=').slice(0, 200)})`,
                 );
               } catch (e2) {
                 dayFailures.push(`${plan.staffName} ${month}${d}: 一括入力フォールバックも失敗: ${e2?.message ?? e2} (元: ${msg.slice(0, 160)})`);
@@ -5363,6 +5377,57 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     }
   } finally {
     page.off('dialog', onDialog);
+  }
+
+  // 一括入力フォールバックは対象日の予定行を消すため、モーダル保存前に退避した
+  // SalonBoard手入力予定/KIREIDOT業務予定を同じ時刻・タイトルで直ちに戻す。
+  // DBに存在しない手入力予定もここで復元するため、後続ジョブだけには依存しない。
+  for (const restore of erasedScheduleRows) {
+    for (const row of restore.rows) {
+      const [startHour, startMinute] = String(row.start).split(':').map(Number);
+      const [endHour, endMinute] = String(row.end).split(':').map(Number);
+      const startTotal = startHour * 60 + startMinute;
+      const endTotal = endHour * 60 + endMinute;
+      if (!Number.isFinite(startTotal) || !Number.isFinite(endTotal) || endTotal <= startTotal) {
+        return fail(
+          `シフト更新前の予定を復元できません (staff=${restore.staffName}, date=${restore.ymd}, row=${JSON.stringify(row)})`,
+          'CONFIRMATION_MISMATCH',
+          true,
+        );
+      }
+      const year = Number(restore.ymd.slice(0, 4));
+      const monthIndex = Number(restore.ymd.slice(4, 6)) - 1;
+      const day = Number(restore.ymd.slice(6, 8));
+      const scheduledAt = new Date(Date.UTC(
+        year,
+        monthIndex,
+        day,
+        startHour - 9,
+        startMinute,
+      )).toISOString();
+      const restored = await pushScheduleViaForm(page, {
+        scheduled_at: scheduledAt,
+        duration_min: endTotal - startTotal,
+        block_reason: String(row.title || '').trim() || '予定',
+        salonboard_staff_external_id: restore.staffExt,
+        salonboard_staff_name: restore.staffName,
+        staff_name: restore.staffName,
+      }, {
+        ...opts,
+        baseUrl,
+        enablePush: true,
+        _scheduleWriteAttempt: 1,
+      });
+      if (restored?.status !== 'ok') {
+        return fail(
+          `シフト更新前の予定を自動復元できません ` +
+          `(staff=${restore.staffName}, date=${restore.ymd}, ${row.start}-${row.end}, title=${row.title || '予定'}): ` +
+          `${restored?.reason || restored?.errorCode || 'unknown'}`,
+          restored?.errorCode || 'CONFIRMATION_MISMATCH',
+          !!restored?.manualRequired,
+        );
+      }
+    }
   }
 
   // (7) 最終検証: ページを開き直して、変更対象の日が期待値になっているか確認。

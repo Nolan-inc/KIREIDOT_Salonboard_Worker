@@ -229,6 +229,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /KPCL017 grid-drag fallback[\s\S]{0,500}openedByGridDrag/,
     'schedule blocks must fall back to SalonBoard native grid drag when direct registration URLs stay stale',
   );
+  assert.match(
+    source,
+    /conflictError\.scheduleRows = rows[\s\S]{0,8000}erasedScheduleRows[\s\S]{0,12000}pushScheduleViaForm\(page,[\s\S]{0,1600}シフト更新前の予定を自動復元できません/,
+    'shift batch fallback must restore SalonBoard-only schedule rows that it temporarily erases',
+  );
   assert.doesNotMatch(
     source,
     /partial coverage|partialCoverageCompleted|register uncovered/,
