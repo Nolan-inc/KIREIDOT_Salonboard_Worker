@@ -4627,8 +4627,16 @@ async function runPushJobs({ showBrowser } = {}) {
         // 休憩・業務は通常予約ではなく SalonBoard の「予定」。通常予約の変更画面へ
         // 送ると一時エラーになるため、予定専用の削除→再登録フローで KD に収束させる。
         const isBlockSchedule = payload.booking_type === 'block';
+        const schedulePayload = isBlockSchedule
+          ? {
+              ...payload,
+              resource_id: null,
+              salonboard_equipment_external_id: null,
+              salonboard_equipment_name: null,
+            }
+          : payload;
         const result = isBlockSchedule
-          ? await changeScheduleViaForm(page, payload, {
+          ? await changeScheduleViaForm(page, schedulePayload, {
               ...reservationContext,
               enableChange: enablePush,
             })
@@ -4686,8 +4694,16 @@ async function runPushJobs({ showBrowser } = {}) {
         // 休憩・業務(booking_type='block')は SalonBoard の「予約」ではなく「予定」
         // (scheduleRegist)として登録する。設備(ベッド)を埋めず受付だけ停止する枠。
         const isBlockSchedule = payload.booking_type === 'block';
+        const schedulePayload = isBlockSchedule
+          ? {
+              ...payload,
+              resource_id: null,
+              salonboard_equipment_external_id: null,
+              salonboard_equipment_name: null,
+            }
+          : payload;
         const result = isBlockSchedule
-          ? await pushScheduleViaForm(page, payload, { ...reservationContext, enablePush })
+          ? await pushScheduleViaForm(page, schedulePayload, { ...reservationContext, enablePush })
           : await pushBookingViaForm(page, payload, { ...reservationContext, enablePush });
         if (result.status === 'ok') {
           await postCallback({

@@ -1559,6 +1559,17 @@ async function handleJob(job: Job): Promise<void> {
       // 「× フリー設備」等を選択して誤って EQUIPMENT_FULL になる。
       // PC worker と同じ proven 予定登録フローへ Cloud でも分岐する。
       const isBlockSchedule = payload.booking_type === "block";
+      // 防御的に設備情報を落とす。Admin/DB の古いスナップショットに resource_id や
+      // SalonBoard設備IDが残っていても、休憩・業務・MTG等の予定がベッドを消費しない
+      // ことを Worker 境界でも保証する。
+      const schedulePayload: PushBookingPayload = isBlockSchedule
+        ? {
+            ...payload,
+            resource_id: null,
+            salonboard_equipment_external_id: null,
+            salonboard_equipment_name: null,
+          }
+        : payload;
       // action=update かつ reserveId 有り → 予約変更フロー(changeBookingViaForm)を使う。
       // これが無いと update でも新規登録フォームを叩き "新規予約の登録" として扱われ、
       // 重複/容量超過で失敗する (実機検証 2026-06-28: YG81931151 の 16:00→15:00 が失敗)。
@@ -1568,12 +1579,12 @@ async function handleJob(job: Job): Promise<void> {
         String(payload.external_booking_id ?? "").trim().length > 0;
       let result: PushBookingResult;
       if (isBlockSchedule && isBookingUpdate) {
-        result = await scrapers.changeScheduleViaForm(page, payload, {
+        result = await scrapers.changeScheduleViaForm(page, schedulePayload, {
           baseUrl,
           enableChange: ENABLE_PUSH,
         }) as PushBookingResult;
       } else if (isBlockSchedule) {
-        result = await scrapers.pushScheduleViaForm(page, payload, {
+        result = await scrapers.pushScheduleViaForm(page, schedulePayload, {
           baseUrl,
           enablePush: ENABLE_PUSH,
         }) as PushBookingResult;
