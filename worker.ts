@@ -178,7 +178,17 @@ if (WORKER_MODE === "device") {
   );
 }
 
-const WORKER_ID = (process.env.WORKER_ID ?? "local-dev").slice(0, 64);
+// worker_id は env 優先、無ければホット設定ファイル(max_concurrency と同じパターン)。
+// EC2 コンテナは docker run 済みで env を後から変えられないため、ファイル側で恒久化する。
+// 既定 "local-dev" のまま本番稼働すると locked_by/blocked_worker_ids で実体を判別できない。
+function readWorkerIdFile(): string {
+  try {
+    return readFileSync("/home/pwuser/.kireidot/worker_id", "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+const WORKER_ID = (process.env.WORKER_ID || readWorkerIdFile() || "local-dev").slice(0, 64);
 // クラウドworkerが申告する capability(カンマ区切り)。Admin claim が「required ⊆ worker」で
 // 絞り込む想定。未指定の旧クライアント(PC)は Admin 側で全capability保有とみなす(後方互換)。
 const WORKER_CAPABILITIES = (process.env.WORKER_CAPABILITIES ?? "").trim();
