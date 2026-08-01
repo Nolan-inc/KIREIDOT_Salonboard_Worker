@@ -2322,6 +2322,8 @@ async function handleJob(job: Job): Promise<void> {
         fetch_staff: { fn: "scrapeStaff", key: "staff" },
         fetch_menu: { fn: "scrapeMenus", key: "menus" },
         fetch_menus: { fn: "scrapeMenus", key: "menus" },
+        // 美容室スタイル一覧 (Admin フォトギャラリーの「スタイル写真を取得」)。
+        // 掲載中スタイルを全件取得し、salonboard_bulk_upsert_styles へ取込む。
         fetch_style: { fn: "scrapeStyles", key: "styles" },
         fetch_coupon: { fn: "scrapeCoupons", key: "coupons" },
         fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
@@ -2335,9 +2337,6 @@ async function handleJob(job: Job): Promise<void> {
         fetch_salon: { fn: "scrapeSalonInfo", key: "salon" },
         fetch_kodawari: { fn: "scrapeKodawari", key: "kodawari" },
         fetch_feature: { fn: "scrapeFeature", key: "feature" },
-        // 美容室スタイル一覧 (Admin フォトギャラリーの「スタイル写真を取得」)。
-        // 掲載中スタイルを全件取得し、salonboard_bulk_upsert_styles へ取込む。
-        fetch_style: { fn: "scrapeStyles", key: "styles" },
       };
       const m = FETCH_MAP[job.job_type];
       if (m) {
