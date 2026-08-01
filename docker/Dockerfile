@@ -9,16 +9,16 @@
 ARG PLAYWRIGHT_VERSION=1.59.1
 
 # ---- build: worker.ts を単一 ESM バンドルに (tsx をランタイムに持ち込まない) ----
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 WORKDIR /build
 COPY worker.ts salonboard-selectors.ts salonboard-rescan.ts canary.ts ./
 RUN npm install --no-save --no-audit --no-fund esbuild@0.25.5 \
  && npx esbuild worker.ts \
-      --bundle --platform=node --format=esm --target=node22 \
+      --bundle --platform=node --format=esm --target=node24 \
       --external:playwright \
       --outfile=dist/worker.mjs \
  && npx esbuild canary.ts \
-      --bundle --platform=node --format=esm --target=node22 \
+      --bundle --platform=node --format=esm --target=node24 \
       --external:playwright \
       --outfile=dist/canary.mjs
 
