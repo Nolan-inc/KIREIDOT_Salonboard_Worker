@@ -11909,7 +11909,11 @@ async function ensureSalonSelected(page, opts = {}) {
   // へ直行すると groupTop へ戻されず「ユーザエラー」に着地する個体がある。
   // その状態では従来の groupTop 判定を通過できず、空一覧を正常データとして返していた。
   // 対象店舗の手掛かりがある場合だけ明示的に groupTop へ戻し、選択処理をやり直す。
-  if (!onGroupTop && (salonId || shopName)) {
+  // ★salonId がある店舗(=グループ所属)に限定する (2026-08-01)。shopName は全店舗が持つため、
+  //   単独アカウント店舗(例: Unelimit代官山)がセッション失効ページでここに入ると、存在しない
+  //   /KLP/groupTop/ へ飛び「指定されたURLは存在しません」→ group_top_no_stores で誤失敗する
+  //   (d51a7a9 の失効文言拡大で顕在化した退行)。単独店舗の失効は各フローの relogin に任せる。
+  if (!onGroupTop && salonId) {
     const invalidContext = await page
       .evaluate(() => {
         const title = document.title || '';
