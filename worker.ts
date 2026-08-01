@@ -1820,12 +1820,15 @@ async function handleJob(job: Job): Promise<void> {
 
     if (job.job_type === "fetch_shifts") {
       // pushと同じhair/esthetic対応の月次シフト画面ナビゲーションをread-onlyで使う。
+      // businessHours: 勤務パターン未使用店舗 (hair) の「出(全日)」を営業時間として
+      // 取り込むために claim レスポンス (Admin jobs API) が同梱する KD 営業時間。
       const result = await scrapers.pushShiftsViaForm(page, job.payload, {
         baseUrl,
         enablePush: false,
         genre,
         salonId,
         shopName,
+        businessHours: (job as { business_hours?: unknown }).business_hours ?? null,
         relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string };
       if (result.status === "ok" && Array.isArray(result.shifts)) {

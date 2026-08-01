@@ -4712,12 +4712,56 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
 
   // SB→KD実シフト取得。書込み計画へ進まず、現在セルを勤務パターンの
   // 時刻へ解決して返す。空欄は「未設定」であり休みとはみなさない。
+  //
+  // ★2026-08-01 hair/勤務パターン未使用店舗 (ADER等) 対応:
+  //   セルが素の「出」(パターン短縮名なし=時刻情報なし) の店舗では、
+  //   出勤=「全日」(営業時間フル受付) が SB の意味論。日別モーダルを開いて
+  //   予定 (例 18:00-21:00「予定あり」=受付停止) を読み、営業時間の端に接する
+  //   予定はトリムした実効時間で取り込む (ユーザー承認済みの解釈)。
+  //   営業時間は claim 時に Admin が同梱する opts.businessHours (KD shops.business_hours、
+  //   {mon..sun,hol:{closed,open,close}})。祝日は曜日の時間で代用する (worker に祝日暦なし)。
   if (readOnly) {
     const entryByExt = new Map(entries.map((entry) => [
       String(entry.staff_external_id || '').toUpperCase(),
       entry,
     ]));
+    const bizHours = opts.businessHours && typeof opts.businessHours === 'object' ? opts.businessHours : null;
+    const hoursForDate = (dateStr) => {
+      if (!bizHours) return null;
+      const dow = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date(`${dateStr}T12:00:00Z`).getUTCDay()];
+      const h = bizHours[dow];
+      if (!h || h.closed || !/^\d{1,2}:\d{2}$/.test(String(h.open || '')) || !/^\d{1,2}:\d{2}$/.test(String(h.close || ''))) return null;
+      return { open: h.open, close: h.close };
+    };
+    // 日別モーダルから (出勤selectの時刻表記 / 予定行) を読む。読み取り専用: #cancel で閉じる。
+    const readDayModal = async (ext, ymd) => {
+      const cell = page.locator(`#${ext}_${ymd}`).first();
+      if ((await cell.count().catch(() => 0)) === 0) return null;
+      await cell.scrollIntoViewIfNeeded().catch(() => {});
+      await cell.click({ timeout: 8_000 });
+      await page.waitForSelector('#yoteiSet', { timeout: 8_000 });
+      const info = await page.evaluate(() => {
+        const sel = document.querySelector('#shiftId');
+        const selText = sel && sel.selectedIndex >= 0 ? (sel.options[sel.selectedIndex]?.textContent || '').trim() : '';
+        const rows = Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic')).map((row) => {
+          const v = (s) => row.querySelector(s)?.value ?? '';
+          const pad = (x) => String(x).padStart(2, '0');
+          const sh = v('.jscSchStartHours'); const sm = v('.jscSchStartMinutes');
+          const eh = v('.jscSchEndHours'); const em = v('.jscSchEndMinutes');
+          return {
+            start: sh !== '' ? `${pad(sh)}:${pad(sm || '00')}` : null,
+            end: eh !== '' ? `${pad(eh)}:${pad(em || '00')}` : null,
+            title: (row.querySelector('input[name="titles"]')?.value || '').trim(),
+          };
+        }).filter((r) => r.start && r.end);
+        return { selText, rows };
+      }).catch(() => null);
+      await page.locator('#cancel:visible').first().click({ timeout: 3_000 }).catch(() => {});
+      await page.waitForTimeout(150);
+      return info;
+    };
     const shifts = [];
+    const plainWorkCells = []; // 素の「出」セル: 後段でモーダルを順に読む
     for (const [key, rawText] of Object.entries(cells)) {
       const m = /^([^_]+)_(\d{4})(\d{2})(\d{2})$/.exec(key);
       if (!m) continue;
@@ -4739,6 +4783,10 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
         });
         continue;
       }
+      if (text === '出') {
+        plainWorkCells.push({ ext, entry, date, ymd: `${m[2]}${m[3]}${m[4]}` });
+        continue;
+      }
       const pat = patterns.find((candidate) => cellMatchesPattern(text, candidate));
       if (!pat?.start || !pat?.end) {
         warnings.push(`${entry.staff_name ?? ext} ${date}: 勤務パターン「${text}」の時刻を解決できずスキップ`);
@@ -4753,6 +4801,57 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
         is_off: false,
         note: text,
       });
+    }
+    if (plainWorkCells.length > 0) {
+      // セルクリックが一括入力パネルに隠れないよう閉じる
+      await page.locator('#batchSetClose').click({ timeout: 3_000 }).catch(() => {});
+      await page.waitForTimeout(200);
+      for (const { ext, entry, date, ymd } of plainWorkCells) {
+        const label = entry.staff_name ?? ext;
+        let hours = hoursForDate(date);
+        let modal = null;
+        try {
+          modal = await readDayModal(ext, ymd);
+        } catch (e) {
+          await page.locator('#cancel:visible').first().click({ timeout: 2_000 }).catch(() => {});
+          warnings.push(`${label} ${date}: 出勤の日別モーダルを読めずスキップ (${String(e?.message ?? e).slice(0, 80)})`);
+          continue;
+        }
+        // 出勤selectに時刻表記があれば営業時間より優先 (パターン選択の場合)
+        const tm = modal?.selText ? /(\d{1,2}:\d{2})\s*[〜~－-]\s*(\d{1,2}:\d{2})/.exec(modal.selText) : null;
+        if (tm) hours = { open: tm[1], close: tm[2] };
+        if (!hours) {
+          warnings.push(`${label} ${date}: 出勤(全日)の営業時間が取得できずスキップ (Admin店舗設定の営業時間を確認してください)`);
+          continue;
+        }
+        let start = toMin(hours.open);
+        let end = toMin(hours.close);
+        const midBlocks = [];
+        for (const row of (modal?.rows || [])) {
+          const rs = toMin(row.start); const re = toMin(row.end);
+          if (rs == null || re == null || re <= rs) continue;
+          if (rs <= start && re > start) { start = Math.max(start, re); continue; }  // 先頭に接する予定
+          if (re >= end && rs < end) { end = Math.min(end, rs); continue; }          // 末尾に接する予定
+          if (rs > start && re < end) midBlocks.push(`${row.start}-${row.end}${row.title ? `(${row.title})` : ''}`);
+        }
+        if (end <= start) {
+          warnings.push(`${label} ${date}: 出勤(全日)だが予定で全時間帯が塞がっているためスキップ`);
+          continue;
+        }
+        if (midBlocks.length > 0) {
+          warnings.push(`${label} ${date}: 中抜け予定 ${midBlocks.join(', ')} はシフト時間に表現できないため勤務時間に含めています`);
+        }
+        const mm = (v) => `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+        shifts.push({
+          staff_external_id: ext,
+          staff_name: label,
+          shift_date: date,
+          start_time: mm(start),
+          end_time: mm(end),
+          is_off: false,
+          note: (modal?.rows || []).length > 0 ? '出(予定トリム)' : '出(全日)',
+        });
+      }
     }
     return {
       status: 'ok',
