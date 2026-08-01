@@ -727,6 +727,10 @@ let abortRequested = false;
 let currentBrowser = null;
 // runPushJobs の二重起動防止 (Realtime トリガー + 自動同期が重なるケース)
 let pushJobsRunning = false;
+// watchdog 用: フラグが立った時刻。runOne 内のハング等で finally まで到達しないと
+// フラグが永久に残り、保険ポーリング/keepAlive が全スキップ=ハートビートだけ生きた
+// 「claim 停止」になる (2026-08-02 Mac Studio で約6時間の実障害疑い)。
+let pushJobsRunningSince = 0;
 // 自動 push をブラウザ表示(headful)で実行するか。
 // headless だと SalonBoard のログイン画面で bot 検知され、入力欄が描画されず
 // ログインがハングするケースがあるため、手動「SB挿入」と同じく headful で動かす。
@@ -1657,7 +1661,24 @@ function startPushJobPoller() {
     try {
       // 二重起動だけ防ぐ。sync(running)中でも push を起動してよい
       //   (runPushJobs は店舗ごとに直列化されるため取得中の店舗のみ待つ)。
-      if (!supabase || pushJobsRunning) return;
+      if (!supabase) return;
+      if (pushJobsRunning) {
+        // 30分を超えて解放されないフラグはハング起因とみなし強制解除して復旧する。
+        // 店舗単位の排他は別途 tryAcquireShopLock が守るため二重ブラウザにはならない。
+        if (
+          pushJobsRunningSince &&
+          Date.now() - pushJobsRunningSince > 30 * 60_000
+        ) {
+          log(
+            'push 処理フラグが30分以上解放されないため強制リセットして claim を再開します (watchdog)',
+            'warn',
+          );
+          pushJobsRunning = false;
+          pushJobsRunningSince = 0;
+        } else {
+          return;
+        }
+      }
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
@@ -3890,6 +3911,7 @@ async function runPushJobs({ showBrowser } = {}) {
     return;
   }
   pushJobsRunning = true;
+  pushJobsRunningSince = Date.now();
   try {
   const enablePush = !!deviceAuth.enablePush;
   // 開始を必ずログに出す (ユーザーが「実行されたか」を確認できるように)。
@@ -4856,6 +4878,9 @@ async function runPushJobs({ showBrowser } = {}) {
       const res = await fetch(`${deviceAuth.apiBaseUrl}/api/salonboard/jobs?limit=5`, {
         method: 'GET',
         headers,
+        // claim がネットワーク要因で無応答のままだと runPushJobs 全体がハングし
+        // pushJobsRunning が残って claim 停止になるため、必ず打ち切る。
+        signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) {
         log(`予約書き込み: ジョブ取得失敗 ${res.status}`, 'warn');
@@ -4927,6 +4952,7 @@ async function runPushJobs({ showBrowser } = {}) {
   );
   } finally {
     pushJobsRunning = false;
+    pushJobsRunningSince = 0;
   }
 }
 
