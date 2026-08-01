@@ -4663,88 +4663,13 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       for (const { start, end } of needed.values()) warnings.push(`要SB勤務パターン新規登録: ${start}-${end} (KD時刻・確認のみ)`);
       return;
     }
-    // ★SB勤務パターンは1店30件が上限(2026-07-29 ユーザー方針)。既存+新規で30を超える分は
-    //   「登録せずスキップ」する(近い時刻での代用はしない)。上限で push 全体を失敗させず、
-    //   作れる枠の分だけ登録し、超過分は未反映として警告に残す。恒久策として不要パターンの整理を促す。
-    const SB_PATTERN_LIMIT = 30;
-    const capacity = Math.max(0, SB_PATTERN_LIMIT - patterns.length);
-    let neededArr = Array.from(needed.values());
-    if (neededArr.length > capacity) {
-      for (const { start, end } of neededArr.slice(capacity)) {
-        warnings.push(`SB勤務パターン上限(${SB_PATTERN_LIMIT}件)超過のため未登録・未反映: ${start}-${end}(近い時刻での代用はしません。不要なパターンを削除してください)`);
-      }
-      neededArr = neededArr.slice(0, capacity);
+    // ★2026-08-01 ユーザー方針: SB勤務パターンの自動登録は全面停止(未マッチ時刻はスキップ)。
+    //   未マッチ時刻ごとにKDパターンを自動生成した結果、SB上限(30件/店)を圧迫した
+    //   (2026-07-29 インシデント)。以後は既存パターンとの exact 一致のみで一括反映し、
+    //   無い時刻は近い時刻で代用せず、包含パターンがあれば予定方式・無ければ未反映として警告する。
+    for (const { start, end } of needed.values()) {
+      warnings.push(`SB勤務パターン未登録の時刻 ${start}-${end}: 自動登録は行いません(既存パターンで表現できない日は未反映)。必要ならSalonBoardの勤務パターン登録で追加してください`);
     }
-    if (neededArr.length === 0) {
-      // 新規登録できる枠が無い → 既存パターンのみで反映(未マッチのシフトは下流でスキップ=近似しない)
-      return;
-    }
-    // ★SB「短縮名」は半角英数記号あわせて2文字以内。8桁コードは弾かれる(実機確認)。
-    //   一意な2文字コードを割当てる(セル表示用)。名称(maxlength40)は可読な KD HH:MM-HH:MM。
-    const usedShortNames = new Set(
-      patterns.map((pat) => normalizePatternLabel(pat.shortName || pat.short_name)).filter(Boolean),
-    );
-    let shortSeq = 1;
-    const nextUniqueShortName = () => {
-      while (shortSeq < 36 * 36) {
-        const candidate = shortSeq.toString(36).toUpperCase().padStart(2, '0').slice(-2);
-        shortSeq++;
-        if (!usedShortNames.has(candidate)) {
-          usedShortNames.add(candidate);
-          return candidate;
-        }
-      }
-      throw new Error('勤務パターン短縮名の空きがありません');
-    };
-    const toCreate = neededArr.map(({ start, end }) => ({
-      // SalonBoard のシフト名称は実機上10文字まで。従来の
-      // `KD 11:00-16:30` は `KD 11:00-1` に切られ、11:00開始の別パターン
-      // (例 11:00-19:30) と名称重複して登録できなかった。
-      // HHMMを連結した固定10文字なら、開始・終了の組み合わせごとに一意になる。
-      name: `KD${start.replace(':', '')}${end.replace(':', '')}`,
-      short_name: nextUniqueShortName(),
-      start, end,
-    }));
-    const cr = await pushWorkPatternViaForm(page, { patterns: toCreate }, { ...opts, enablePush: true, baseUrl }).catch((e) => ({ status: 'failed', error: String(e), results: [] }));
-    const createFailures = [];
-    for (const r of (cr?.results || [])) {
-      if (r.status === 'ok') registeredCount++;
-      else if (r.status === 'failed') {
-        const msg = `${r.name} (${r.reason || ''})`;
-        createFailures.push(msg);
-        warnings.push(`勤務パターン新規登録に失敗: ${msg}`);
-      }
-    }
-    if (cr?.status === 'failed' && createFailures.length === 0) {
-      createFailures.push(String(cr?.reason || cr?.error || '原因不明'));
-    }
-    if (createFailures.length > 0) {
-      // ★上限超過等で新規登録に失敗しても push 全体は失敗させない(2026-07-29 ユーザー方針)。
-      //   作れた分＋既存パターンで反映し、失敗分は未反映として警告に残す(近い時刻の代用はしない)。
-      for (const msg of createFailures) {
-        warnings.push(`勤務パターン新規登録に失敗・未反映(スキップ): ${msg}`);
-      }
-    }
-    if (registeredCount > 0) {
-      warnings.push(`SBに無かった勤務パターン ${registeredCount}件を自動登録しました: ${toCreate.map((p) => p.name).join(', ')}`);
-    }
-    // 作成後: シフト設定画面へ戻り、パターン一覧とセルを再取得。
-    if (!(await openSetup())) {
-      warnings.push('不足勤務パターン登録後にシフト設定画面へ戻れませんでした(今回は既存パターンのみで反映)');
-      return;
-    }
-    await ensureBatchPanel();
-    const re = await readBatchPatterns();
-    if (re && re.length) {
-      patterns = re;
-      timedPatterns = patterns.filter((x) => x.start && x.end);
-      patternById = new Map(patterns.map((x) => [String(x.id), x]));
-      rebuildShortNameCounts();
-      patternByTime = new Map(
-        timedPatterns.filter(hasUniqueShortName).map((x) => [timeKey(x.start, x.end), x]),
-      );
-    }
-    cells = await readCells().catch(() => cells);
   };
   try {
     await ensureKdPatterns();
