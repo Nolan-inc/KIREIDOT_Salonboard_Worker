@@ -357,6 +357,23 @@ function noteLoginThrottle(shopId: string): void {
 function noteLoginSuccess(shopId: string): void {
   if (shopThrottleStreak.has(shopId)) shopThrottleStreak.delete(shopId);
 }
+/** server 文字列が住宅(residential)出口か。residentialConfig の host と照合。 */
+function isResidentialExit(server?: string | null): boolean {
+  if (!server) return false;
+  const cfg = residentialConfig();
+  return !!cfg && server.includes(cfg.host);
+}
+/**
+ * 住宅IPの /login/ はSBがHTTP応答段階で常時拒否する(本番確認済み)ため、フレッシュ
+ * ログインが必要な店舗を住宅退避に留めると TTL(6h) いっぱい確定失敗ループになる。
+ * 住宅出口でのログイン拒否を観測したら退避を即解除し ISP へ戻す(2026-08-02 郡山実障害)。
+ */
+function clearShopAutoResidential(shopId: string, why: string): void {
+  const had = shopAutoResidentialUntil.delete(shopId);
+  shopThrottleStreak.delete(shopId);
+  if (had)
+    console.log(`[proxy] auto-failover 解除: shop=${shopId.slice(0, 8)} (${why})`);
+}
 
 /**
  * ★ログイン後に SB が出す HTML モーダル(HOT PEPPER 満足度アンケート/お知らせ/キャンペーン等)を
@@ -1149,15 +1166,17 @@ async function handleJob(job: Job): Promise<void> {
         // HTTP 応答段階から拒否することを本番で確認済み。住宅へ退避すると
         // ERR_HTTP_RESPONSE_CODE_FAILURE が確定するため、書込ログインでは使わない。
         // 明示的な SB_WRITE_VIA_RESIDENTIAL=1 の場合だけ forceResidential を維持する。
-        if (
-          isWriteJob &&
-          !forceResidential &&
-          shouldRotateLoginEndpoint(loginResult.reason ?? "")
-        ) {
-          noteLoginThrottle(job.shop_id);
-          console.log(
-            `[proxy] ${tag} ISPログイン障害を検知 → 次のstatic ISPでCloudログインを完全再試行`,
-          );
+        if (shouldRotateLoginEndpoint(loginResult.reason ?? "")) {
+          if (isResidentialExit(launch.proxy?.server)) {
+            // 住宅出口の /login/ 拒否は throttle ではない。auto-FO を解除しないと
+            // 3回とも住宅で確定失敗し、読みジョブが6時間ループする(郡山実障害)。
+            clearShopAutoResidential(job.shop_id, "住宅IPが/login/をHTTP拒否");
+          } else if (isWriteJob && !forceResidential) {
+            noteLoginThrottle(job.shop_id);
+            console.log(
+              `[proxy] ${tag} ISPログイン障害を検知 → 次のstatic ISPでCloudログインを完全再試行`,
+            );
+          }
         }
         console.log(
           `[job] ${tag} full browser login retry ${lt + 1}/3 (${(loginResult.reason ?? "").slice(0, 70)})`
@@ -1228,9 +1247,15 @@ async function handleJob(job: Job): Promise<void> {
         // 戻り/doLogin未完了は一時失敗としてジョブ全体を再試行する。
         const isAuthLike = isCredentialFailure(reason);
         if (!isAuthLike) {
-          // 各試行ですでに出口を切替済み。書込ジョブは次ジョブでもstatic ISPを使い、
-          // 読み取りジョブだけ既存のResidential自動退避対象になり得る。固定待機はしない。
-          noteLoginThrottle(job.shop_id);
+          if (isResidentialExit(launch.proxy?.server)) {
+            // 住宅出口でのログイン失敗は throttle シグナルではない(住宅/login/は常時拒否)。
+            // ここで noteLoginThrottle すると読みジョブが即・住宅へ再退避して6時間ループする。
+            clearShopAutoResidential(job.shop_id, "住宅ログイン失敗で終了(再アーム防止)");
+          } else {
+            // 各試行ですでに出口を切替済み。書込ジョブは次ジョブでもstatic ISPを使い、
+            // 読み取りジョブだけ既存のResidential自動退避対象になり得る。固定待機はしない。
+            noteLoginThrottle(job.shop_id);
+          }
         }
         await report(
           {
