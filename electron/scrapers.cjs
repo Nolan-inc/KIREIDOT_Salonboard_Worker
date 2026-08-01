@@ -4405,27 +4405,32 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   //   加えて hair のグループ店(ADER等)はサロン未選択だと空になるため、groupTop→サロン選択で
   //   店舗文脈を確立してから開く(scrapeHairBookings / pushStaffProfileViaForm と同様)。
   const shiftGenre = opts.genre === 'hair' || p.genre === 'hair' ? 'hair' : 'esthetic';
-  const monthlyPrefix = shiftGenre === 'hair' ? '/CLP/bt/set/' : '/KLP/set/';
+  // ★混在ジャンルグループ対応 (2026-08-01): eyelash等のKD genreがestheticに写像されても、
+  //   ヘアグループアカウント配下のサロン (例: ADERグループのGINA) は /CLP/bt 側にある。
+  //   genre優先経路で開けない場合はもう一方のジャンル経路へフォールバックするため、
+  //   ナビゲーション用ジャンルは可変にする。
+  let navGenre = shiftGenre;
+  const monthlyPrefixOf = (g) => (g === 'hair' ? '/CLP/bt/set/' : '/KLP/set/');
 
   // ★hair文脈確立(受付可能数同期 pushAcceptanceViaSchedule と同方式):
   //   ログイン直後(グループ店=/CNC/groupTop、単店=salon top)から ensureSalonSelected
   //   (salonId優先・無ければ shopName一致=fetchと同経路)で対象サロンへ。groupTop は強制 goto
   //   しない(非グループ単店は groupTop で SESSION_EXPIRED)。失効時のみ relogin→groupTop→再選択。
   const selectSalon = async (viaGroupTop) => {
-    if (shiftGenre !== 'hair') return;
+    if (navGenre !== 'hair') return;
     if (viaGroupTop) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     }
     await ensureSalonSelected(page, {
       salonId: opts.salonId,
       shopName: opts.shopName,
-      genre: shiftGenre,
+      genre: navGenre,
       baseUrl,
     }).catch(() => {});
   };
   // 「毎月の受付設定」へ。現在文脈のナビリンクをクリック優先(hairは直gotoで失効しやすい)→失敗時 bare-goto。
   const navigateToMonthly = async () => {
-    const link = page.locator(`a[href*="${monthlyPrefix}monthlySetup"], a:has-text("毎月の受付設定")`).first();
+    const link = page.locator(`a[href*="${monthlyPrefixOf(navGenre)}monthlySetup"], a:has-text("毎月の受付設定")`).first();
     if ((await link.count().catch(() => 0)) > 0) {
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}),
@@ -4433,7 +4438,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       ]);
     }
     if (!/monthlySetup/.test(page.url())) {
-      await page.goto(new URL(monthlyPrefix + 'monthlySetup/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+      await page.goto(new URL(monthlyPrefixOf(navGenre) + 'monthlySetup/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     }
   };
   const monthlyState = () => page.evaluate(() => {
@@ -4458,7 +4463,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   };
   const openSetup = async () => {
     // esthetic: 従来の直 shiftSetup?date が最速(月が設定済みなら即到達)。まず試す。
-    if (shiftGenre !== 'hair') {
+    if (navGenre !== 'hair') {
       const u = new URL('/KLP/set/shiftSetup/', baseUrl);
       u.searchParams.set('date', month);
       await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
@@ -4487,7 +4492,15 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     return false;
   };
   try {
-    if (!(await openSetup())) {
+    let opened = await openSetup();
+    if (!opened) {
+      // ★混在ジャンルグループ: genre優先経路で開けない場合はもう一方の経路を試す
+      //   (例: KD genre=eyelash→esthetic写像だが、ヘアグループ配下で実体は /CLP/bt)。
+      navGenre = navGenre === 'hair' ? 'esthetic' : 'hair';
+      console.log(`[SHIFT] genre=${shiftGenre} 経路で未到達 → ${navGenre} 経路へフォールバック`);
+      opened = await openSetup();
+    }
+    if (!opened) {
       // 診断ダンプ: 到達URLとシフト系要素の有無(hair実機の実体をログで確認して次を打つ)
       const diag = await page.evaluate(() => ({
         url: location.pathname + location.search,
@@ -4531,7 +4544,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   try {
     const registered = await scrapeShiftPatterns(page, baseUrl, {
       ...opts,
-      genre: shiftGenre,
+      genre: navGenre,
     });
     registeredPatternById = new Map(
       (registered?.patterns || []).map((pat) => [String(pat.external_id), pat]),
