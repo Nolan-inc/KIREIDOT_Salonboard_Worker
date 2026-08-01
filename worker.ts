@@ -1830,14 +1830,18 @@ async function handleJob(job: Job): Promise<void> {
         shopName,
         businessHours: (job as { business_hours?: unknown }).business_hours ?? null,
         relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
-      }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string };
+      }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string; warnings?: string[] };
       if (result.status === "ok" && Array.isArray(result.shifts)) {
+        // 警告 (出セルのスキップ理由等) は callback の result に残らないため summary に出す
+        const warn = Array.isArray(result.warnings) && result.warnings.length > 0
+          ? ` / 注意${result.warnings.length}件: ${result.warnings.slice(0, 2).join(" | ").slice(0, 220)}`
+          : "";
         await report({
           job_id: job.id,
           job_type: "fetch_shifts",
           status: "succeeded",
           shifts: result.shifts,
-          summary: `fetch_shifts: ${result.shifts.length}件取得`,
+          summary: `fetch_shifts: ${result.shifts.length}件取得${warn}`,
         } as unknown as CallbackBody);
         console.log(`[job] done  ${tag} (fetch_shifts ${result.shifts.length}件)`);
       } else {

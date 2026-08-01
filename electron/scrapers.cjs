@@ -4725,7 +4725,12 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       String(entry.staff_external_id || '').toUpperCase(),
       entry,
     ]));
-    const bizHours = opts.businessHours && typeof opts.businessHours === 'object' ? opts.businessHours : null;
+    // shops.business_hours はJSON文字列で保存されている店舗があるためparseを許容する
+    let bizHours = null;
+    try {
+      const rawBh = typeof opts.businessHours === 'string' ? JSON.parse(opts.businessHours) : opts.businessHours;
+      if (rawBh && typeof rawBh === 'object') bizHours = rawBh;
+    } catch (_e) { /* 不正JSONは営業時間なし扱い */ }
     const hoursForDate = (dateStr) => {
       if (!bizHours) return null;
       const dow = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][new Date(`${dateStr}T12:00:00Z`).getUTCDay()];
