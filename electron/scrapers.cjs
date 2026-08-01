@@ -2572,6 +2572,16 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
       const name = norm(shopName);
       return (id.length >= 6 && body.includes(id)) || (name.length >= 6 && body.includes(name));
     }, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => false);
+  const schedulePath = opts.genre === 'hair'
+    ? '/CLP/bt/schedule/salonSchedule/'
+    : '/KLP/schedule/salonSchedule/';
+  const gotoDirectSchedule = async () => {
+    await page.goto(new URL(schedulePath, baseUrl).toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 25_000,
+    }).catch(() => {});
+    return pageMatchesTarget();
+  };
   if (!/\/(?:CNC|KLP)\/groupTop/i.test(page.url())) {
     const alreadySelected = await pageMatchesTarget();
     if (alreadySelected) return { ok: true, selected: false, verifiedCurrentContext: true };
@@ -2579,16 +2589,21 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
     // WAO新宿など単一店舗アカウントは /CNC/groupTop/ に店舗リンクを持たず、
     // 直接スケジュールへ入ると正しい店舗文脈になる。店舗ID/名称を画面フッターで
     // 肯定確認できた場合だけ採用し、別店舗なら下のgroupTop選択へ進む。
-    const schedulePath = opts.genre === 'hair'
-      ? '/CLP/bt/schedule/salonSchedule/'
-      : '/KLP/schedule/salonSchedule/';
-    await page.goto(new URL(schedulePath, baseUrl).toString(), {
-      waitUntil: 'domcontentloaded',
-      timeout: 25_000,
-    }).catch(() => {});
-    if (await pageMatchesTarget()) {
+    if (await gotoDirectSchedule()) {
       return { ok: true, selected: false, verifiedDirectSchedule: true };
     }
+  }
+  // ★単独アカウント(salonId無し)は /CNC/groupTop/ が存在しない(「指定されたURLは存在しません」)。
+  //   直行で確認できない主因はセッション失効なので、relogin→直行をもう一度だけ試し、
+  //   groupTop 選択ループには進まない (2026-08-01 代官山 group_top_no_stores 誤失敗の根治)。
+  if (!opts.salonId) {
+    if (typeof opts.relogin === 'function') {
+      const ok = await opts.relogin().catch(() => false);
+      if (ok && (await gotoDirectSchedule())) {
+        return { ok: true, selected: false, verifiedAfterRelogin: true };
+      }
+    }
+    return { ok: false, selected: false, reason: 'single_salon_context_not_verified' };
   }
   let last = { ok: false, selected: false, reason: 'unknown' };
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -3021,7 +3036,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
 
   const selectedContext = await ensureReserveSalonContext(page, baseUrl, opts);
   if (selectedContext?.ok === false) {
-    const transient = /group_top_no_stores|still_on_group_top|timeout|navigation/i.test(String(selectedContext.reason || ''));
+    const transient = /group_top_no_stores|still_on_group_top|single_salon_context_not_verified|timeout|navigation/i.test(String(selectedContext.reason || ''));
     return fail(`対象店舗のSalonBoardコンテキストを選択できません (${selectedContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', !transient);
   }
 
@@ -5704,7 +5719,7 @@ async function pushBookingViaForm(page, payload, opts = {}) {
   // 別店舗スタッフIDで KPCL017V01 へ落ちる。
   const initialContext = await ensureReserveSalonContext(page, baseUrl, opts);
   if (initialContext?.ok === false) {
-    const transient = /group_top_no_stores|still_on_group_top|timeout|navigation/i.test(String(initialContext.reason || ''));
+    const transient = /group_top_no_stores|still_on_group_top|single_salon_context_not_verified|timeout|navigation/i.test(String(initialContext.reason || ''));
     return fail(`対象店舗のSalonBoardコンテキストを選択できません (${initialContext.reason || 'unknown'})`, 'STORE_SELECT_REQUIRED', !transient);
   }
 
