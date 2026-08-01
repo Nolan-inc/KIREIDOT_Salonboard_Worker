@@ -155,6 +155,10 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     require.resolve('./supabase/migrations/20260731234938_guarantee_schedule_shift_booking_parity.sql'),
     'utf8',
   );
+  const staffBackfillMigration = readFileSync(
+    require.resolve('./supabase/migrations/20260801000048_backfill_canonical_booking_staff_identity.sql'),
+    'utf8',
+  );
   assert.match(
     source,
     /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
@@ -630,6 +634,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     parityMigration,
     /salonboard_credentials_catchup_shifts_on_push_enable[\s\S]{0,1200}salonboard_recheck_blocks_after_shift_write/,
     'push re-enable and shift completion must automatically repair skipped shifts and business blocks',
+  );
+  assert.match(
+    staffBackfillMigration,
+    /canonical_staff_identity_backfill[\s\S]{0,1600}salonboard_sync_status = 'pending_push'/,
+    'future reservations with stale staff snapshots must be requeued for canonical staff correction',
   );
   assert.match(
     pcWorkerSource,
