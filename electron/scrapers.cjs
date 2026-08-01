@@ -4417,7 +4417,9 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   //   (salonId優先・無ければ shopName一致=fetchと同経路)で対象サロンへ。groupTop は強制 goto
   //   しない(非グループ単店は groupTop で SESSION_EXPIRED)。失効時のみ relogin→groupTop→再選択。
   const selectSalon = async (viaGroupTop) => {
-    if (navGenre !== 'hair') return;
+    // hair以外でも、グループ配下のサロン (salonIdあり。例: ヘアグループADER配下の
+    // キレイサロンGINA) はサロン選択が必要。単店エステ (salonId無し) は従来どおり no-op。
+    if (navGenre !== 'hair' && !opts.salonId) return;
     if (viaGroupTop) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     }
@@ -4464,11 +4466,20 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   const openSetup = async () => {
     // esthetic: 従来の直 shiftSetup?date が最速(月が設定済みなら即到達)。まず試す。
     if (navGenre !== 'hair') {
-      const u = new URL('/KLP/set/shiftSetup/', baseUrl);
-      u.searchParams.set('date', month);
-      await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-      await page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 8_000 }).catch(() => {});
-      if ((await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0) return true;
+      const gotoShiftDirect = async () => {
+        const u = new URL('/KLP/set/shiftSetup/', baseUrl);
+        u.searchParams.set('date', month);
+        await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+        await page.waitForSelector('#shiftSchedule a.shiftdate', { timeout: 8_000 }).catch(() => {});
+        return (await page.locator('#shiftSchedule a.shiftdate').count().catch(() => 0)) > 0;
+      };
+      if (await gotoShiftDirect()) return true;
+      // ★グループ配下のキレイサロン: サロン未選択だと /KLP 直行が弾かれる。
+      //   groupTop で対象サロンを選択してから再試行する。
+      if (opts.salonId) {
+        await selectSalon(true);
+        if (await gotoShiftDirect()) return true;
+      }
     }
     // 文脈確立→毎月の受付設定→(失効なら relogin+groupTop再選択で1回リトライ)→シフト設定ボタン
     await selectSalon(false);
