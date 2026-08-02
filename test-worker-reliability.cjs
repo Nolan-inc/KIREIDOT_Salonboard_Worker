@@ -175,6 +175,16 @@ function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
   );
   assert.match(
     source,
+    /AsyncLocalStorage<string>[\s\S]{0,3000}currentExecution === guardTimedOutExecution/,
+    'late-callback suppression must be scoped to one execution, because fetch retries reuse the same job id',
+  );
+  assert.match(
+    source,
+    /run\(executionToken, \(\) => handleJob\(job\)\)[\s\S]{0,3000}_guardTimedOutJobs\.set\(job\.id, executionToken\)/,
+    'each guarded execution must get a distinct token before a timed-out callback is suppressed',
+  );
+  assert.match(
+    source,
     /isGuardTimeoutReport[\s\S]*reportError\.includes\("\[JOB_TIMEOUT\]"\)/,
     'the final guard timeout callback must pass through late-callback suppression',
   );

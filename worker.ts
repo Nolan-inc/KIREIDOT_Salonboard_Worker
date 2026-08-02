@@ -24,6 +24,7 @@ import { chromium, type Browser, type BrowserContext, type Dialog, type Page } f
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, statSync, copyFileSync, cpSync, readdirSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -726,7 +727,9 @@ const _pageWriteFailed = new WeakMap<object, boolean>();
 // does not settle after that grace period is recorded here; callbacks arriving
 // after the guard has finally re-queued such a job must be suppressed so one
 // Cloud attempt produces exactly one history transition.
-const _guardTimedOutJobs = new Map<string, number>();
+const _guardTimedOutJobs = new Map<string, string>();
+const _jobExecutionContext = new AsyncLocalStorage<string>();
+let _jobExecutionSequence = 0;
 
 // 失敗時に反映フローの録画(webm)を Admin 経由で Storage に上げる。worker は Supabase 直アクセスを
 // 持たないため、既存の callback と同じ認証で /api/salonboard/job-video に base64 送信する。
@@ -756,14 +759,19 @@ async function uploadJobVideo(jobId: string, videoPath: string): Promise<void> {
 async function report(body: CallbackBody, capturePage?: unknown): Promise<void> {
   const reportJobId = String((body as { job_id?: string }).job_id ?? "");
   const reportError = String((body as { error?: string }).error ?? "");
-  const guardTimedOutAt = _guardTimedOutJobs.get(reportJobId);
+  const guardTimedOutExecution = _guardTimedOutJobs.get(reportJobId);
+  const currentExecution = _jobExecutionContext.getStore();
   // guard 自身が送るタイムアウト通知は必ず通し、その後に遅れて返る
   // scraper 側コールバックだけを抑止する。以前は [JOB_TIMEOUT] も抑止され、
   // DB が running のまま残ってPCフォールバックへ進めなかった。
   const isGuardTimeoutReport =
     reportError.includes("[CLOUD_PC_FALLBACK] cloud処理が") ||
     reportError.includes("[JOB_TIMEOUT]");
-  if (guardTimedOutAt && !isGuardTimeoutReport) {
+  if (
+    guardTimedOutExecution &&
+    currentExecution === guardTimedOutExecution &&
+    !isGuardTimeoutReport
+  ) {
     console.warn(
       `[callback] suppress late callback after guard timeout job=${reportJobId.slice(0, 8)} error=${reportError.slice(0, 120)}`,
     );
@@ -5479,6 +5487,9 @@ function isPcFallbackWrite(job: Job): boolean {
 }
 
 async function handleJobGuarded(job: Job): Promise<void> {
+  // fetch系は同じjob_idを再利用して再試行する。タイムアウト済み判定をjob_idだけで
+  // 持つと、次の正常な実行まで「遅延callback」と誤認して捨ててしまうため、実行単位で識別する。
+  const executionToken = `${Date.now()}:${++_jobExecutionSequence}`;
   const limitMs =
     isCloudWorker() && isPcFallbackWrite(job)
       ? CLOUD_WRITE_FALLBACK_TIMEOUT_MS
@@ -5487,10 +5498,12 @@ async function handleJobGuarded(job: Job): Promise<void> {
   type HandlerOutcome =
     | { kind: "done" }
     | { kind: "error"; error: unknown };
-  const handlerOutcome: Promise<HandlerOutcome> = handleJob(job).then(
-    () => ({ kind: "done" as const }),
-    (error) => ({ kind: "error" as const, error }),
-  );
+  const handlerOutcome: Promise<HandlerOutcome> = _jobExecutionContext
+    .run(executionToken, () => handleJob(job))
+    .then(
+      () => ({ kind: "done" as const }),
+      (error) => ({ kind: "error" as const, error }),
+    );
   const timeout = new Promise<{ kind: "timeout" }>((resolve) => {
     timer = setTimeout(() => resolve({ kind: "timeout" }), limitMs);
   });
@@ -5541,8 +5554,12 @@ async function handleJobGuarded(job: Job): Promise<void> {
 
       // Chrome停止後も元処理が終了しない場合だけ guard が再キューする。
       // ここより後に返る孤児callbackは report() で抑止する。
-      _guardTimedOutJobs.set(job.id, Date.now());
-      setTimeout(() => _guardTimedOutJobs.delete(job.id), 30 * 60_000);
+      _guardTimedOutJobs.set(job.id, executionToken);
+      setTimeout(() => {
+        if (_guardTimedOutJobs.get(job.id) === executionToken) {
+          _guardTimedOutJobs.delete(job.id);
+        }
+      }, 30 * 60_000);
       await report({
         job_id: job.id,
         job_type: job.job_type,
