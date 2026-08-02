@@ -103,7 +103,7 @@ async function testCouponCanCreateAndRecoverSalonBoardId() {
     <nav>予約管理 掲載管理</nav>
     <form id="couponAddForm" action="/CNK/draft/couponEdit" method="post"></form>
     <form id="couponEditForm" action="/CNK/draft/couponEdit" method="post"><input name="couponId" value=""></form>
-    ${registered ? `<table><tr><td><input name="frmCouponListDto[0].couponId" value="CPNEW001"></td><td></td><td>全員</td><td>新規テストクーポン</td></tr></table>` : ''}`;
+    ${registered ? `<table><tr><td><input name="frmCouponListDto[0].couponId" value="CPNEW001"><input type="hidden" name="frmCouponListDto[0].presentFlg" value="1"></td><td></td><td>全員</td><td>新規テストクーポン</td><td></td><td></td><td></td><td><a href="#"><img alt="非掲載にする"></a></td></tr></table>` : ''}`;
   const editHtml = (existing = false) => `
     <nav>予約管理 掲載管理</nav>
     <form id="draft_couponEditForm">
@@ -142,6 +142,7 @@ async function testCouponCanCreateAndRecoverSalonBoardId() {
     price: 5000,
     duration_min: 60,
     content: '新規同期テスト',
+    is_published: true,
   }, { baseUrl: 'http://coupon-create.test/', genre: 'esthetic', enablePush: true });
 
   assert.equal(result.status, 'ok');
@@ -193,6 +194,50 @@ async function testMenuPublicationStateIsIndependentFromImportActivity() {
       { external_id: 'M002', is_active: true, is_published: false },
     ],
   );
+  await browser.close();
+}
+
+async function testMenuPublicationOnlyPushPersistsAndVerifies() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  let published = false;
+
+  const menuHtml = () => `
+    <nav>予約管理 掲載管理</nav>
+    <form id="menuEditForm">
+      <input name="frmMenuEditMenuDetailList[0].menuId" value="M-PUBLISH">
+      <textarea name="frmMenuEditMenuDetailList[0].menuName">掲載切替メニュー</textarea>
+      <input name="frmMenuEditMenuDetailList[0].price" value="5500">
+      <input name="frmMenuEditMenuDetailList[0].sejyutsuAimTime" value="60">
+      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="1" ${published ? 'checked' : ''}>
+      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="0" ${published ? '' : 'checked'}>
+      <a class="jsc_menuEdit_btn_reg" href="#" onclick="location.href='/CNK/draft/menuEdit?published='+document.querySelector('[name=&quot;frmMenuEditMenuDetailList[0].presentFlg&quot;]:checked').value;return false;">登録</a>
+    </form>`;
+
+  await page.route('http://menu-publication-push.test/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has('published')) published = url.searchParams.get('published') === '1';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: menuHtml(),
+    });
+  });
+
+  const result = await pushMenuViaForm(page, {
+    external_id: 'M-PUBLISH',
+    publication_only: true,
+    is_published: true,
+  }, {
+    baseUrl: 'http://menu-publication-push.test/',
+    genre: 'esthetic',
+    enablePush: true,
+  });
+
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  assert.equal(result.externalId, 'M-PUBLISH');
+  assert.equal(published, true);
+  assert.equal(result.confirmed.diag.reRead.published, true);
   await browser.close();
 }
 
@@ -253,6 +298,48 @@ async function testCouponPublicationStateFromInverseActionLabel() {
       { external_id: 'C002', is_active: true, is_published: false },
     ],
   );
+  await browser.close();
+}
+
+async function testCouponPublicationOnlyPushPersistsAndVerifies() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  let published = false;
+
+  const listHtml = () => `
+    <nav>予約管理 掲載管理</nav>
+    <form id="couponEditForm"><input name="couponId" value=""></form>
+    <table><tr>
+      <td><input name="frmCouponListDto[0].couponId" value="C-PUBLISH"><input type="hidden" name="frmCouponListDto[0].presentFlg" value="${published ? '1' : '0'}"></td>
+      <td></td><td>全員</td><td>掲載切替クーポン</td><td></td><td>OK</td><td>詳細</td>
+      <td><a href="/CNK/draft/couponList?publish=${published ? '0' : '1'}"><img alt="${published ? '非掲載にする' : '掲載にする'}"></a></td>
+    </tr></table>`;
+
+  await page.route('http://coupon-publication-push.test/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has('publish')) published = url.searchParams.get('publish') === '1';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: listHtml(),
+    });
+  });
+
+  const result = await pushCouponViaForm(page, {
+    external_id: 'C-PUBLISH',
+    name: '掲載切替クーポン',
+    publication_only: true,
+    is_published: true,
+  }, {
+    baseUrl: 'http://coupon-publication-push.test/',
+    genre: 'esthetic',
+    enablePush: true,
+  });
+
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  assert.equal(result.externalId, 'C-PUBLISH');
+  assert.equal(published, true);
+  assert.equal(result.confirmed.publication.after.published, true);
   await browser.close();
 }
 
@@ -808,8 +895,18 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     scraperSource,
-    /waitForLoadState\('networkidle'[\s\S]{0,7000}equipmentSelect\.value = equipmentValue[\s\S]{0,1200}formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
+    /if \(selectedEquipmentValue\)[\s\S]{0,1000}waitForLoadState\('networkidle'[\s\S]{0,12000}equipmentSelect\.value = equipmentValue/,
+    'booking updates must wait for availability Ajax before re-applying equipment',
+  );
+  assert.match(
+    scraperSource,
+    /equipmentSelect\.value = equipmentValue[\s\S]{0,2200}formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
     'booking updates must re-apply equipment after availability Ajax and in the same turn as form submission',
+  );
+  assert.match(
+    scraperSource,
+    /setExact\(estHour, schedule\.hour\)[\s\S]{0,3000}schedule_value_mismatch_at_submit[\s\S]{0,5000}formSubmit\(form\.id \|\| 'extReserveChange', 'doComplete'\)/,
+    'booking updates must pin time and duration in the same turn as form submission',
   );
   assert.match(
     scraperSource,
@@ -996,11 +1093,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 (async () => {
   if (process.env.WORKER_TEST_CASE === 'menu-publication') {
     await testMenuPublicationStateIsIndependentFromImportActivity();
+    await testMenuPublicationOnlyPushPersistsAndVerifies();
     console.log('menu publication test: ok');
     return;
   }
   if (process.env.WORKER_TEST_CASE === 'coupon-publication') {
     await testCouponPublicationStateFromInverseActionLabel();
+    await testCouponPublicationOnlyPushPersistsAndVerifies();
     console.log('coupon publication test: ok');
     return;
   }
@@ -1012,7 +1111,9 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     return;
   }
   await testMenuPublicationStateIsIndependentFromImportActivity();
+  await testMenuPublicationOnlyPushPersistsAndVerifies();
   await testCouponPublicationStateFromInverseActionLabel();
+  await testCouponPublicationOnlyPushPersistsAndVerifies();
   await testMenuCanCreateIntoBlankSalonBoardSlotIdempotently();
   await testCouponCanCreateAndRecoverSalonBoardId();
   await testEquipmentCanCreateAndRecoverSalonBoardIdIdempotently();

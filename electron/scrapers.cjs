@@ -8268,7 +8268,11 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     // 顧客欄の blur handler が placeholder を復元し、正しいカナが空として送られる。
     // 変更フォームと公式 formSubmit helper が揃う場合は、同じ doComplete へ直接送信する。
     // DOM更新とsubmitを同一JSターンで行うため、blurによる巻き戻しが介在しない。
-    const directSubmitResult = await page.evaluate(({ equipmentValue, customerPhone }) => {
+    const directSubmitResult = await page.evaluate(({
+      equipmentValue,
+      customerPhone,
+      schedule,
+    }) => {
       // HotPepperネット予約(BF/BE...)の reserveChange は、公式 #mailEntry の
       // 専用ハンドラを経由しないとサーバ側の入力状態が作られない。doCompleteへ
       // 直送すると「戻るボタンで入力情報が失われた」となるため、値の補正だけ行い
@@ -8352,6 +8356,45 @@ async function changeBookingViaForm(page, payload, opts = {}) {
       jq('#extCouponArea select').each(function normalizeUndefinedCoupon() {
         if (jq(this).val() === undefined) jq(this).val('');
       });
+      // 時刻selectのchangeで走る設備空き状況Ajaxが、遅れて旧時刻/旧所要時間を
+      // 書き戻す店舗がある。submitと同一JSターンで希望値を再設定し、送信値を固定する。
+      const setExact = (element, value) => {
+        if (!element) return false;
+        if (!Array.from(element.options || []).some((option) => option.value === value)) {
+          return false;
+        }
+        element.value = value;
+        return element.value === value;
+      };
+      const estHour = document.getElementById('jsiRsvHour');
+      const estMinute = document.getElementById('jsiRsvMinute');
+      const estTermHour = document.getElementById('jsiRsvTermHour');
+      const estTermMinute = document.getElementById('jsiRsvTermMinute');
+      let scheduleOk = true;
+      if (estHour || estMinute || estTermHour || estTermMinute) {
+        scheduleOk = setExact(estHour, schedule.hour)
+          && setExact(estMinute, schedule.minute)
+          && setExact(estTermHour, schedule.termHour)
+          && setExact(estTermMinute, schedule.termMinute);
+      } else {
+        const hairTime = document.getElementById('rsvTime')
+          || document.querySelector('select[name="time"]');
+        const hairTerm = document.getElementById('rsvTermId')
+          || document.querySelector('select[name="rsvTerm"]');
+        if (hairTime || hairTerm) {
+          scheduleOk = setExact(hairTime, schedule.hhmm)
+            && setExact(hairTerm, schedule.duration);
+        }
+      }
+      const scheduleFields = {
+        hour: estHour?.value || '',
+        minute: estMinute?.value || '',
+        termHour: estTermHour?.value || '',
+        termMinute: estTermMinute?.value || '',
+      };
+      if (!scheduleOk) {
+        return { submitted: false, reason: 'schedule_value_mismatch_at_submit', scheduleFields };
+      }
       // Ajax設備空き状況更新との競合を完全に避けるため、submitと同一JSターンで
       // KDの設備IDを再設定する。ここで一致しなければ送信せず失敗へ戻す。
       if (equipmentValue) {
@@ -8380,13 +8423,22 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           submitted: false,
           reason: 'net_reservation_requires_official_button',
           equipmentFields,
+          scheduleFields,
         };
       }
       jq.shuhari.formSubmit(form.id || 'extReserveChange', 'doComplete');
-      return { submitted: true, equipmentFields };
+      return { submitted: true, equipmentFields, scheduleFields };
     }, {
       equipmentValue: selectedEquipmentValue,
       customerPhone: normalizeJpPhoneDigits(p.customer_phone),
+      schedule: {
+        hour: String(when.hour),
+        minute: startMM,
+        termHour: thVal,
+        termMinute: tmVal,
+        hhmm,
+        duration: String(dMin),
+      },
     }).catch((e) => ({
       submitted: false,
       reason: e?.message || String(e),
@@ -8415,6 +8467,18 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         `SalonBoard送信直前に設備「${expectedPersistedEquipName || selectedEquipmentValue}」の選択が失われました${cap ? ` (capture=${cap})` : ''}`,
         'EQUIPMENT_FULL',
         true,
+      );
+    }
+    if (directSubmitResult.reason === 'schedule_value_mismatch_at_submit') {
+      const cap = await captureScrapeDebug(page, 'change', `schedule_mismatch_at_submit_${reserveId}`, {
+        diagnostics: { reserveId, directSubmitResult, url: page.url() },
+      });
+      return fail(
+        `SalonBoard送信直前に希望日時/所要時間を設定できませんでした ` +
+        `(wanted=${String(when.hour).padStart(2, '0')}:${startMM}/${dMin}分, ` +
+        `actual=${JSON.stringify(directSubmitResult.scheduleFields || {})}${cap ? `, capture=${cap}` : ''})`,
+        'CONFIRMATION_MISMATCH',
+        false,
       );
     }
     directFormSubmitted = directSubmitResult.submitted === true;
@@ -14514,16 +14578,36 @@ async function pushMenuViaForm(page, payload, opts = {}) {
         if ((el.value || '').trim() === wantName) { const m = (el.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
       }
     }
-    if (idx < 0) return { persisted: false, current: null };
+    if (idx < 0) return { persisted: false, current: null, published: null };
     const el = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuName"]`);
     const idEl = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuId"]`);
+    const publishedEl = document.querySelector(
+      `[name="frmMenuEditMenuDetailList[${idx}].presentFlg"]:checked`,
+    );
     const cur = el ? (el.value || '') : null;
-    return { persisted: cur === wantName, current: cur, externalId: (idEl?.value || '').trim() || null };
-  }, { extId: extId || applied.externalId || '', wantName: name }).catch(() => ({ persisted: false, current: null, externalId: null }));
+    return {
+      persisted: cur === wantName,
+      current: cur,
+      externalId: (idEl?.value || '').trim() || null,
+      published: publishedEl ? String(publishedEl.value) === '1' : null,
+    };
+  }, { extId: extId || applied.externalId || '', wantName: name }).catch(() => ({ persisted: false, current: null, externalId: null, published: null }));
   const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
   if (name && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'menu', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `メニュー名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
+  }
+  if (wantPublished != null && reRead.published !== wantPublished) {
+    const cap = await captureScrapeDebug(page, 'menu', 'publication_not_persisted', {
+      diagnostics: { ...diag, wantPublished },
+    });
+    return {
+      status: 'failed',
+      reason: `メニュー掲載状態が保存されませんでした (wanted=${wantPublished}, current=${reRead.published}, capture=${cap || '?'})`,
+      errorCode: 'UNKNOWN_ERROR',
+      manualRequired: false,
+      diag,
+    };
   }
   if (createIfMissing && !reRead.externalId) {
     return { status: 'failed', reason: 'メニューは保存された可能性がありますが、SalonBoardのmenuIdを取得できませんでした', errorCode: 'SB_REGISTER_INCOMPLETE', manualRequired: false, diag };
@@ -14550,6 +14634,8 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   const price = p.price ?? null;
   const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
   const content = p.content ?? p.content_explanation ?? p.description ?? null;
+  const wantPublished = p.is_published == null ? null : !!p.is_published;
+  const publicationOnly = p.publication_only === true;
   if (!resolvedExtId && !createIfMissing) return fail('クーポンの external_id (couponId) がありません', 'UNKNOWN_ERROR', true);
   if (createIfMissing && !name) return fail('クーポン新規作成には name が必要です', 'UNKNOWN_ERROR', true);
   if (createIfMissing && name.length > 36) return fail(`クーポン名がSalonBoard上限(36文字)を超えています (${name.length}文字)`, 'VALIDATION_ERROR', true);
@@ -14563,6 +14649,94 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
+
+  // couponList の hidden presentFlg が現在値、行内の「掲載にする／非掲載にする」
+  // が切替操作。編集フォームには掲載状態が無いため一覧で操作し、再読込で検証する。
+  const readCouponPublication = async (couponId, couponName) => page.evaluate(({ id, name: wantedName }) => {
+    for (const input of document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]')) {
+      const tr = input.closest('tr');
+      if (!tr) continue;
+      const cells = Array.from(tr.querySelectorAll('td'));
+      const rowName = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
+      if (id && String(input.value || '').trim() !== id) continue;
+      if (!id && wantedName && rowName !== wantedName) continue;
+      const match = String(input.name || '').match(/\[(\d+)\]/);
+      const presentInput = match
+        ? document.querySelector(`input[name="frmCouponListDto[${match[1]}].presentFlg"]`)
+        : null;
+      const action = Array.from(tr.querySelectorAll('a')).find((a) =>
+        /^(?:掲載にする|非掲載にする)$/.test(a.querySelector('img')?.getAttribute('alt') || ''));
+      return {
+        found: true,
+        externalId: String(input.value || '').trim(),
+        name: rowName,
+        published: presentInput ? String(presentInput.value) === '1' : null,
+        action: action?.querySelector('img')?.getAttribute('alt') || null,
+      };
+    }
+    return { found: false, externalId: null, name: null, published: null, action: null };
+  }, { id: couponId, name: couponName }).catch(() => ({ found: false, externalId: null, name: null, published: null, action: null }));
+
+  const ensureCouponPublication = async (couponId, couponName, desired) => {
+    await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), {
+      waitUntil: 'domcontentloaded', timeout: 30_000,
+    }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const before = await readCouponPublication(couponId, couponName);
+    if (!before.found) return { ok: false, reason: 'coupon_not_found', before, after: null };
+    if (before.published === desired) return { ok: true, changed: false, before, after: before };
+
+    const targetAlt = desired ? '掲載にする' : '非掲載にする';
+    let dialogAccepted = false;
+    const acceptDialog = async (dialog) => {
+      dialogAccepted = true;
+      try { await dialog.accept(); } catch (_e) { /* noop */ }
+    };
+    page.on('dialog', acceptDialog);
+    let clicked = false;
+    try {
+      clicked = await page.evaluate(({ id, alt }) => {
+        for (const input of document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]')) {
+          if (String(input.value || '').trim() !== id) continue;
+          const tr = input.closest('tr');
+          const img = Array.from(tr?.querySelectorAll('img') || []).find((candidate) =>
+            candidate.getAttribute('alt') === alt);
+          const anchor = img?.closest('a');
+          if (!anchor) return false;
+          anchor.click();
+          return true;
+        }
+        return false;
+      }, { id: before.externalId, alt: targetAlt }).catch(() => false);
+      if (clicked) {
+        await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+        await page.waitForTimeout(800);
+        const yes = page.locator(
+          'a.accept:visible, a:has-text("はい"):visible, a:has-text("掲載にする"):visible, a:has-text("非掲載にする"):visible',
+        ).first();
+        if ((await yes.count().catch(() => 0)) > 0) {
+          await yes.click({ timeout: 8_000 }).catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+        }
+      }
+    } finally {
+      page.off('dialog', acceptDialog);
+    }
+    if (!clicked) return { ok: false, reason: 'publication_action_not_found', before, after: null };
+
+    await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), {
+      waitUntil: 'domcontentloaded', timeout: 30_000,
+    }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    const after = await readCouponPublication(before.externalId, couponName);
+    return {
+      ok: after.found && after.published === desired,
+      changed: true,
+      dialogAccepted,
+      before,
+      after,
+    };
+  };
   // 新規ジョブの再試行では、直前の試行ですでに登録済みかもしれない。同名を先に
   // 探して既存 couponId を再利用し、二重登録を防ぐ。
   if (!resolvedExtId && name) {
@@ -14575,6 +14749,32 @@ async function pushCouponViaForm(page, payload, opts = {}) {
       }
       return '';
     }, name).catch(() => '');
+  }
+
+  if (publicationOnly) {
+    if (!enablePush) {
+      const current = await readCouponPublication(resolvedExtId, name);
+      return { status: 'confirm_only', externalId: current.externalId || resolvedExtId, confirmed: current };
+    }
+    if (wantPublished == null) {
+      return fail('掲載切替に is_published が指定されていません', 'VALIDATION_ERROR', true);
+    }
+    const publication = await ensureCouponPublication(resolvedExtId, name, wantPublished);
+    if (!publication.ok) {
+      const cap = await captureScrapeDebug(page, 'coupon', 'publication_not_persisted', {
+        diagnostics: { wantPublished, publication },
+      });
+      return fail(
+        `クーポン掲載状態が保存されませんでした (wanted=${wantPublished}, current=${publication.after?.published ?? publication.before?.published ?? null}, reason=${publication.reason || 'verify_mismatch'}, capture=${cap || '?'})`,
+        'UNKNOWN_ERROR',
+        false,
+      );
+    }
+    return {
+      status: 'ok',
+      externalId: publication.after?.externalId || resolvedExtId,
+      confirmed: { publication },
+    };
   }
 
   // 既存は couponEditForm、新規は couponAddForm を submit。
@@ -14702,7 +14902,23 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     const cap = await captureScrapeDebug(page, 'coupon', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `クーポン名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
   }
-  return { status: 'ok', externalId: resolvedExtId, confirmed: { ...applied, diag } };
+  let publication = null;
+  if (wantPublished != null) {
+    publication = await ensureCouponPublication(resolvedExtId, name, wantPublished);
+    if (!publication.ok) {
+      const cap = await captureScrapeDebug(page, 'coupon', 'publication_not_persisted', {
+        diagnostics: { ...diag, wantPublished, publication },
+      });
+      return {
+        status: 'failed',
+        reason: `クーポン掲載状態が保存されませんでした (wanted=${wantPublished}, current=${publication.after?.published ?? publication.before?.published ?? null}, reason=${publication.reason || 'verify_mismatch'}, capture=${cap || '?'})`,
+        errorCode: 'UNKNOWN_ERROR',
+        manualRequired: false,
+        diag: { ...diag, publication },
+      };
+    }
+  }
+  return { status: 'ok', externalId: resolvedExtId, confirmed: { ...applied, diag, publication } };
 }
 
 /**
