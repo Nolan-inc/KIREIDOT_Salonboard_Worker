@@ -1178,6 +1178,11 @@ async function handleJob(job: Job): Promise<void> {
         lt++
       ) {
         if (isCredentialFailure(loginResult.reason ?? "")) break;
+        // 出口起因と判定できる失敗だけを、その試行で使った出口の実害として数える
+        // (ID/PW 不一致は上で break 済みなのでここには来ない)。
+        if (shouldRotateLoginEndpoint(loginResult.reason ?? "")) {
+          noteProxyOutcome(loginEndpoint, false);
+        }
         // 書込ジョブのログイン失敗時は、別の static ISP 出口へ切り替える。
         // 住宅回線 jp.decodo.com:30001-30010 は全ポートで SalonBoard /login/ を
         // HTTP 応答段階から拒否することを本番で確認済み。住宅へ退避すると
@@ -1237,6 +1242,12 @@ async function handleJob(job: Job): Promise<void> {
         videoPage = page;
         await applyResidentialBandwidthPolicy();
         loginResult = await attemptLogin();
+      }
+
+      // ログインが通った出口は健全とみなし、失敗 streak を落とす。
+      // captcha は出口の良し悪しと切り分けられないため、成功にも失敗にも数えない。
+      if (loginResult.status !== "failed" && loginResult.status !== "captcha") {
+        noteProxyOutcome(loginEndpoint, true);
       }
 
       if (loginResult.status === "captcha") {
@@ -2385,6 +2396,8 @@ async function handleJob(job: Job): Promise<void> {
         fetch_staff: { fn: "scrapeStaff", key: "staff" },
         fetch_menu: { fn: "scrapeMenus", key: "menus" },
         fetch_menus: { fn: "scrapeMenus", key: "menus" },
+        // 美容室スタイル一覧 (Admin フォトギャラリーの「スタイル写真を取得」)。
+        // 掲載中スタイルを全件取得し、salonboard_bulk_upsert_styles へ取込む。
         fetch_style: { fn: "scrapeStyles", key: "styles" },
         fetch_coupon: { fn: "scrapeCoupons", key: "coupons" },
         fetch_coupons: { fn: "scrapeCoupons", key: "coupons" },
@@ -2398,9 +2411,6 @@ async function handleJob(job: Job): Promise<void> {
         fetch_salon: { fn: "scrapeSalonInfo", key: "salon" },
         fetch_kodawari: { fn: "scrapeKodawari", key: "kodawari" },
         fetch_feature: { fn: "scrapeFeature", key: "feature" },
-        // 美容室スタイル一覧 (Admin フォトギャラリーの「スタイル写真を取得」)。
-        // 掲載中スタイルを全件取得し、salonboard_bulk_upsert_styles へ取込む。
-        fetch_style: { fn: "scrapeStyles", key: "styles" },
       };
       const m = FETCH_MAP[job.job_type];
       if (m) {
@@ -2599,6 +2609,63 @@ function rotateAccountProxy(sessionKey: string): void {
 // IP プール ヘルスチェック結果 (フラグ/到達不可IPを使わないためのバックオフ)。
 let _healthyProxies: string[] | null = null;
 let _lastProxyCheck = 0;
+
+// ── 出口(IP)単位の実害集計 ────────────────────────────────────────────────
+// refreshHealthyProxies() は /KLP/top/ への GET が通れば健全と見なすため、
+// 「疎通はするがログインだけ通らない」出口を検知できない。2026-07-02 に 10006 の
+// 出口で新宿三丁目/WAO表参道が2日間全滅したのはこの穴で、ヘルスチェックが緑のまま
+// 該当店舗が sticky 割当され続けた。
+// そこで実ジョブのログイン結果を出口ごとに数え、出口起因の失敗が続いた IP を
+// 一定時間プールから外す。判定は既存の shouldRotateLoginEndpoint / isCredentialFailure
+// を流用し、認証情報の誤りなど「出口のせいではない失敗」は数えない。
+const PROXY_FAILURE_THRESHOLD =
+  Number(process.env.SB_PROXY_FAILURE_THRESHOLD) || 3;
+const PROXY_QUARANTINE_MS =
+  Number(process.env.SB_PROXY_QUARANTINE_MS) || 30 * 60_000;
+const proxyFailureStreak = new Map<string, number>();
+const proxyQuarantineUntil = new Map<string, number>();
+
+/** proxy_pool の表記 (host:port) に合わせるためスキームを剥がす。 */
+function proxyKey(server?: string | null): string {
+  return (server ?? "").replace(/^https?:\/\//, "").trim();
+}
+
+/** その出口が実害で隔離中か。 */
+function proxyQuarantined(server?: string | null): boolean {
+  const key = proxyKey(server);
+  if (!key) return false;
+  return (proxyQuarantineUntil.get(key) ?? 0) > Date.now();
+}
+
+/**
+ * ログイン結果を出口単位で記録する。
+ * 成功で streak をリセットするため、たまたま失敗した出口は隔離されない
+ * (連続で失敗した出口だけが外れる)。
+ */
+function noteProxyOutcome(server: string | undefined | null, ok: boolean): void {
+  const key = proxyKey(server);
+  if (!key || key === "direct") return;
+  if (ok) {
+    if (proxyFailureStreak.delete(key)) {
+      console.log(`[proxy] ${key} ログイン成功 → 失敗カウントをリセット`);
+    }
+    return;
+  }
+  const n = (proxyFailureStreak.get(key) ?? 0) + 1;
+  if (n < PROXY_FAILURE_THRESHOLD) {
+    proxyFailureStreak.set(key, n);
+    console.log(
+      `[proxy] ${key} 出口起因のログイン失敗 ${n}/${PROXY_FAILURE_THRESHOLD}`,
+    );
+    return;
+  }
+  proxyFailureStreak.delete(key);
+  proxyQuarantineUntil.set(key, Date.now() + PROXY_QUARANTINE_MS);
+  console.log(
+    `[proxy] ${key} を隔離 (出口起因の失敗 ${n} 回連続, ` +
+      `${Math.round(PROXY_QUARANTINE_MS / 60_000)}分間プールから除外)`,
+  );
+}
 
 // ── 店舗レーン並行処理 (Phase 1: scale-out) ──────────────────────────────
 // claim関数(salonboard_claim_next_job)の per-shop mutex が「1店舗あたり同時1ジョブ」を
@@ -2828,10 +2895,14 @@ async function refreshHealthyProxies(): Promise<void> {
       }
     })
   );
-  _healthyProxies = results.filter((x): x is string => !!x);
+  // 疎通が通っても、実ジョブのログインが続けて失敗した出口は隔離中として外す。
+  const reachable = results.filter((x): x is string => !!x);
+  _healthyProxies = reachable.filter((s) => !proxyQuarantined(s));
   _lastProxyCheck = Date.now();
+  const quarantined = reachable.length - _healthyProxies.length;
   console.log(
     `[proxy] health-check: ${_healthyProxies.length}/${pool.length} healthy` +
+      (quarantined > 0 ? ` (疎通OKだが実害で隔離中 ${quarantined})` : "") +
       (_healthyProxies.length === 0 ? " — 全IPフラグ中、処理を待機しIP回復を待つ" : "")
   );
 }
@@ -3001,8 +3072,10 @@ function pickProxy(
       password: process.env.SB_PROXY_PASSWORD || undefined,
     };
   }
-  const healthy =
-    _healthyProxies && _healthyProxies.length > 0 ? _healthyProxies : null;
+  // ヘルスチェックは既定10分間隔なので、その間に隔離された出口をここでも外す
+  // (隔離直後の次ジョブが同じ壊れた出口を引かないようにする)。
+  const live = (_healthyProxies ?? []).filter((s) => !proxyQuarantined(s));
+  const healthy = live.length > 0 ? live : null;
   if (healthy) {
     // 店舗→IP を固定(sticky)。Akamai の _abck は発行時IPに紐づくため、同一店舗の
     // login/read/write を常に同じISP IPで通す。IPローテだと別IP扱いで弾かれ500になる

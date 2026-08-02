@@ -1,0 +1,4 @@
+[tools]
+# Playwright のコンテナイメージ (mcr.microsoft.com/playwright:*-noble) が内包する
+# Node と揃える。Electron 43 系の内包 Node も 24 なので、開発機・ビルド・実行が同一系列になる。
+node = "24.18.1"
