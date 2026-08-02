@@ -5,8 +5,55 @@ const {
   deleteScheduleViaForm,
   cancelBookingViaForm,
   pushStaffViaForm,
+  scrapeMenus,
   _internal,
 } = require('./electron/scrapers.cjs');
+
+async function testMenuPublicationStateIsIndependentFromImportActivity() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+
+  await page.route('http://menu.test/**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `
+        <nav>予約管理 掲載管理</nav>
+        <form action="/CNK/draft/menuEdit">
+          <input name="frmMenuEditMenuDetailList[0].menuId" value="M001">
+          <textarea name="frmMenuEditMenuDetailList[0].menuName">掲載メニュー</textarea>
+          <input name="frmMenuEditMenuDetailList[0].price" value="5500">
+          <input name="frmMenuEditMenuDetailList[0].sejyutsuAimTime" value="60">
+          <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="1" checked>
+          <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="0">
+
+          <input name="frmMenuEditMenuDetailList[1].menuId" value="M002">
+          <textarea name="frmMenuEditMenuDetailList[1].menuName">非掲載メニュー</textarea>
+          <input name="frmMenuEditMenuDetailList[1].price" value="7500">
+          <input name="frmMenuEditMenuDetailList[1].sejyutsuAimTime" value="75">
+          <input type="radio" name="frmMenuEditMenuDetailList[1].presentFlg" value="1">
+          <input type="radio" name="frmMenuEditMenuDetailList[1].presentFlg" value="0" checked>
+        </form>`,
+    });
+  });
+
+  const result = await scrapeMenus(page, {
+    baseUrl: 'http://menu.test/',
+    genre: 'esthetic',
+  });
+  assert.deepEqual(
+    result.rows.map((row) => ({
+      external_id: row.external_id,
+      is_active: row.is_active,
+      is_published: row.is_published,
+    })),
+    [
+      { external_id: 'M001', is_active: true, is_published: true },
+      { external_id: 'M002', is_active: true, is_published: false },
+    ],
+  );
+  await browser.close();
+}
 
 async function testExplicitSingleSalonContextAndUnpublishedStaffSort() {
   const browser = await chromium.launch({ headless: true, channel: 'chrome' });
@@ -746,6 +793,12 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 }
 
 (async () => {
+  if (process.env.WORKER_TEST_CASE === 'menu-publication') {
+    await testMenuPublicationStateIsIndependentFromImportActivity();
+    console.log('menu publication test: ok');
+    return;
+  }
+  await testMenuPublicationStateIsIndependentFromImportActivity();
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
   await testExplicitSingleSalonContextAndUnpublishedStaffSort();

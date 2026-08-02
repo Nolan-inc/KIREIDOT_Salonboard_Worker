@@ -2287,7 +2287,9 @@ async function scrapeMenus(page, opts = {}) {
         price: (f.price || '').replace(/[^\d]/g, '') || null,
         duration_min: (f.sejyutsuAimTime || f.aimTime || f.minutes || '')
           .replace(/[^\d]/g, '') || null,
-        is_active: f.presentFlg !== '0',
+        // presentFlg はレコードの有効性ではなく、SalonBoard上の掲載状態。
+        // 非掲載メニューも原本として同期し、Adminで状態を判別できるよう分離する。
+        is_published: f.presentFlg !== '0',
       });
     }
     return {
@@ -2324,7 +2326,8 @@ async function scrapeMenus(page, opts = {}) {
     category: it.category,
     price: it.price ? Number(it.price) : null,
     duration_min: it.duration_min ? Number(it.duration_min) : null,
-    is_active: it.is_active !== false,
+    is_active: true,
+    is_published: it.is_published !== false,
   }));
   return {
     rows,
