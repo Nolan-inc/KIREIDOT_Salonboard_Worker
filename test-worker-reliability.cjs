@@ -399,6 +399,25 @@ async function testExplicitSingleSalonContextAndUnpublishedStaffSort() {
   await browser.close();
 }
 
+function testSalonGroupTopOverridesStaleSingleAccountFlag() {
+  assert.equal(
+    _internal.shouldSelectSalonContext(
+      { isGroupAccount: false, salonId: 'H000230398' },
+      'https://salonboard.com/KLP/top/',
+    ),
+    false,
+    'an explicitly single account must not open groupTop proactively',
+  );
+  assert.equal(
+    _internal.shouldSelectSalonContext(
+      { isGroupAccount: false, salonId: 'H000230398' },
+      'https://salonboard.com/CNC/groupTop/',
+    ),
+    true,
+    'the actual SalonBoard groupTop landing must override a stale single-account flag',
+  );
+}
+
 async function testHtmlDeleteConfirmation() {
   // CI/開発Macのどちらでも、worker本番と同じシステムChromeを使う。
   const browser = await chromium.launch({ headless: true, channel: 'chrome' });
@@ -1148,6 +1167,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 }
 
 (async () => {
+  if (process.env.WORKER_TEST_CASE === 'group-top-recovery') {
+    testSalonGroupTopOverridesStaleSingleAccountFlag();
+    console.log('groupTop recovery test: ok');
+    return;
+  }
   if (process.env.WORKER_TEST_CASE === 'schedule-verification') {
     await testScheduleVerificationUsesCoveringTodoNotTitle();
     console.log('schedule verification test: ok');
@@ -1183,6 +1207,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   await testNeverSyncedCancelIsIdempotent();
   await testScheduleVerificationUsesCoveringTodoNotTitle();
   await testExplicitSingleSalonContextAndUnpublishedStaffSort();
+  testSalonGroupTopOverridesStaleSingleAccountFlag();
   testGuardWaitsForOriginalResultBeforeTimeoutCallback();
   testKnownSalonBoardRecoveryBranchesStayEnabled();
   console.log('worker reliability tests: ok');

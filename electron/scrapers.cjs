@@ -795,11 +795,23 @@ async function scrapeHairBookings(page, opts = {}) {
       console.log('[scrape] hair warmup expired -> relogin');
       const ok = await opts.relogin().catch(() => false);
       if (ok) {
-        // グループだけサロンを選び直す。単店舗は存在しない groupTop を開かず、
-        // fresh login 後の現在店舗から直接 schedule warmup をやり直す。
-        if (shouldUseGroupAccount(opts)) {
-          await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-          await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
+        // DB上は単店舗でも fresh login 後に groupTop へ着地するアカウントがある
+        // (2026-08-02 Mag salon gallery)。実画面がサロン一覧なら対象Hコードを選び、
+        // hair管理TOPの肯定確認まで終えてから schedule warmup をやり直す。
+        if (shouldSelectSalonContext(opts, page.url())) {
+          if (!/\/(?:CNC|KLP)\/groupTop\/?/i.test(page.url())) {
+            await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+          }
+          const selected = await ensureSalonSelected(page, {
+            salonId: opts.salonId,
+            shopName: opts.shopName,
+            genre: 'hair',
+            baseUrl,
+            isGroupAccount: opts.isGroupAccount,
+          }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
+          diag.push(`hair: post-login salon-select ${JSON.stringify(selected)}`);
+          console.log(`[scrape] hair post-login salon-select ${JSON.stringify(selected)}`);
+          if (!selected?.ok) break;
         }
         continue;
       }
@@ -1204,7 +1216,7 @@ async function scrapeBookings(page, opts = {}) {
   // 居る。対象サロンを選んで店舗文脈(/CLP/bt/)に入ってから取得する。未選択のまま
   // /CLP/bt/schedule/ を開くと session_expired になる(実機 2026-06-28: ADER鯖江=グループ hair)。
   // 単一店舗(salonId/shopName無し、または groupTop 非該当)では ensureSalonSelected が no-op。
-  if (shouldUseGroupAccount(opts)) {
+  if (shouldSelectSalonContext(opts, page.url())) {
     // グループアカウントはログイン後 warmup(/KLP/top/)に飛ぶとサロン未選択のため
     // session_expired になる(実機 2026-06-28: ADER鯖江)。warmup 後はページが groupTop で
     // ないので ensureSalonSelected が no-op になってしまう。明示的に /CNC/groupTop/ へ行き、
@@ -2584,6 +2596,13 @@ function reservePathRoot(genre) {
 function shouldUseGroupAccount(opts = {}) {
   if (typeof opts.isGroupAccount === 'boolean') return opts.isGroupAccount;
   return !!String(opts.salonId || '').trim();
+}
+
+// DB/API の group_account_id が未設定でも、SalonBoard が実際にサロン一覧へ
+// 着地させたならグループアカウントであることは確定している。設定値だけを信じて
+// 対象サロンを選ばず深いURLへ進むと SESSION_EXPIRED になるため、実画面を優先する。
+function shouldSelectSalonContext(opts = {}, currentUrl = '') {
+  return shouldUseGroupAccount(opts) || /\/(?:CNC|KLP)\/groupTop\/?/i.test(String(currentUrl || ''));
 }
 
 // グループアカウント(ADER等)は 1 ログインで複数サロンを持つため、予約書き込み前に
@@ -16162,6 +16181,7 @@ module.exports = {
     cleanPhone,
     extractBookingItemsFromCurrentPage,
     shouldUseGroupAccount,
+    shouldSelectSalonContext,
     ensureReserveSalonContext,
     findScheduleBlockInPage,
   },
