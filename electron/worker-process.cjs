@@ -1648,10 +1648,25 @@ function subscribeToPushJobs() {
   }
 
   // Realtime が (RLS/接続の都合で) 効かないケースに備えた保険ポーリング。
-  // queued のPC専用フォト/スタイルジョブが残っていれば runPushJobs で消化する。
+  // queued のPC専用フォト/スタイルジョブに加え、Cloud→PC フォールバックで
+  // executor='playwright' に切り替わった書込ジョブ (push_booking / cancel_booking /
+  // push_shifts) も対象にする。フォールバックは既存行の UPDATE のため上の
+  // Realtime INSERT 購読では検知できず、従来はPCが一度もclaimしないまま
+  // 10分で PC_FALLBACK_TIMEOUT 失敗になっていた (2026-08-02 調査:
+  // PC失敗309件中268件が attempts=0 の未claim死。PC成功率0%の直接原因)。
   // (Admin API claim 任せだとアプリ側で件数を見られないので、DB を直接 count する)
   startPushJobPoller();
 }
+
+// 保険ポーリングが検知する PC 実行対象の書込ジョブ種別。
+// push_photo_gallery はPC専用、残り3種は Cloud→PC フォールバック対象
+// (Admin callback / DBトリガー salonboard_force_cloud_failure_fallback と対応)。
+const PC_CLAIMABLE_PUSH_JOB_TYPES = [
+  'push_photo_gallery',
+  'push_booking',
+  'cancel_booking',
+  'push_shifts',
+];
 
 let pushJobPollTimer = null;
 const PUSH_JOB_POLL_MS = 20_000;
@@ -1679,15 +1694,19 @@ function startPushJobPoller() {
           return;
         }
       }
+      // 待機端末は claim しても Admin 側 (X-Machine-Id 照合) で弾かれるだけなので
+      // ポーリング起動もしない (アクティブ端末が処理する)。
+      if (!workerActive) return;
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
-        .eq('job_type', 'push_photo_gallery')
+        .in('job_type', PC_CLAIMABLE_PUSH_JOB_TYPES)
         .eq('executor', 'playwright')
-        .eq('status', 'queued');
+        .eq('status', 'queued')
+        .lte('run_at', new Date().toISOString());
       if (error) return;
       if ((count ?? 0) > 0) {
-        log(`保険ポーリング: 未処理ジョブ ${count} 件を検知 → push 処理`, 'info');
+        log(`保険ポーリング: 未処理のPC書込ジョブ ${count} 件を検知 → push 処理`, 'info');
         runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch(() => {});
       }
     } catch (_e) { /* noop */ }
