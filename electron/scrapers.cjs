@@ -3003,18 +3003,12 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
 //     - メモ:       input[name=schMemo]  (最大100)
 //     - 登録:       a#regist
 // =====================================================================
-// スケジュール画面 (salonSchedule) の対象スタッフ列から「開始・終了・タイトル」が一致する
+// スケジュール画面 (salonSchedule) の対象スタッフ列から、要求区間を完全に覆う
 // 予定ブロックを探す (page.evaluate 用)。予定は reserveId を持たず一覧からも読めないため、
 // 登録前の冪等チェックと登録後の実在確認の両方でこの関数を使う。
 // 戻り値 blocks には対象スタッフ列の全予定を入れ、失敗診断 (何が実在するか) に使う。
 function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
-  // 敬称(さん/様等)と注釈(「（こぼ手入力）」等の括弧書き)を除いた固有名の核。
-  // 手動入力予定の照合で「とっとりこころさん」と「とっとりこころ（こぼ手入力）」を一致させる。
-  const nameCore = (s) => norm(s)
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/(さん|さま|様|ちゃん|くん|君)$/, '')
-    .trim();
   const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
     const m = (el.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
     return m ? m[1].toUpperCase() : null;
@@ -3029,8 +3023,7 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const blocks = [];
   let found = false;
   const targetTitle = norm(title);
-  // 「予定」「予定あり」等の汎用タイトルは別予定への誤一致を招くため、同名重なり判定から除外。
-  const genericTitle = !targetTitle || targetTitle === '予定' || targetTitle === '予定あり';
+  let matchedBlock = null;
   for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
     const isDayOff = el.classList.contains('isDayOff');
     const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
@@ -3039,26 +3032,22 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     const start = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
     const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
     const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
-    const actualMemo = norm(el.querySelector('.todoMemo')?.textContent);
     blocks.push({ start, end, title: actualTitle, isDayOff });
     // 休日が対象区間を覆っていても、目的の業務予定が表示されていることにはならない。
     // KIREIDOT と SalonBoard の完全一致を優先し、診断用 blocks にだけ残す。
     if (isDayOff) continue;
-    // SalonBoard は同じタイトルの連続・隣接予定を1つの表示ブロックへ結合する。
-    // そのため登録した区間が既存の「予定あり」に包含された場合も実在している。
-    // 完全一致だけを要求すると、例: 11:00-19:30 の結合ブロック内へ追加した
-    // 12:30-13:30 を未登録と誤判定するため、同タイトルの包含も成功にする。
-    if (start <= startTotal && end >= endTotal && actualTitle === norm(title)) found = true;
-    // 部分的に重なるだけの同名予定は成功にしない。KIREIDOT と SalonBoard の表示・時間帯を
-    // 一致させる契約なので、境界差を already_exists にすると未反映を隠してしまう。
-    // ★手動入力予定の根治(2026-07-27 代官山 とっとりこころ で実害): 店舗がSBへ手入力すると
-    //   todoTitle は汎用「予定あり」になり、実名は todoMemo に入る(例 memo「とっとりこころ（こぼ手入力）」/
-    //   KD block_reason「とっとりこころさん」)。title一致では拾えないため、敬称・注釈を除いた固有名の核が
-    //   SB側の title か memo と一致し対象区間と重なるなら、同一予定=冪等成功とする。核が2文字以下だと
-    //   別予定への誤一致リスクがあるため3文字以上に限定。汎用タイトル対象や別名は従来どおり失敗=衝突検知。
-    if (!genericTitle && start <= startTotal && end >= endTotal) {
-      const tCore = nameCore(targetTitle);
-      if (tCore.length >= 3 && (tCore === nameCore(actualTitle) || tCore === nameCore(actualMemo))) found = true;
+    // SalonBoard は予定タイトルを「予定あり」のような汎用表示へ置換したり、
+    // 連続・隣接する予定を1つの表示ブロックへ結合したりする。そのため業務ブロックの
+    // 同期確認ではタイトル/メモを真実源にせず、同一スタッフの「予定」が要求区間を
+    // 完全に覆うことを成功条件にする。部分被覆、休日、顧客予約は成功にしない。
+    if (start <= startTotal && end >= endTotal) {
+      found = true;
+      matchedBlock = {
+        start,
+        end,
+        title: actualTitle,
+        titleMismatch: !!targetTitle && actualTitle !== targetTitle,
+      };
     }
   }
   // 顧客予約も診断情報には含めるが、業務予定の代わりとして成功扱いにはしない。
@@ -3075,9 +3064,11 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     );
     blocks.push({ start, end, title: reservationName, isDayOff: false, isReservation: true });
   }
-  // 別タイトルの予定や顧客予約が同時間帯を覆っていても、目的の業務予定が実在する
-  // 証拠にはならない。診断用 blocks には残すが already_exists にはしない。
-  return found ? { ok: true, reason: null, blocks } : { ok: false, reason: 'exact_schedule_not_found', blocks };
+  // 顧客予約は同時間帯でも業務予定の代わりにしない。タイトル相違は診断情報として
+  // 返すだけで失敗にはせず、KD/SB双方で予定枠が確保されている状態を優先する。
+  return found
+    ? { ok: true, reason: null, blocks, matchedBlock }
+    : { ok: false, reason: 'exact_schedule_not_found', blocks, matchedBlock: null };
 }
 
 async function pushScheduleViaForm(page, payload, opts = {}) {
@@ -3219,7 +3210,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     };
   }
 
-  // 別タイトルの予定・休日・顧客予約による部分被覆を、要求した業務予定へ分割変換しない。
+  // 休日・顧客予約・部分被覆を、要求した業務予定へ分割変換しない。
   // 分割すると KIREIDOT の1件が SalonBoard で複数区間になり、両画面の差分を隠すため、
   // 常に元の開始・終了・タイトルのまま登録し、衝突時は明示的な失敗として扱う。
 
@@ -16172,5 +16163,6 @@ module.exports = {
     extractBookingItemsFromCurrentPage,
     shouldUseGroupAccount,
     ensureReserveSalonContext,
+    findScheduleBlockInPage,
   },
 };

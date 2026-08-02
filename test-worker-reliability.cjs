@@ -491,6 +491,58 @@ async function testNeverSyncedCancelIsIdempotent() {
   assert.equal(result.alreadyAbsent, true);
 }
 
+async function testScheduleVerificationUsesCoveringTodoNotTitle() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  const render = async (body) => page.setContent(`
+    <div class="scheduleMainHead" id="STAFF_W000958269_20260806">Hinako</div>
+    <div class="jscScheduleMainTableStaff">
+      <div class="scheduleMainTableLine">${body}</div>
+    </div>
+  `);
+  const verify = () => page.evaluate(_internal.findScheduleBlockInPage, {
+    staffExt: 'W000958269',
+    startTotal: 12 * 60 + 30,
+    endTotal: 18 * 60 + 30,
+    title: '日常業務',
+  });
+
+  await render(`
+    <div class="jscScheduleToDo">
+      <span class="todoTitle">予定あり</span>
+      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;18:30&quot;]</p>
+    </div>
+  `);
+  const coveringTodo = await verify();
+  assert.equal(coveringTodo.ok, true, JSON.stringify(coveringTodo));
+  assert.equal(coveringTodo.matchedBlock.titleMismatch, true);
+
+  await render(`
+    <div class="jscScheduleToDo">
+      <span class="todoTitle">日常業務</span>
+      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;17:30&quot;]</p>
+    </div>
+  `);
+  assert.equal((await verify()).ok, false, 'partial coverage must not be accepted');
+
+  await render(`
+    <div class="jscScheduleToDo isDayOff">
+      <span class="todoTitle">予定あり</span>
+      <p class="scheduleTimeZoneSetting">[&quot;10:00&quot;, &quot;19:00&quot;]</p>
+    </div>
+  `);
+  assert.equal((await verify()).ok, false, 'day off must not be accepted as a business block');
+
+  await render(`
+    <div class="scheduleReservation jscScheduleReservation">
+      <span class="scheduleReserveName">予約のお客様</span>
+      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;18:30&quot;]</p>
+    </div>
+  `);
+  assert.equal((await verify()).ok, false, 'customer reservation must not be accepted as a business block');
+  await browser.close();
+}
+
 function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
   const source = readFileSync(require.resolve('./worker.ts'), 'utf8');
   assert.match(
@@ -564,8 +616,8 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /start <= startTotal && end >= endTotal && actualTitle === norm\(title\)/,
-    'merged schedule blocks must count as confirmed when they contain the requested interval',
+    /if \(start <= startTotal && end >= endTotal\) \{[\s\S]{0,220}titleMismatch:/,
+    'covering business schedules must be confirmed by staff and interval even when SalonBoard rewrites the title',
   );
   assert.match(
     source,
@@ -1096,6 +1148,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 }
 
 (async () => {
+  if (process.env.WORKER_TEST_CASE === 'schedule-verification') {
+    await testScheduleVerificationUsesCoveringTodoNotTitle();
+    console.log('schedule verification test: ok');
+    return;
+  }
   if (process.env.WORKER_TEST_CASE === 'menu-publication') {
     await testMenuPublicationStateIsIndependentFromImportActivity();
     await testMenuPublicationOnlyPushPersistsAndVerifies();
@@ -1124,6 +1181,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   await testEquipmentCanCreateAndRecoverSalonBoardIdIdempotently();
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
+  await testScheduleVerificationUsesCoveringTodoNotTitle();
   await testExplicitSingleSalonContextAndUnpublishedStaffSort();
   testGuardWaitsForOriginalResultBeforeTimeoutCallback();
   testKnownSalonBoardRecoveryBranchesStayEnabled();
