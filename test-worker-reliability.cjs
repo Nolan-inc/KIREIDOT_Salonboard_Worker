@@ -539,10 +539,16 @@ async function testScheduleVerificationUsesCoveringTodoNotTitle() {
   await render(`
     <div class="jscScheduleToDo">
       <span class="todoTitle">日常業務</span>
-      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;17:30&quot;]</p>
+      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;15:00&quot;]</p>
+    </div>
+    <div class="jscScheduleToDo">
+      <span class="todoTitle">予定あり</span>
+      <p class="scheduleTimeZoneSetting">[&quot;15:00&quot;, &quot;18:30&quot;]</p>
     </div>
   `);
-  assert.equal((await verify()).ok, false, 'partial coverage must not be accepted');
+  const adjacentTodos = await verify();
+  assert.equal(adjacentTodos.ok, true, 'adjacent todos must cover the requested availability');
+  assert.equal(adjacentTodos.matchedBlock.sourceCount, 2);
 
   await render(`
     <div class="jscScheduleToDo isDayOff">
@@ -550,7 +556,7 @@ async function testScheduleVerificationUsesCoveringTodoNotTitle() {
       <p class="scheduleTimeZoneSetting">[&quot;10:00&quot;, &quot;19:00&quot;]</p>
     </div>
   `);
-  assert.equal((await verify()).ok, false, 'day off must not be accepted as a business block');
+  assert.equal((await verify()).ok, true, 'day off already protects the requested availability');
 
   await render(`
     <div class="scheduleReservation jscScheduleReservation">
@@ -558,7 +564,21 @@ async function testScheduleVerificationUsesCoveringTodoNotTitle() {
       <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;18:30&quot;]</p>
     </div>
   `);
-  assert.equal((await verify()).ok, false, 'customer reservation must not be accepted as a business block');
+  assert.equal((await verify()).ok, true, 'customer reservation already protects the requested availability');
+
+  await render(`
+    <div class="jscScheduleToDo">
+      <span class="todoTitle">研修</span>
+      <p class="scheduleTimeZoneSetting">[&quot;12:30&quot;, &quot;15:00&quot;]</p>
+    </div>
+    <div class="scheduleReservation jscScheduleReservation">
+      <span class="scheduleReserveName">予約のお客様</span>
+      <p class="scheduleTimeZoneSetting">[&quot;15:15&quot;, &quot;18:30&quot;]</p>
+    </div>
+  `);
+  const gap = await verify();
+  assert.equal(gap.ok, false, 'a real availability gap must still be repaired');
+  assert.deepEqual(gap.uncovered, [{ start: 15 * 60, end: 15 * 60 + 15 }]);
   await browser.close();
 }
 
@@ -635,8 +655,8 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /if \(start <= startTotal && end >= endTotal\) \{[\s\S]{0,220}titleMismatch:/,
-    'covering business schedules must be confirmed by staff and interval even when SalonBoard rewrites the title',
+    /const availabilityCovered = uncovered\.length === 0/,
+    'schedule verification must use merged availability coverage instead of exact title matching',
   );
   assert.match(
     source,
@@ -708,15 +728,20 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     /conflictError\.scheduleRows = rows[\s\S]{0,8000}erasedScheduleRows[\s\S]{0,12000}pushScheduleViaForm\(page,[\s\S]{0,1600}シフト更新前の予定を自動復元できません/,
     'shift batch fallback must restore SalonBoard-only schedule rows that it temporarily erases',
   );
-  assert.doesNotMatch(
+  assert.match(
     source,
-    /partial coverage|partialCoverageCompleted|register uncovered/,
-    'partial coverage must not split or falsely complete an exact business block',
+    /partial availability coverage -> fill gap/,
+    'partial availability coverage must register only the uncovered interval',
   );
-  assert.doesNotMatch(
+  assert.match(
     source,
-    /merged\.some\(\(m\) => m\.start <= startTotal && m\.end >= endTotal\)/,
-    'unrelated schedules and customer reservations must not satisfy exact block verification',
+    /const availabilityCovered = uncovered\.length === 0/,
+    'todos, reservations and day-off intervals must be merged for availability verification',
+  );
+  assert.match(
+    source,
+    /const existingIntervals = await page\.evaluate[\s\S]{0,2600}if \(it\.start > cursor\) blocks\.push/,
+    'custom shifts must subtract existing SalonBoard plans before adding outside-hours blocks',
   );
   assert.match(
     source,

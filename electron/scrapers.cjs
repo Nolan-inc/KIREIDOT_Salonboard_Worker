@@ -3022,10 +3022,12 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
 //     - メモ:       input[name=schMemo]  (最大100)
 //     - 登録:       a#regist
 // =====================================================================
-// スケジュール画面 (salonSchedule) の対象スタッフ列から、要求区間を完全に覆う
-// 予定ブロックを探す (page.evaluate 用)。予定は reserveId を持たず一覧からも読めないため、
-// 登録前の冪等チェックと登録後の実在確認の両方でこの関数を使う。
-// 戻り値 blocks には対象スタッフ列の全予定を入れ、失敗診断 (何が実在するか) に使う。
+// スケジュール画面 (salonSchedule) の対象スタッフ列から、要求区間が予約受付不能な
+// 状態で完全に覆われているかを調べる (page.evaluate 用)。SalonBoard は重複する予定を
+// 登録時に破棄するため、単一の同名予定だけを探すと、連続予定・顧客予約・休日で既に
+// 埋まっている枠を誤失敗にしてしまう。業務上の目的は二重予約を防ぐことなので、同一
+// スタッフの予定/予約/休日の和集合が要求区間を覆えば同期済みと判定する。
+// uncovered には未保護の時間帯を返し、呼び出し側がその隙間だけを予定登録できるようにする。
 function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
   const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"]')).map((el) => {
@@ -3040,9 +3042,7 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
   const line = staffTable.querySelectorAll('.scheduleMainTableLine')[staffIndex];
   if (!line) return { ok: false, reason: 'staff_line_not_found', blocks: [] };
   const blocks = [];
-  let found = false;
   const targetTitle = norm(title);
-  let matchedBlock = null;
   for (const el of Array.from(line.querySelectorAll('.jscScheduleToDo'))) {
     const isDayOff = el.classList.contains('isDayOff');
     const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
@@ -3052,24 +3052,8 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     const end = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
     const actualTitle = norm(el.querySelector('.todoTitle')?.textContent);
     blocks.push({ start, end, title: actualTitle, isDayOff });
-    // 休日が対象区間を覆っていても、目的の業務予定が表示されていることにはならない。
-    // KIREIDOT と SalonBoard の完全一致を優先し、診断用 blocks にだけ残す。
-    if (isDayOff) continue;
-    // SalonBoard は予定タイトルを「予定あり」のような汎用表示へ置換したり、
-    // 連続・隣接する予定を1つの表示ブロックへ結合したりする。そのため業務ブロックの
-    // 同期確認ではタイトル/メモを真実源にせず、同一スタッフの「予定」が要求区間を
-    // 完全に覆うことを成功条件にする。部分被覆、休日、顧客予約は成功にしない。
-    if (start <= startTotal && end >= endTotal) {
-      found = true;
-      matchedBlock = {
-        start,
-        end,
-        title: actualTitle,
-        titleMismatch: !!targetTitle && actualTitle !== targetTitle,
-      };
-    }
   }
-  // 顧客予約も診断情報には含めるが、業務予定の代わりとして成功扱いにはしない。
+  // 顧客予約も、その時間帯を新規予約不可にする実在枠として被覆計算に含める。
   for (const el of Array.from(line.querySelectorAll('.scheduleReservation, .jscScheduleReservation'))) {
     if (el.classList.contains('jscScheduleToDo') || el.closest('.jscScheduleToDo')) continue;
     const tz = el.querySelector('.scheduleTimeZoneSetting')?.textContent || '';
@@ -3083,17 +3067,52 @@ function findScheduleBlockInPage({ staffExt, startTotal, endTotal, title }) {
     );
     blocks.push({ start, end, title: reservationName, isDayOff: false, isReservation: true });
   }
-  // 顧客予約は同時間帯でも業務予定の代わりにしない。タイトル相違は診断情報として
-  // 返すだけで失敗にはせず、KD/SB双方で予定枠が確保されている状態を優先する。
-  return found
-    ? { ok: true, reason: null, blocks, matchedBlock }
-    : { ok: false, reason: 'exact_schedule_not_found', blocks, matchedBlock: null };
+
+  // 要求区間と交差する全ての受付不能区間をマージし、未被覆の隙間を算出する。
+  // 隣接区間も結合する (例 16:30-17:00「研修」+17:00-19:30「予定あり」)。
+  const coverage = blocks
+    .filter((b) => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
+    .map((b) => ({ ...b, start: Math.max(startTotal, b.start), end: Math.min(endTotal, b.end) }))
+    .filter((b) => b.end > b.start)
+    .sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  for (const block of coverage) {
+    const prev = merged[merged.length - 1];
+    if (!prev || block.start > prev.end) {
+      merged.push({ start: block.start, end: block.end, sources: [block] });
+    } else {
+      prev.end = Math.max(prev.end, block.end);
+      prev.sources.push(block);
+    }
+  }
+  const uncovered = [];
+  let cursor = startTotal;
+  for (const interval of merged) {
+    if (interval.start > cursor) uncovered.push({ start: cursor, end: interval.start });
+    cursor = Math.max(cursor, interval.end);
+    if (cursor >= endTotal) break;
+  }
+  if (cursor < endTotal) uncovered.push({ start: cursor, end: endTotal });
+  const availabilityCovered = uncovered.length === 0;
+  const matchedBlock = availabilityCovered && merged.length === 1
+    ? {
+        start: merged[0].start,
+        end: merged[0].end,
+        title: merged[0].sources[0]?.title || '',
+        titleMismatch: !!targetTitle && merged[0].sources.some((b) => b.title !== targetTitle),
+        sourceCount: merged[0].sources.length,
+      }
+    : null;
+  return availabilityCovered
+    ? { ok: true, reason: null, blocks, matchedBlock, coverage: merged, uncovered: [] }
+    : { ok: false, reason: 'schedule_availability_gap', blocks, matchedBlock: null, coverage: merged, uncovered };
 }
 
 async function pushScheduleViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   const enablePush = !!opts.enablePush;
   const scheduleWriteAttempt = Number(opts._scheduleWriteAttempt || 1);
+  const scheduleGapWriteAttempt = Number(opts._scheduleGapWriteAttempt || 1);
   const p = { ...(payload || {}) };
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
@@ -3112,8 +3131,10 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
 
   // 終了時刻 = 開始 + 所要(分)。所要が無ければ60分。
   const durMin = (p.duration_min != null && Number.isFinite(Number(p.duration_min))) ? Number(p.duration_min) : 60;
-  let startTotal = when.hour * 60 + when.minute;
-  let endTotal = startTotal + durMin;
+  const requestedStartTotal = when.hour * 60 + when.minute;
+  const requestedEndTotal = requestedStartTotal + durMin;
+  let startTotal = requestedStartTotal;
+  let endTotal = requestedEndTotal;
   let endHour = Math.floor(endTotal / 60);
   let endMin = endTotal % 60;
   let startHH = String(when.hour).padStart(2, '0');
@@ -3228,10 +3249,25 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       confirmed: { title, confirmed_scheduled_at: p.scheduled_at },
     };
   }
-
-  // 休日・顧客予約・部分被覆を、要求した業務予定へ分割変換しない。
-  // 分割すると KIREIDOT の1件が SalonBoard で複数区間になり、両画面の差分を隠すため、
-  // 常に元の開始・終了・タイトルのまま登録し、衝突時は明示的な失敗として扱う。
+  // 要求区間の一部が既存予定/予約/休日で埋まっている場合、元区間をそのままPOSTすると
+  // SalonBoardが重複エラーまたは無言破棄にする。未被覆の先頭区間だけを登録し、必要なら
+  // 同一ジョブ内で次の隙間へ進む。これにより既存予約を壊さず受付不能状態を完成させる。
+  const uncovered = Array.isArray(existing?.uncovered) ? existing.uncovered : [];
+  const partialCoverage = uncovered.length > 0 && Array.isArray(existing?.coverage) && existing.coverage.length > 0;
+  if (partialCoverage) {
+    startTotal = Number(uncovered[0].start);
+    endTotal = Number(uncovered[0].end);
+    endHour = Math.floor(endTotal / 60);
+    endMin = endTotal % 60;
+    startHH = String(Math.floor(startTotal / 60)).padStart(2, '0');
+    startMM = String(startTotal % 60).padStart(2, '0');
+    endHH = String(endHour).padStart(2, '0');
+    endMM = String(endMin).padStart(2, '0');
+    console.log(
+      `[schedule] partial availability coverage -> fill gap ${startTotal}-${endTotal} ` +
+      `(requested=${requestedStartTotal}-${requestedEndTotal}, gaps=${JSON.stringify(uncovered)})`,
+    );
+  }
 
   // (2) 予約登録フォームを開く (予約と同じ URL + パラメータ)。
   // SalonBoard はスケジュールを表示した瞬間の rlastupdate を楽観ロックとして使う。
@@ -3724,7 +3760,7 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
       }
       verified = await page.evaluate(
         findScheduleBlockInPage,
-        { staffExt, startTotal, endTotal, title },
+        { staffExt, startTotal: requestedStartTotal, endTotal: requestedEndTotal, title },
       ).catch((e) => ({ ok: false, reason: `verify_exception:${e?.message ?? e}` }));
       verifyNavigationError = '';
       if (verified?.ok) break;
@@ -3738,6 +3774,21 @@ async function pushScheduleViaForm(page, payload, opts = {}) {
     return fail(`予定登録後のスケジュール確認画面を開けません: ${verifyNavigationError}`, 'CONFIRMATION_MISMATCH', false);
   }
   if (!verified?.ok) {
+    // 部分被覆の隙間を1つ埋めた結果、まだ別の隙間が残る場合は同一ジョブ内で続行する。
+    // serverAccepted=false でも実在確認上の被覆が増えていれば、POST完了サインの画面差分に
+    // 依存せず次へ進める。上限を設け、DOM誤認時の無限再帰を防ぐ。
+    const remainingGaps = Array.isArray(verified?.uncovered) ? verified.uncovered : [];
+    const remainingMinutes = remainingGaps.reduce((sum, gap) => sum + Math.max(0, Number(gap.end) - Number(gap.start)), 0);
+    const beforeGapMinutes = uncovered.reduce((sum, gap) => sum + Math.max(0, Number(gap.end) - Number(gap.start)), 0);
+    if (
+      partialCoverage && scheduleGapWriteAttempt < 8 && remainingGaps.length > 0 &&
+      remainingMinutes < beforeGapMinutes
+    ) {
+      return pushScheduleViaForm(page, payload, {
+        ...opts,
+        _scheduleGapWriteAttempt: scheduleGapWriteAttempt + 1,
+      });
+    }
     // POST受理(serverAccepted)でも実在確認が取れるまでは成功にしない。
     // SalonBoardは既存予定と重複する予定登録などをPOST受理後に破棄することがあり
     // (2026-07-25 中目黒: 既存「なつき面談」と重複した予定が消えたのに synced 扱いの偽成功)、
@@ -5433,10 +5484,49 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
     // 重複防止)。KD由来の休憩/業務や店舗手入力の予定は保持する(全削除すると
     // 2026-07-26 代々木上原のようにSBの予定を巻き添えで消してしまう)。
     await deleteOwnJikangaiRows();
-    // 時間外ブロック (ベースパターンの勤務時間のうち、シフト外の前後) を予定に
+    // 時間外ブロック (ベースパターンの勤務時間のうち、シフト外の前後) を予定にする。
+    // ただしSalonBoardのモーダルは既存予定と1分でも重なる行を拒否する。既存予定を
+    // 消すのではなく、その区間を差し引いた未被覆の隙間だけ「時間外」で埋める。
+    // 例: 10:00-11:30を止めたいが10:30-11:00に研修がある場合は
+    // 10:00-10:30 + 11:00-11:30だけを追加する。
+    const requestedBlocks = [];
+    if (toMin(cp.start) > toMin(cp.base.start)) requestedBlocks.push({ s: cp.base.start, e: cp.start });
+    if (toMin(cp.end) < toMin(cp.base.end)) requestedBlocks.push({ s: cp.end, e: cp.base.end });
+    const existingIntervals = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#yoteiArea .tblSetInfoBasic')).flatMap((r) => {
+        const sh = Number(r.querySelector('.jscSchStartHours')?.value);
+        const sm = Number(r.querySelector('.jscSchStartMinutes')?.value);
+        const eh = Number(r.querySelector('.jscSchEndHours')?.value);
+        const em = Number(r.querySelector('.jscSchEndMinutes')?.value);
+        const start = sh * 60 + sm;
+        const end = eh * 60 + em;
+        return Number.isFinite(start) && Number.isFinite(end) && end > start
+          ? [{ start, end }]
+          : [];
+      }),
+    ).catch(() => []);
+    const minToTime = (minutes) =>
+      `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
     const blocks = [];
-    if (toMin(cp.start) > toMin(cp.base.start)) blocks.push({ s: cp.base.start, e: cp.start });
-    if (toMin(cp.end) < toMin(cp.base.end)) blocks.push({ s: cp.end, e: cp.base.end });
+    for (const requested of requestedBlocks) {
+      const reqStart = toMin(requested.s);
+      const reqEnd = toMin(requested.e);
+      const overlaps = existingIntervals
+        .map((it) => ({ start: Math.max(reqStart, it.start), end: Math.min(reqEnd, it.end) }))
+        .filter((it) => it.end > it.start)
+        .sort((a, b) => a.start - b.start || b.end - a.end);
+      let cursor = reqStart;
+      for (const it of overlaps) {
+        if (it.start > cursor) blocks.push({ s: minToTime(cursor), e: minToTime(it.start) });
+        cursor = Math.max(cursor, it.end);
+      }
+      if (cursor < reqEnd) blocks.push({ s: minToTime(cursor), e: minToTime(reqEnd) });
+    }
+    if (blocks.length !== requestedBlocks.length || existingIntervals.length > 0) {
+      warnings.push(
+        `${cp.staffName} ${cp.date}: 既存予定${existingIntervals.length}件を保持し、時間外を未被覆${blocks.length}区間へ分割`,
+      );
+    }
     for (const b of blocks) {
       await page.locator('#yoteiAdd a.mod_btn_add_06:visible').first().click({ timeout: 8_000 });
       await page.waitForTimeout(250);
