@@ -528,6 +528,11 @@ type Job = {
     login_id: string;
     password: string;
     base_url: string | null;
+    // Admin が salonboard_credentials.group_account_id から明示する。
+    // salon_id(Hコード)は単店舗にも存在するため、グループ判定には使わない。
+    // 未提供(null/undefined)の旧APIだけ salon_id へ後方互換フォールバックする。
+    salon_id?: string | null;
+    is_group_account?: boolean | null;
     // クラウド worker 用: 店舗ごとの住宅/ISP プロキシ (Admin が復号して同梱)。
     // 省略時は env SB_PROXY_* / direct にフォールバック (resolveLaunchOptions 参照)。
     proxy?: {
@@ -993,6 +998,9 @@ async function handleJob(job: Job): Promise<void> {
   }
 
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
+  const accountIsGroup =
+    job.credentials.is_group_account ??
+    !!(job.credentials.salon_id && String(job.credentials.salon_id).trim());
   // グループ店舗は同じSalonBoardログインIDを共有する。店舗別profileだと店舗数分の
   // login POSTが発生するため、認証セッションと出口IPはアカウント単位で共有する。
   const sessionKey = sessionKeyFor(job.credentials.login_id, baseUrl);
@@ -1098,6 +1106,7 @@ async function handleJob(job: Job): Promise<void> {
     let auth = await isLoggedIn(page, baseUrl, {
       genre: wAuthGenre,
       salonId: wAuthSalonId,
+      isGroupAccount: accountIsGroup,
     });
     if (auth === "captcha") {
       await report(
@@ -1539,6 +1548,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
         shopName: (job as { shop_name?: string | null }).shop_name ?? null,
         genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
+        isGroupAccount: accountIsGroup,
       });
       await reportScraperResult(
         job,
@@ -1651,6 +1661,7 @@ async function handleJob(job: Job): Promise<void> {
           genre: chGenre,
           salonId: chSalonId,
           shopName: chShopName,
+          isGroupAccount: accountIsGroup,
           relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
         });
         if (
@@ -1820,6 +1831,7 @@ async function handleJob(job: Job): Promise<void> {
               salonId,
               shopName,
               genre,
+              isGroupAccount: accountIsGroup,
               // 失効時の同一ジョブ内自己回復。
               relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
             });
@@ -1847,6 +1859,7 @@ async function handleJob(job: Job): Promise<void> {
         genre,
         salonId,
         shopName,
+        isGroupAccount: accountIsGroup,
         relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       });
       await reportScraperResult(job, "push_shifts", result, {}, page);
@@ -1863,6 +1876,7 @@ async function handleJob(job: Job): Promise<void> {
         genre,
         salonId,
         shopName,
+        isGroupAccount: accountIsGroup,
         businessHours: (job as { business_hours?: unknown }).business_hours ?? null,
         relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string; warnings?: string[] };
@@ -1899,6 +1913,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId,
         shopName,
         genre,
+        isGroupAccount: accountIsGroup,
       });
       await reportScraperResult(
         job,
@@ -1924,6 +1939,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId,
         shopName,
         genre,
+        isGroupAccount: accountIsGroup,
       });
       await reportScraperResult(
         job,
@@ -1990,7 +2006,7 @@ async function handleJob(job: Job): Promise<void> {
       const aShopName = (job as { shop_name?: string | null }).shop_name ?? null;
       // Akamai warmup (fetch_bookings と同じ): cold profile が深いページで tarpit → SESSION_EXPIRED を防ぐ。
       try {
-        const warmupPath = aSalonId ? "/CNC/groupTop/" : "/KLP/top/";
+        const warmupPath = accountIsGroup ? "/CNC/groupTop/" : "/KLP/top/";
         await page.goto(new URL(warmupPath, baseUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
         await page.waitForTimeout(2200);
         await page.mouse.move(240, 220).catch(() => {});
@@ -2006,6 +2022,7 @@ async function handleJob(job: Job): Promise<void> {
         genre: aGenre,
         salonId: aSalonId,
         shopName: aShopName,
+        isGroupAccount: accountIsGroup,
         relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
       });
       await reportScraperResult(job, "push_acceptance", result, {}, page);
@@ -2056,6 +2073,7 @@ async function handleJob(job: Job): Promise<void> {
           genre: wGenre,
           salonId: wSalonId,
           shopName: wShopName,
+          isGroupAccount: accountIsGroup,
         });
       } catch (e) {
         // OpenClaw 自己修復フォールバック: 固定セレクタがHTML変化で壊れた時、Claudeに
@@ -2137,7 +2155,7 @@ async function handleJob(job: Job): Promise<void> {
         // グループ/hair アカウント(salonId有り)は /KLP/top/ が無効パスで SESSION_EXPIRED に
         // なり、後続のサロン入場(/CLP/bt/top/)まで壊す(実機 2026-06-28: ADER鯖江)。
         // warmup 先を group は /CNC/groupTop/ に出し分ける(Akamaiトラスト構築は同様に効く)。
-        const warmupPath = salonId ? "/CNC/groupTop/" : "/KLP/top/";
+        const warmupPath = accountIsGroup ? "/CNC/groupTop/" : "/KLP/top/";
         await page
           .goto(new URL(warmupPath, baseUrl).toString(), {
             waitUntil: "domcontentloaded",
@@ -2185,6 +2203,7 @@ async function handleJob(job: Job): Promise<void> {
           genre,
           salonId,
           shopName,
+          isGroupAccount: accountIsGroup,
           loginId: job.credentials.login_id,
           password: job.credentials.password,
           // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
@@ -2299,6 +2318,7 @@ async function handleJob(job: Job): Promise<void> {
           genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
           salonId: (job.credentials as { salon_id?: string | null }).salon_id ?? null,
           shopName: (job as { shop_name?: string | null }).shop_name ?? null,
+          isGroupAccount: accountIsGroup,
           relogin: makeRelogin(
             page,
             baseUrl,
@@ -2398,6 +2418,7 @@ async function handleJob(job: Job): Promise<void> {
             genre,
             salonId,
             shopName,
+            isGroupAccount: accountIsGroup,
             loginId: job.credentials.login_id,
             password: job.credentials.password,
             // ジョブ開始時は認証済みでも、groupTop 選択や掲載管理の深い画面で
@@ -3295,7 +3316,7 @@ async function saveStorageState(ctx: BrowserContext, path: string): Promise<void
 async function isLoggedIn(
   page: Page,
   baseUrl: string,
-  opts?: { genre?: string; salonId?: string | null }
+  opts?: { genre?: string; salonId?: string | null; isGroupAccount?: boolean | null }
 ): Promise<"logged_in" | "needs_login" | "captcha" | "unknown"> {
   // 注意: "/KLP/" (末尾スラッシュのみ) は 404「指定されたURLは存在しません」
   // エラー画面を返す。ログインフォームが無く URL も /login を含まないため、旧実装は
@@ -3309,7 +3330,8 @@ async function isLoggedIn(
   //   ログイン失敗の真因)。ジャンル/グループで管理TOPを出し分け、サロン一覧も logged_in
   //   として認める。
   const genre = opts?.genre === "hair" ? "hair" : "esthetic";
-  const isGroup = !!(opts?.salonId && String(opts.salonId).trim());
+  const isGroup =
+    opts?.isGroupAccount ?? !!(opts?.salonId && String(opts.salonId).trim());
   const candidates: string[] = [];
   if (isGroup) candidates.push(new URL("/CNC/groupTop/", baseUrl).toString());
   candidates.push(
@@ -4266,6 +4288,8 @@ async function pushBookingViaProvenForm(
   const baseUrl = job.credentials.base_url ?? "https://salonboard.com/";
   const salonId =
     (job.credentials as { salon_id?: string | null }).salon_id ?? null;
+  const isGroupAccount =
+    job.credentials.is_group_account ?? !!(salonId && String(salonId).trim());
   const shopName = (job as { shop_name?: string | null }).shop_name ?? null;
   // reserveId reconcile の scrapeBookings 用 (hair/esthetic で一覧構造が違う)。
   const genre = (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic";
@@ -4280,6 +4304,7 @@ async function pushBookingViaProvenForm(
           salonId: string | null;
           shopName: string | null;
           genre: string;
+          isGroupAccount: boolean;
           relogin?: () => Promise<boolean>;
         },
       ) => Promise<PushBookingResult>;
@@ -4290,6 +4315,7 @@ async function pushBookingViaProvenForm(
     salonId,
     shopName,
     genre,
+    isGroupAccount,
     // 失効時の同一ジョブ内自己回復 (スケジュール到達時に expired を踏んだら1回だけ再ログイン)。
     relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, loginEndpoint),
   });

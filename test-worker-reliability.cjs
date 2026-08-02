@@ -4,7 +4,65 @@ const { chromium } = require('playwright');
 const {
   deleteScheduleViaForm,
   cancelBookingViaForm,
+  pushStaffViaForm,
+  _internal,
 } = require('./electron/scrapers.cjs');
+
+async function testExplicitSingleSalonContextAndUnpublishedStaffSort() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  const visited = [];
+  let sortSubmits = 0;
+
+  await page.route('http://single.test/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    visited.push(url.pathname);
+    if (request.method() === 'POST') sortSubmits += 1;
+    if (url.pathname.includes('/schedule/salonSchedule/')) {
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: `
+        <nav>予約管理 掲載管理</nav>
+        <main id="scheduleItemArea">スケジュール 予約一覧</main>
+        <footer>Une limit Silk【アンリミット シルク】（旧:Une limit 代官山店） H000738520</footer>` });
+      return;
+    }
+    if (url.pathname === '/CNK/draft/staffList') {
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: `
+        <form id="staffSortForm">
+          <input type="hidden" name="frmStaffListStafferDtoList[0].staffId" value="W001210861">
+          <input name="frmStaffListStafferDtoList[0].sortNo" value="" disabled>
+          <input type="hidden" name="frmStaffListStafferDtoList[0].presentFlg" value="0">
+        </form>` });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<p>ok</p>' });
+  });
+
+  const context = await _internal.ensureReserveSalonContext(page, 'http://single.test/', {
+    salonId: null,
+    shopName: 'Unelimit Silk　代官山店',
+    genre: 'esthetic',
+    isGroupAccount: false,
+  });
+  assert.equal(context.ok, true, JSON.stringify(context));
+
+  const staff = await pushStaffViaForm(page, {
+    external_id: 'W001210861',
+    sort_no: 5,
+    is_published: false,
+  }, {
+    baseUrl: 'http://single.test/',
+    enablePush: true,
+    salonId: 'H000623535',
+    shopName: 'Unelimit WAO! 新宿店',
+    isGroupAccount: false,
+  });
+  assert.equal(staff.status, 'ok', JSON.stringify(staff));
+  assert.equal(staff.confirmed.sortSkippedForUnpublished, true);
+  assert.equal(sortSubmits, 0, 'disabled sort order for an unpublished row must not be submitted');
+  assert.equal(visited.some((p) => /groupTop/i.test(p)), false, `single account opened groupTop: ${visited.join(',')}`);
+  await browser.close();
+}
 
 async function testHtmlDeleteConfirmation() {
   // CI/開発Macのどちらでも、worker本番と同じシステムChromeを使う。
@@ -680,6 +738,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
 (async () => {
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
+  await testExplicitSingleSalonContextAndUnpublishedStaffSort();
   testGuardWaitsForOriginalResultBeforeTimeoutCallback();
   testKnownSalonBoardRecoveryBranchesStayEnabled();
   console.log('worker reliability tests: ok');

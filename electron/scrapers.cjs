@@ -795,9 +795,12 @@ async function scrapeHairBookings(page, opts = {}) {
       console.log('[scrape] hair warmup expired -> relogin');
       const ok = await opts.relogin().catch(() => false);
       if (ok) {
-        // ログインし直したのでサロンを選び直してから再 warmup。
-        await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+        // グループだけサロンを選び直す。単店舗は存在しない groupTop を開かず、
+        // fresh login 後の現在店舗から直接 schedule warmup をやり直す。
+        if (shouldUseGroupAccount(opts)) {
+          await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
+          await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
+        }
         continue;
       }
     }
@@ -1201,7 +1204,7 @@ async function scrapeBookings(page, opts = {}) {
   // 居る。対象サロンを選んで店舗文脈(/CLP/bt/)に入ってから取得する。未選択のまま
   // /CLP/bt/schedule/ を開くと session_expired になる(実機 2026-06-28: ADER鯖江=グループ hair)。
   // 単一店舗(salonId/shopName無し、または groupTop 非該当)では ensureSalonSelected が no-op。
-  if (opts.salonId || opts.shopName) {
+  if (shouldUseGroupAccount(opts)) {
     // グループアカウントはログイン後 warmup(/KLP/top/)に飛ぶとサロン未選択のため
     // session_expired になる(実機 2026-06-28: ADER鯖江)。warmup 後はページが groupTop で
     // ないので ensureSalonSelected が no-op になってしまう。明示的に /CNC/groupTop/ へ行き、
@@ -1217,6 +1220,9 @@ async function scrapeBookings(page, opts = {}) {
     const sel = await ensureSalonSelected(page, {
       salonId: opts.salonId,
       shopName: opts.shopName,
+      genre: opts.genre,
+      baseUrl: opts.baseUrl,
+      isGroupAccount: opts.isGroupAccount,
     }).catch((e) => ({ ok: false, reason: e?.message ?? String(e) }));
     diag.push(`salon-select: ${JSON.stringify(sel)}`);
     console.log(`[scrape] salon-select ${JSON.stringify(sel)}`);
@@ -1229,7 +1235,8 @@ async function scrapeBookings(page, opts = {}) {
       return await scrapeHairBookings(page, {
         range, diag, baseUrl: opts.baseUrl,
         // 失効時の自己回復(relogin)後にサロンを選び直すため salonId/shopName も渡す。
-        salonId: opts.salonId, shopName: opts.shopName, relogin: opts.relogin,
+        salonId: opts.salonId, shopName: opts.shopName,
+        isGroupAccount: opts.isGroupAccount, relogin: opts.relogin,
         abortSignal: opts.abortSignal,
       });
     } catch (e) {
@@ -2550,6 +2557,13 @@ function reservePathRoot(genre) {
   return genre === 'hair' ? '/CLP/bt' : '/KLP';
 }
 
+// salon_id(Hコード)は単店舗アカウントにも設定される。Admin が明示する
+// isGroupAccount を優先し、未提供の旧Workerだけ salonId へ後方互換する。
+function shouldUseGroupAccount(opts = {}) {
+  if (typeof opts.isGroupAccount === 'boolean') return opts.isGroupAccount;
+  return !!String(opts.salonId || '').trim();
+}
+
 // グループアカウント(ADER等)は 1 ログインで複数サロンを持つため、予約書き込み前に
 // /CNC/groupTop/ で対象サロンを選び、店舗文脈(hairなら /CLP/bt/)を確立する。
 // 未選択のまま schedule/reserve に入ると「SALON BOARD : エラー」/セッション切れになる。
@@ -2562,16 +2576,39 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   // 毎回 groupTop を開き直すと、同画面の店舗リンクが一時的に0件になる個体で
   // 正しい店舗文脈まで捨てて STORE_SELECT_REQUIRED にしてしまう。現在ページの
   // フッターに対象Hコードまたは店舗名が明示されている場合だけ安全にスキップする。
-  const pageMatchesTarget = () => page.evaluate(({ salonId, shopName }) => {
+  const isGroupAccount = shouldUseGroupAccount(opts);
+  const pageContext = () => page.evaluate(({ salonId, shopName, explicitSingle }) => {
       const norm = (value) => String(value || '')
         .normalize('NFKC')
         .replace(/[\s\u3000]+/g, '')
         .toLowerCase();
-      const body = norm(document.body?.innerText || '');
+      const rawBody = String(document.body?.innerText || '');
+      const body = norm(rawBody);
       const id = norm(salonId);
       const name = norm(shopName);
-      return (id.length >= 6 && body.includes(id)) || (name.length >= 6 && body.includes(name));
-    }, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => false);
+      const targetMatched =
+        (id.length >= 6 && body.includes(id)) ||
+        (name.length >= 6 && body.includes(name));
+      const pathIsSchedule = /\/(?:CLP\/bt|KLP)\/schedule\/salonSchedule\/?/i.test(location.pathname);
+      const hasPassword = !!document.querySelector('input[type="password"]');
+      const errored = /システムエラー|ユーザエラー|指定されたURLは存在しません|サロンが選択されていません|再度ログイン|有効期限/.test(rawBody);
+      const hasScheduleUi =
+        /予約管理|スケジュール|予約一覧|予約登録/.test(rawBody) ||
+        !!document.querySelector('#scheduleItemArea, #salonSchedule, form[action*="schedule"]');
+      // 単店舗ログインは認証情報そのものが店舗境界。店舗名の改称・装飾表記で
+      // false negative にしない一方、ログイン/エラー/無関係ページは肯定しない。
+      const verifiedSingleSchedule =
+        explicitSingle && pathIsSchedule && hasScheduleUi && !hasPassword && !errored;
+      return { targetMatched, verifiedSingleSchedule, pathIsSchedule, hasPassword, errored, hasScheduleUi };
+    }, {
+      salonId: opts.salonId,
+      shopName: opts.shopName,
+      explicitSingle: opts.isGroupAccount === false,
+    }).catch(() => ({ targetMatched: false, verifiedSingleSchedule: false }));
+  const pageMatchesTarget = async () => {
+    const context = await pageContext();
+    return !!(context.targetMatched || context.verifiedSingleSchedule);
+  };
   const schedulePath = opts.genre === 'hair'
     ? '/CLP/bt/schedule/salonSchedule/'
     : '/KLP/schedule/salonSchedule/';
@@ -2596,7 +2633,7 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
   // ★単独アカウント(salonId無し)は /CNC/groupTop/ が存在しない(「指定されたURLは存在しません」)。
   //   直行で確認できない主因はセッション失効なので、relogin→直行をもう一度だけ試し、
   //   groupTop 選択ループには進まない (2026-08-01 代官山 group_top_no_stores 誤失敗の根治)。
-  if (!opts.salonId) {
+  if (!isGroupAccount) {
     if (typeof opts.relogin === 'function') {
       const ok = await opts.relogin().catch(() => false);
       if (ok && (await gotoDirectSchedule())) {
@@ -2614,6 +2651,7 @@ async function ensureReserveSalonContext(page, baseUrl, opts) {
         shopName: opts.shopName,
         genre: opts.genre,
         baseUrl,
+        isGroupAccount: true,
       }).catch((e) => ({ ok: false, selected: false, reason: e?.message ?? String(e) }));
       if (last.ok) return last;
       // groupTop の店舗リンクはログイン直後に一度だけ空になることがある。
@@ -2907,7 +2945,7 @@ async function enrichEquipmentFromDetail(page, rows, baseUrl, opts = {}) {
   //   作ってから詳細を開くと通る。これをしないと HotPepper(BF)予約の設備がほぼ全件0件になる。
   const establishCtx = async () => {
     try {
-      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
       const ctxUrl = genre === 'hair'
         ? new URL('/CLP/bt/schedule/salonSchedule/', base).toString()
         : new URL('/KLP/reserve/reserveList/init', base).toString();
@@ -4434,7 +4472,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
   const selectSalon = async (viaGroupTop) => {
     // hair以外でも、グループ配下のサロン (salonIdあり。例: ヘアグループADER配下の
     // キレイサロンGINA) はサロン選択が必要。単店エステ (salonId無し) は従来どおり no-op。
-    if (navGenre !== 'hair' && !opts.salonId) return;
+    if (!shouldUseGroupAccount(opts)) return;
     if (viaGroupTop) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
     }
@@ -4443,6 +4481,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       shopName: opts.shopName,
       genre: navGenre,
       baseUrl,
+      isGroupAccount: opts.isGroupAccount,
     }).catch(() => {});
   };
   // 「毎月の受付設定」へ。現在文脈のナビリンクをクリック優先(hairは直gotoで失効しやすい)→失敗時 bare-goto。
@@ -4491,7 +4530,7 @@ async function pushShiftsViaForm(page, payload, opts = {}) {
       if (await gotoShiftDirect()) return true;
       // ★グループ配下のキレイサロン: サロン未選択だと /KLP 直行が弾かれる。
       //   groupTop で対象サロンを選択してから再試行する。
-      if (opts.salonId) {
+      if (shouldUseGroupAccount(opts)) {
         await selectSalon(true);
         if (await gotoShiftDirect()) return true;
       }
@@ -6903,7 +6942,7 @@ async function cancelViaSchedulePopup(page, p, opts = {}) {
   const reserveId = String(p.external_booking_id || '').trim();
   if (!custName && !bookingId) return { ok: false, reason: 'no customer_name/booking_id to match' };
 
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   const schedUrl = new URL(`${root}/schedule/salonSchedule/?date=${ymd}`, baseUrl).toString();
   await page.goto(schedUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
@@ -7015,7 +7054,7 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
   if (!reserveId && p.scheduled_at) {
     try {
       // グループ店舗対策: 予約一覧に入る前にサロン選択を確認。
-      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
       const when = parseJstPartsForPush(p.scheduled_at);
       if (when) {
         const target = {
@@ -7108,7 +7147,7 @@ async function cancelBookingViaForm(page, payload, opts = {}) {
     // hair はエステ用 reserveList がセッションを壊すため、スケジュール(リンククリック相当の
     // 日付なしURL) で文脈を作る。
     try {
-      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+      await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
       const ctxUrl = cGenre === 'hair'
         ? new URL('/CLP/bt/schedule/salonSchedule/', baseUrl).toString()
         : new URL('/KLP/reserve/reserveList/init', baseUrl).toString();
@@ -8790,14 +8829,14 @@ async function scrapeStylists(page, opts = {}) {
   // 直接遷移すると「ユーザエラー」ページに着地する(掲載スタイリスト一覧は跳ね返らず
   // エラーになるため ensureSalonSelected も選択に入れず0件になる。ADER 郡山で判明)。
   // salonId があれば先に groupTop でサロンを選んでから一覧へ入る。
-  if (opts.salonId) {
+  if (shouldUseGroupAccount(opts)) {
     await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   }
   await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   // まだ groupTop に跳ね返された場合はサロンを選び直して入り直す。
-  const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+  const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount });
   if (sel.selected) {
     await page.goto(STYLIST_LIST_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
@@ -8890,7 +8929,7 @@ async function scrapeStyles(page, opts = {}) {
 
     // 1ページ目: グループ店舗で groupTop に跳ね返された場合はサロンを選び直して入り直す。
     if (pageNum === 1) {
-      const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+      const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount });
       if (sel.selected) {
         await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
         await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
@@ -9353,7 +9392,7 @@ async function scrapeSalonInfo(page, opts = {}) {
   //   .salonTopCopy、frmCnkSalonEditSalonCommentDto.messageStylistName / .messagePost。
   let profile = null;
   try {
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
     await page
       .goto(draftUrl(opts.genre, 'salonEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 })
       .catch(() => {});
@@ -9459,7 +9498,7 @@ async function pushSalonProfileViaForm(page, payload, opts = {}) {
     return { status: 'failed', reason, errorCode, manualRequired };
   };
 
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   await page
     .goto(draftUrl(opts.genre, 'salonEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 })
     .catch(() => {});
@@ -9572,7 +9611,7 @@ async function pushKodawariViaForm(page, payload, opts = {}) {
   if (!/^[A-Za-z]{0,4}\d{6,}$/.test(pageId)) {
     return fail(`こだわりの pageId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
   }
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   await page.goto(draftUrl(opts.genre, 'kodawariList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
   // 編集ページを開く: 行の編集リンク onclick=kodawariListEdit(event,'<pageId>') を実クリックし、
@@ -9681,7 +9720,7 @@ async function pushFeatureViaForm(page, payload, opts = {}) {
     return fail(`特集の specialId (external_id) が不正です: ${p.external_id}`, 'BAD_PAYLOAD', true);
   }
   const wantPublished = p.is_published !== false;
-  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   await page.goto(draftUrl(opts.genre, 'specialList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
   if ((await page.locator('form#specialListPresentForm, [name="specialId"]').count().catch(() => 0)) === 0) {
@@ -11910,6 +11949,7 @@ async function deleteEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
 async function ensureSalonSelected(page, opts = {}) {
   const salonId = (opts.salonId || '').trim().toUpperCase();
   const shopName = (opts.shopName || '').trim();
+  const isGroupAccount = shouldUseGroupAccount(opts);
 
   let onGroupTop = /\/(?:CNC|KLP)\/groupTop/i.test(page.url());
   if (!onGroupTop) {
@@ -11928,7 +11968,7 @@ async function ensureSalonSelected(page, opts = {}) {
   //   単独アカウント店舗(例: Unelimit代官山)がセッション失効ページでここに入ると、存在しない
   //   /KLP/groupTop/ へ飛び「指定されたURLは存在しません」→ group_top_no_stores で誤失敗する
   //   (d51a7a9 の失効文言拡大で顕在化した退行)。単独店舗の失効は各フローの relogin に任せる。
-  if (!onGroupTop && salonId) {
+  if (!onGroupTop && isGroupAccount && salonId) {
     const invalidContext = await page
       .evaluate(() => {
         const title = document.title || '';
@@ -12278,7 +12318,7 @@ async function postEstheticPhotoGalleryViaForm(page, payload, opts = {}) {
 
   // グループ店舗(1ログイン複数サロン)で groupTop に跳ね返された場合はサロンを選び直してから入り直す。
   {
-    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName });
+    const sel = await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount });
     if (!sel.ok) {
       const cap = await captureScrapeDebug(page, 'photo_gallery', 'store_select', { diagnostics: { url: page.url(), reason: sel.reason } });
       return fail(`グループ店舗のサロン選択に失敗しました (${sel.reason}, capture=${cap || '?'})。店舗のSalonBoard設定でサロンID(H...)を登録してください。`, 'STORE_SELECT_REQUIRED', true);
@@ -12705,7 +12745,7 @@ async function postHairStyleViaForm(page, payload, opts = {}) {
     // 「ユーザエラー」に着地する(groupTop に跳ね返らないため後追いの
     // ensureSalonSelected が効かず、スタイル登録フォームに到達できず失敗する。
     // ADER 郡山で判明)。salonId があれば先に groupTop でサロンを選んでから入る。
-    if (opts.salonId) {
+    if (shouldUseGroupAccount(opts)) {
       await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
       await ensureSalonSelected(page, hairSalonOpts).catch(() => {});
     }
@@ -14122,13 +14162,14 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   // 「サロン選択→一覧」の組を最大2回やり直し、実際の一覧フォーム到達で成功判定する。
   const openList = async () => {
     for (let n = 0; n < 2; n += 1) {
-      if (opts.salonId) {
+      if (shouldUseGroupAccount(opts)) {
         await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
         const selected = await ensureSalonSelected(page, {
           salonId: opts.salonId,
           shopName: opts.shopName,
           genre,
           baseUrl,
+          isGroupAccount: opts.isGroupAccount,
         }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
         if (!selected?.ok) {
           if (n === 1) return { ok: false, reason: selected?.reason || 'unknown' };
@@ -14166,8 +14207,22 @@ async function pushStaffViaForm(page, payload, opts = {}) {
     if (idx < 0) return { ok: false, reason: 'staff_not_found' };
     const byField = (f) => document.querySelector(`[name="${dtoPrefix}[${idx}].${f}"]`);
     const r = { idx };
-    if (sortNo != null) { const el = byField('sortNo'); if (el) { el.value = String(sortNo); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); r.sortNo = true; } }
-    if (presentFlg != null) { const el = byField('presentFlg'); if (el) { r.presentFlg = true; r.currentPublished = String(el.value) === '1'; } }
+    const pub = byField('presentFlg');
+    const currentPublished = pub ? String(pub.value) === '1' : null;
+    if (presentFlg != null && pub) { r.presentFlg = true; r.currentPublished = currentPublished; }
+    if (sortNo != null) {
+      const el = byField('sortNo');
+      // SalonBoard は非掲載行の sortNo を disabled にする。非掲載を維持するジョブでは
+      // 並び順は表示に使われず保存もされないため、成功条件から明示的に除外する。
+      if (el && el.disabled && currentPublished === false && Number(presentFlg) === 0) {
+        r.sortSkippedForUnpublished = true;
+      } else if (el && !el.disabled) {
+        el.value = String(sortNo);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        r.sortNo = true;
+      }
+    }
     if (pickup != null) { const cb = byField('pickupFlg'); if (cb) { cb.checked = !!pickup; cb.dispatchEvent(new Event('change', { bubbles: true })); r.pickup = true; } }
     return { ok: true, ...r };
   }, { extId, presentFlg, sortNo, pickup, dtoPrefix, idField });
@@ -14177,7 +14232,7 @@ async function pushStaffViaForm(page, payload, opts = {}) {
     return fail(`スタッフ行を特定できませんでした (${applied?.reason || ''}, capture=${cap || '?'})`, 'STAFF_MAPPING_NOT_FOUND', true);
   }
   // sortNo は locator.fill で実入力 (dirty state を確実に立てる)
-  if (sortNo != null && applied.idx != null && applied.idx >= 0) {
+  if (sortNo != null && applied.sortNo && applied.idx != null && applied.idx >= 0) {
     const sel = `[name="${dtoPrefix}[${applied.idx}].sortNo"]`;
     await page.fill(sel, '', { timeout: 6000 }).catch(() => {});
     await page.fill(sel, String(sortNo), { timeout: 6000 }).catch(() => {});
@@ -14189,7 +14244,7 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   page.on('dialog', onDialog);
   try {
     // 並び順/PickUp は一覧上部の「変更内容を登録する」に相当する sort form を保存する。
-    if (sortNo != null || pickup != null) {
+    if ((sortNo != null && !applied.sortSkippedForUnpublished) || pickup != null) {
       const hasForm = await page.evaluate((fid) => !!document.getElementById(fid), sortFormId).catch(() => false);
       if (!hasForm) {
         const cap = await captureScrapeDebug(page, 'staff', 'no_form2', { diagnostics: { url: page.url(), sortFormId, genre } });
@@ -14210,7 +14265,7 @@ async function pushStaffViaForm(page, payload, opts = {}) {
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
   // 送信後に一覧を再取得し、sortNo/掲載状態が保存されているか確認する。
   await openList();
-  let reRead = await page.evaluate(({ extId, wantSort, dtoPrefix, idField }) => {
+  let reRead = await page.evaluate(({ extId, wantSort, dtoPrefix, idField, skipSort }) => {
     let idx = -1;
     for (const h of document.querySelectorAll(`input[type="hidden"][name^="${dtoPrefix}"][name$=".${idField}"]`)) {
       if (h.value === extId) { const m = (h.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
@@ -14219,8 +14274,13 @@ async function pushStaffViaForm(page, payload, opts = {}) {
     const el = document.querySelector(`[name="${dtoPrefix}[${idx}].sortNo"]`);
     const pub = document.querySelector(`[name="${dtoPrefix}[${idx}].presentFlg"]`);
     const cur = el ? (el.value || '') : null;
-    return { persisted: wantSort == null || cur === String(wantSort), current: cur, published: pub ? String(pub.value) === '1' : null };
-  }, { extId, wantSort: sortNo, dtoPrefix, idField }).catch(() => ({ persisted: false, current: null, published: null }));
+    return {
+      persisted: skipSort || wantSort == null || cur === String(wantSort),
+      current: cur,
+      sortDisabled: !!el?.disabled,
+      published: pub ? String(pub.value) === '1' : null,
+    };
+  }, { extId, wantSort: sortNo, dtoPrefix, idField, skipSort: !!applied.sortSkippedForUnpublished }).catch(() => ({ persisted: false, current: null, published: null }));
 
   // 掲載/非掲載は一覧 sort form ではなく、対象行の専用ボタンで切り替える。
   const wantPublished = presentFlg == null ? null : Number(presentFlg) === 1;
@@ -14243,7 +14303,7 @@ async function pushStaffViaForm(page, payload, opts = {}) {
       page.off('dialog', acceptToggle);
     }
     await openList();
-    reRead = await page.evaluate(({ extId, dtoPrefix, idField, wantSort }) => {
+    reRead = await page.evaluate(({ extId, dtoPrefix, idField, wantSort, skipSort }) => {
       const ids = Array.from(document.querySelectorAll(`input[type="hidden"][name^="${dtoPrefix}"][name$=".${idField}"]`));
       const h = ids.find((x) => x.value === extId);
       const m = h && (h.name || '').match(/\[(\d+)\]/);
@@ -14251,11 +14311,16 @@ async function pushStaffViaForm(page, payload, opts = {}) {
       const idx = Number(m[1]);
       const s = document.querySelector(`[name="${dtoPrefix}[${idx}].sortNo"]`);
       const pub = document.querySelector(`[name="${dtoPrefix}[${idx}].presentFlg"]`);
-      return { persisted: wantSort == null || (s && s.value === String(wantSort)), current: s ? s.value : null, published: pub ? String(pub.value) === '1' : null };
-    }, { extId, dtoPrefix, idField, wantSort: sortNo }).catch(() => ({ persisted: false, current: null, published: null }));
+      return {
+        persisted: skipSort || wantSort == null || (s && s.value === String(wantSort)),
+        current: s ? s.value : null,
+        sortDisabled: !!s?.disabled,
+        published: pub ? String(pub.value) === '1' : null,
+      };
+    }, { extId, dtoPrefix, idField, wantSort: sortNo, skipSort: !!applied.sortSkippedForUnpublished }).catch(() => ({ persisted: false, current: null, published: null }));
   }
   const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
-  if (sortNo != null && !reRead.persisted) {
+  if (sortNo != null && !applied.sortSkippedForUnpublished && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'staff', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `スタッフの並び順が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
   }
@@ -14848,13 +14913,14 @@ async function pushStaffProfileViaForm(page, payload, opts = {}) {
   const openProfileList = async () => {
     let selectionReason = null;
     for (let n = 0; n < 2; n += 1) {
-      if (opts.salonId) {
+      if (shouldUseGroupAccount(opts)) {
         await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
         const selected = await ensureSalonSelected(page, {
           salonId: opts.salonId,
           shopName: opts.shopName,
           genre,
           baseUrl,
+          isGroupAccount: opts.isGroupAccount,
         }).catch((e) => ({ ok: false, reason: e?.message || String(e) }));
         if (!selected?.ok) { selectionReason = selected?.reason || 'unknown'; continue; }
       }
@@ -15162,17 +15228,17 @@ async function pushAcceptanceViaSchedule(page, payload, opts = {}) {
     };
   }).catch(() => ({ hasLimit: false, expired: false }));
 
-  if (opts.salonId) {
-    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+  if (shouldUseGroupAccount(opts)) {
+    await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
   }
   await navigateToSchedule();
   let reached = await checkReached();
   if ((reached.expired || !reached.hasLimit) && typeof opts.relogin === 'function') {
     const ok = await opts.relogin().catch(() => false);
     if (ok) {
-      if (opts.salonId) {
+      if (shouldUseGroupAccount(opts)) {
         await page.goto(new URL('/CNC/groupTop/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 }).catch(() => {});
-        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName }).catch(() => {});
+        await ensureSalonSelected(page, { salonId: opts.salonId, shopName: opts.shopName, isGroupAccount: opts.isGroupAccount }).catch(() => {});
       }
       await navigateToSchedule();
       reached = await checkReached();
@@ -15716,5 +15782,7 @@ module.exports = {
     mapBookingStatus,
     cleanPhone,
     extractBookingItemsFromCurrentPage,
+    shouldUseGroupAccount,
+    ensureReserveSalonContext,
   },
 };
