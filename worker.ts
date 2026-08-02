@@ -2116,9 +2116,9 @@ async function handleJob(job: Job): Promise<void> {
         job,
         job.job_type,
         result,
-        {
-          external_id: p.external_id ?? null,
-        },
+        // external_id は scraper の実結果を優先する。特に新規作成では payload に
+        // ID がなく、作成後に取得した menuId/couponId を callback へ返す必要がある。
+        {},
         page,
       );
       return;

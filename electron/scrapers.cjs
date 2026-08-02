@@ -14064,6 +14064,15 @@ async function pushEquipmentViaForm(page, payload, opts = {}) {
         if (h.value === extId) { const m = h.name.match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
       }
     }
+    // external_id の無い新規作成リトライでは、同名設備が既に存在すれば
+    // その行を採用する。POST成功後のcallback失敗などでも重複作成しない。
+    if (idx < 0 && name) {
+      const existingName = Array.from(
+        document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]'),
+      ).find((el) => String(el.value || '').trim() === name);
+      const m = existingName?.name?.match(/\[(\d+)\]/);
+      if (m) idx = parseInt(m[1], 10);
+    }
     let created = false;
     if (idx < 0) {
       if (typeof addRowEquipment === 'function') { try { addRowEquipment(); created = true; } catch (_e) { /* noop */ } }
@@ -14138,7 +14147,11 @@ async function pushEquipmentViaForm(page, payload, opts = {}) {
     const reRead = await page.evaluate((wantName) => {
       const el = Array.from(document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]')).find((x) => (x.value || '') === wantName);
       const all = Array.from(document.querySelectorAll('input[name^="frmEquipListDtoList"][name$=".equipmentName"]')).map((x) => x.value);
-      return { persisted: !!el, names: all };
+      const idx = String(el?.getAttribute('name') || '').match(/\[(\d+)\]/)?.[1] ?? null;
+      const externalId = idx == null
+        ? null
+        : document.querySelector(`[name="frmEquipListDtoList[${idx}].equipmentId"]`)?.value || null;
+      return { persisted: !!el, externalId, names: all };
     }, name).catch(() => ({ persisted: false, names: [] }));
     page.off('dialog', onDialog);
     const diag = { dialogMsgs, beforeUrl, afterClickUrl, afterBody, finalClicked, postFinalUrl, postFinalBody, dumpCap, reRead };
@@ -14146,7 +14159,12 @@ async function pushEquipmentViaForm(page, payload, opts = {}) {
       const cap = await captureScrapeDebug(page, 'equipment', 'not_persisted', { diagnostics: diag });
       return { status: 'failed', reason: `設備名が保存されませんでした (dialog=${JSON.stringify(dialogMsgs)}, names=${JSON.stringify(reRead.names)}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
     }
-    return { status: 'ok', externalId: extId || null, confirmed: { ...applied, diag } };
+    const resolvedExternalId = extId || reRead.externalId || null;
+    if (!resolvedExternalId) {
+      const cap = await captureScrapeDebug(page, 'equipment', 'id_not_recovered', { diagnostics: diag });
+      return fail(`設備は保存された可能性がありますがSalonBoardのequipmentIdを取得できませんでした (capture=${cap || '?'})`, 'SB_REGISTER_INCOMPLETE', false);
+    }
+    return { status: 'ok', externalId: resolvedExternalId, confirmed: { ...applied, diag } };
   } finally {
     page.off('dialog', onDialog);
   }
@@ -14355,8 +14373,10 @@ async function pushStaffViaForm(page, payload, opts = {}) {
 
 /**
  * メニューを SalonBoard に書き込む。/CNK/draft/menuEdit のインライン。
- * menuId 一致行 (無ければ menuName 一致) を更新 → 「登録」(a.jsc_menuEdit_btn_reg)。
- * payload: { external_id?(menuId), name, price?, duration_min?, sort_no? }
+ * menuId 一致行 (無ければ menuName 一致) を更新する。create_if_missing=true なら、
+ * 同名行を冪等に再利用し、存在しない時だけ最初の空き行へ新規作成する。
+ * payload: { external_id?(menuId), name, price?, duration_min?, sort_no?,
+ *            description?, is_published?, create_if_missing? }
  */
 async function pushMenuViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
@@ -14364,14 +14384,24 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
-  const extId = String(p.external_id || p.menu_id || '').trim();
+  const extId = String(p.external_id || '').trim();
   const name = String(p.name || p.menu_name || '').trim();
   if (!extId && !name) return fail('メニューの external_id も name もありません', 'UNKNOWN_ERROR', true);
+  const createIfMissing = p.create_if_missing === true || p.operation === 'create';
   const price = p.price ?? null;
   const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
   const sortNo = p.sort_no ?? p.sortNo ?? null;
+  const description = p.description ?? p.explanation ?? null;
+  const wantPublished = p.is_published == null ? null : !!p.is_published;
 
-  await page.goto(new URL('/CNK/draft/menuEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  if (createIfMissing && !name) return fail('メニュー新規作成には name が必要です', 'UNKNOWN_ERROR', true);
+  if (createIfMissing && name.length > 40) return fail(`メニュー名がSalonBoard上限(40文字)を超えています (${name.length}文字)`, 'VALIDATION_ERROR', true);
+  if (description != null && String(description).length > 70) return fail(`メニュー説明がSalonBoard上限(70文字)を超えています (${String(description).length}文字)`, 'VALIDATION_ERROR', true);
+  if (dur != null && (!Number.isFinite(Number(dur)) || Number(dur) <= 0 || Number(dur) % 5 !== 0)) {
+    return fail('所要時間は5分単位で指定してください', 'VALIDATION_ERROR', true);
+  }
+
+  await page.goto(draftUrl(opts.genre, 'menuEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
@@ -14381,29 +14411,62 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     return fail(`メニュー編集フォーム (menuEditForm) に到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  const applied = await page.evaluate(({ extId, name, price, dur, sortNo }) => {
+  const applied = await page.evaluate(({ extId, name, price, dur, sortNo, description, wantPublished, createIfMissing, menuCategoryCd, searchCategoryCd }) => {
     const setVal = (el, v) => { if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    const setSelect = (el, preferred) => {
+      if (!el) return false;
+      const options = Array.from(el.options || []);
+      const wanted = preferred && options.some((o) => o.value === preferred)
+        ? preferred
+        : options.find((o) => o.value)?.value;
+      if (!wanted) return false;
+      return setVal(el, wanted);
+    };
     const idxOf = (el) => { const m = (el.name || '').match(/\[(\d+)\]/); return m ? parseInt(m[1], 10) : -1; };
     let idx = -1;
+    let matchedBy = null;
     if (extId) {
       for (const h of document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]')) {
-        if (h.value === extId) { idx = idxOf(h); break; }
+        if (h.value === extId) { idx = idxOf(h); matchedBy = 'external_id'; break; }
       }
     }
     if (idx < 0 && name) {
       for (const el of document.querySelectorAll('[name^="frmMenuEditMenuDetailList"][name$=".menuName"]')) {
-        if ((el.value || '').trim() === name) { idx = idxOf(el); break; }
+        if ((el.value || '').trim() === name) { idx = idxOf(el); matchedBy = 'name'; break; }
+      }
+    }
+    if (idx < 0 && createIfMissing) {
+      for (const h of document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]')) {
+        if ((h.value || '').trim()) continue;
+        const candidate = idxOf(h);
+        const nameEl = document.querySelector(`[name="frmMenuEditMenuDetailList[${candidate}].menuName"]`);
+        if (nameEl && !(nameEl.value || '').trim()) { idx = candidate; matchedBy = 'blank_slot'; break; }
       }
     }
     if (idx < 0) return { ok: false, reason: 'menu_not_found' };
     const byField = (f) => document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].${f}"]`);
-    const r = { idx };
+    const currentExternalId = (byField('menuId')?.value || '').trim() || null;
+    const r = { idx, matchedBy, externalId: currentExternalId };
     if (name) r.name = setVal(byField('menuName'), name);
     if (price != null) r.price = setVal(byField('price'), price);
     if (dur != null) r.dur = setVal(byField('sejyutsuAimTime'), dur);
     if (sortNo != null) r.sortNo = setVal(byField('sortNo'), sortNo);
+    if (description != null) r.description = setVal(byField('explanation'), description);
+    if (matchedBy === 'blank_slot') {
+      r.menuCategory = setSelect(byField('menuCategoryCd'), menuCategoryCd);
+      r.searchCategory = setSelect(byField('searchCategoryCd'), searchCategoryCd);
+    }
+    if (wantPublished != null || matchedBy === 'blank_slot') {
+      const desired = wantPublished == null ? '1' : (wantPublished ? '1' : '0');
+      const radio = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].presentFlg"][value="${desired}"]`);
+      if (radio) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); r.published = desired === '1'; }
+    }
     return { ok: true, ...r };
-  }, { extId, name, price, dur, sortNo });
+  }, {
+    extId, name, price, dur, sortNo, description, wantPublished, createIfMissing,
+    menuCategoryCd: p.menu_category_cd ?? null,
+    searchCategoryCd: p.search_category_cd ?? null,
+  });
 
   if (!applied || !applied.ok) {
     const cap = await captureScrapeDebug(page, 'menu', 'no_row', { diagnostics: { applied } });
@@ -14439,30 +14502,40 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
   // 送信後に menuEdit を再取得し、menuId 行の名前が新値で保存されているか確認
-  await page.goto(new URL('/CNK/draft/menuEdit', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await page.goto(draftUrl(opts.genre, 'menuEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   const reRead = await page.evaluate(({ extId, wantName }) => {
     let idx = -1;
     for (const h of document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]')) {
       if (h.value === extId) { const m = (h.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
     }
+    if (idx < 0 && wantName) {
+      for (const el of document.querySelectorAll('[name^="frmMenuEditMenuDetailList"][name$=".menuName"]')) {
+        if ((el.value || '').trim() === wantName) { const m = (el.name || '').match(/\[(\d+)\]/); if (m) idx = parseInt(m[1], 10); break; }
+      }
+    }
     if (idx < 0) return { persisted: false, current: null };
     const el = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuName"]`);
+    const idEl = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuId"]`);
     const cur = el ? (el.value || '') : null;
-    return { persisted: cur === wantName, current: cur };
-  }, { extId, wantName: name }).catch(() => ({ persisted: false, current: null }));
+    return { persisted: cur === wantName, current: cur, externalId: (idEl?.value || '').trim() || null };
+  }, { extId: extId || applied.externalId || '', wantName: name }).catch(() => ({ persisted: false, current: null, externalId: null }));
   const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
   if (name && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'menu', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `メニュー名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
   }
-  return { status: 'ok', externalId: extId || null, confirmed: { ...applied, diag } };
+  if (createIfMissing && !reRead.externalId) {
+    return { status: 'failed', reason: 'メニューは保存された可能性がありますが、SalonBoardのmenuIdを取得できませんでした', errorCode: 'SB_REGISTER_INCOMPLETE', manualRequired: false, diag };
+  }
+  return { status: 'ok', externalId: reRead.externalId || extId || applied.externalId || null, confirmed: { ...applied, diag } };
 }
 
 /**
  * クーポンを SalonBoard に書き込む。/CNK/draft/couponList → #couponEditForm に couponId を
  * セットして submit → couponEdit (frmCouponEditCnkDto.*) を更新 → 登録。
- * payload: { external_id(couponId), name?, price?, duration_min?, content? }
+ * create_if_missing=true なら同名クーポンを冪等に再利用し、存在しない時だけ
+ * couponAddForm から新規作成する。
  */
 async function pushCouponViaForm(page, payload, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
@@ -14470,28 +14543,52 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   const p = payload || {};
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
-  const extId = String(p.external_id || p.coupon_id || '').trim();
-  if (!extId) return fail('クーポンの external_id (couponId) がありません', 'UNKNOWN_ERROR', true);
+  const extId = String(p.external_id || '').trim();
+  let resolvedExtId = extId;
+  const createIfMissing = p.create_if_missing === true || p.operation === 'create';
   const name = String(p.name || p.coupon_name || '').trim();
   const price = p.price ?? null;
   const dur = p.duration_min ?? p.sejyutsu_aim_time ?? null;
-  const content = p.content ?? p.content_explanation ?? null;
+  const content = p.content ?? p.content_explanation ?? p.description ?? null;
+  if (!resolvedExtId && !createIfMissing) return fail('クーポンの external_id (couponId) がありません', 'UNKNOWN_ERROR', true);
+  if (createIfMissing && !name) return fail('クーポン新規作成には name が必要です', 'UNKNOWN_ERROR', true);
+  if (createIfMissing && name.length > 36) return fail(`クーポン名がSalonBoard上限(36文字)を超えています (${name.length}文字)`, 'VALIDATION_ERROR', true);
+  if (content != null && String(content).length > 90) return fail(`クーポン内容がSalonBoard上限(90文字)を超えています (${String(content).length}文字)`, 'VALIDATION_ERROR', true);
+  if (dur != null && (!Number.isFinite(Number(dur)) || Number(dur) <= 0 || Number(dur) % 5 !== 0)) {
+    return fail('所要時間は5分単位で指定してください', 'VALIDATION_ERROR', true);
+  }
 
   await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
-  // couponEditForm に couponId をセットして submit (read scraper と同手順)
-  const submitted = await page.evaluate((couponId) => {
-    const form = document.querySelector('#couponEditForm');
+  // 新規ジョブの再試行では、直前の試行ですでに登録済みかもしれない。同名を先に
+  // 探して既存 couponId を再利用し、二重登録を防ぐ。
+  if (!resolvedExtId && name) {
+    resolvedExtId = await page.evaluate((wantName) => {
+      for (const input of document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]')) {
+        const tr = input.closest('tr');
+        const cells = tr ? Array.from(tr.querySelectorAll('td')) : [];
+        const candidate = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
+        if (candidate === wantName) return (input.value || '').trim();
+      }
+      return '';
+    }, name).catch(() => '');
+  }
+
+  // 既存は couponEditForm、新規は couponAddForm を submit。
+  const submitted = await page.evaluate(({ couponId, createNew }) => {
+    const form = document.querySelector(createNew ? '#couponAddForm' : '#couponEditForm');
     if (!form) return false;
-    let idInput = form.querySelector('input[name="couponId"]');
-    if (!idInput) { idInput = document.createElement('input'); idInput.type = 'hidden'; idInput.name = 'couponId'; form.appendChild(idInput); }
-    idInput.value = couponId;
+    if (!createNew) {
+      let idInput = form.querySelector('input[name="couponId"]');
+      if (!idInput) { idInput = document.createElement('input'); idInput.type = 'hidden'; idInput.name = 'couponId'; form.appendChild(idInput); }
+      idInput.value = couponId;
+    }
     form.submit();
     return true;
-  }, extId).catch(() => false);
+  }, { couponId: resolvedExtId, createNew: !resolvedExtId }).catch(() => false);
   if (!submitted) {
     const cap = await captureScrapeDebug(page, 'coupon', 'no_list_form', { diagnostics: { url: page.url() } });
     return fail(`クーポン一覧の couponEditForm が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
@@ -14502,15 +14599,42 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     return fail(`クーポン編集ページに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
-  const applied = await page.evaluate(({ name, price, dur, content }) => {
+  const applied = await page.evaluate(({ name, price, dur, content, createNew, couponTypeCd, teijiJoukenCd, useCondition, searchCategoryCd, menuCategoryCd }) => {
     const setVal = (sel, v) => { const el = document.querySelector(sel); if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
-    const r = {};
+    const setChecked = (sel) => { const el = document.querySelector(sel); if (!el) return false; el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    const selectSafe = (sel, preferred, fallbackLast = false) => {
+      const el = document.querySelector(sel); if (!el) return false;
+      const opts = Array.from(el.options || []).filter((o) => o.value);
+      const value = preferred && opts.some((o) => o.value === preferred)
+        ? preferred : (fallbackLast ? opts.at(-1)?.value : opts[0]?.value);
+      return value ? setVal(sel, value) : false;
+    };
+    const r = { createNew };
+    if (createNew) {
+      r.cpSetting = setChecked('input[name="frmCouponEditCnkDto.selectedCpCouponSetting"][value="0"]');
+      r.couponType = selectSafe('select[name="frmCouponEditCnkDto.selectedCouponTypeCd"]', couponTypeCd || 'CT01');
+      r.teiji = selectSafe('select[name="frmCouponEditCnkDto.selectedTeijiJoukenCd"]', teijiJoukenCd || 'TJ01');
+      r.useCondition = setVal('input[name="frmCouponEditCnkDto.useCondition"]', useCondition || '利用条件なし');
+      r.expiration = setChecked('input[name="frmCouponEditCnkDto.checkedAutoExpiration"][value="true"]');
+      r.searchCategory = selectSafe('select[name="frmCouponEditCnkDto.selectedSchCouponCategory"]', searchCategoryCd, true);
+      r.applyMenu = setChecked('input[name="frmCouponEditCnkDto.selectedApplyMenu"][value="1"]');
+      const menuCategories = Array.from(document.querySelectorAll('input[type="checkbox"][name="frmCouponEditCnkDto.selectedMenuCategoryCd"]'));
+      const menuCategory = (menuCategoryCd && menuCategories.find((el) => el.value === menuCategoryCd)) || menuCategories.at(-1);
+      if (menuCategory) { menuCategory.checked = true; menuCategory.dispatchEvent(new Event('change', { bubbles: true })); r.menuCategory = true; } else r.menuCategory = false;
+    }
     if (name) r.name = setVal('input[name="frmCouponEditCnkDto.couponName"]', name);
     if (price != null) r.price = setVal('input[name="frmCouponEditCnkDto.price"]', price);
     if (dur != null) r.dur = setVal('input[name="frmCouponEditCnkDto.sejyutsuAimTime"]', dur);
-    if (content != null) r.content = setVal('textarea[name="frmCouponEditCnkDto.contentExplanation"]', content);
+    if (content != null || createNew) r.content = setVal('textarea[name="frmCouponEditCnkDto.contentExplanation"]', content || name);
     return { ok: true, ...r };
-  }, { name, price, dur, content });
+  }, {
+    name, price, dur, content, createNew: !resolvedExtId,
+    couponTypeCd: p.coupon_type_cd ?? null,
+    teijiJoukenCd: p.teiji_jouken_cd ?? null,
+    useCondition: p.use_condition ?? null,
+    searchCategoryCd: p.search_category_cd ?? null,
+    menuCategoryCd: p.menu_category_cd ?? null,
+  });
 
   // dirty state: couponName を locator.fill で実入力し直す
   if (name) {
@@ -14542,16 +14666,31 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   }
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
-  // 送信後に couponEdit を再取得し couponName が保存されているか確認 (couponList→couponEditForm submit)
+  // 送信後に couponList からIDを回収する。新規作成でもここで正式なcouponIdを得る。
   await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  if (!resolvedExtId && name) {
+    resolvedExtId = await page.evaluate((wantName) => {
+      for (const input of document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]')) {
+        const tr = input.closest('tr');
+        const cells = tr ? Array.from(tr.querySelectorAll('td')) : [];
+        const candidate = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
+        if (candidate === wantName) return (input.value || '').trim();
+      }
+      return '';
+    }, name).catch(() => '');
+  }
+  if (!resolvedExtId) {
+    const cap = await captureScrapeDebug(page, 'coupon', 'created_id_missing', { diagnostics: { name, err: errMatch ? errMatch[0].trim() : null } });
+    return fail(`クーポンは保存された可能性がありますがcouponIdを取得できませんでした (capture=${cap || '?'})`, 'SB_REGISTER_INCOMPLETE', false);
+  }
   await page.evaluate((couponId) => {
     const form = document.querySelector('#couponEditForm');
     if (!form) return;
     let i = form.querySelector('input[name="couponId"]');
     if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'couponId'; form.appendChild(i); }
     i.value = couponId; form.submit();
-  }, extId).catch(() => {});
+  }, resolvedExtId).catch(() => {});
   await page.waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 }).catch(() => {});
   const reRead = await page.evaluate((wantName) => {
     const el = document.querySelector('input[name="frmCouponEditCnkDto.couponName"]');
@@ -14563,7 +14702,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     const cap = await captureScrapeDebug(page, 'coupon', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `クーポン名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
   }
-  return { status: 'ok', externalId: extId, confirmed: { ...applied, diag } };
+  return { status: 'ok', externalId: resolvedExtId, confirmed: { ...applied, diag } };
 }
 
 /**

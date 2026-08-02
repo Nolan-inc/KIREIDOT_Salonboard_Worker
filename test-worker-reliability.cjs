@@ -5,10 +5,150 @@ const {
   deleteScheduleViaForm,
   cancelBookingViaForm,
   pushStaffViaForm,
+  pushMenuViaForm,
+  pushCouponViaForm,
+  pushEquipmentViaForm,
   scrapeMenus,
   scrapeCoupons,
   _internal,
 } = require('./electron/scrapers.cjs');
+
+async function testEquipmentCanCreateAndRecoverSalonBoardIdIdempotently() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  let registered = false;
+
+  const equipmentHtml = () => `
+    <nav>予約管理 設定</nav>
+    <form id="equipListForm">
+      <input type="hidden" name="frmEquipListDtoList[0].equipmentId" value="${registered ? 'EQNEW001' : ''}">
+      <input name="frmEquipListDtoList[0].equipmentName" value="${registered ? '新規テストベッド' : ''}">
+      <select name="frmEquipListDtoList[0].maxRsvNum"><option value="1">1</option></select>
+      <input name="frmEquipListDtoList[0].sortNo" value="1">
+      <a id="registBtn" href="/CNK/set/equipList/?registered=1">登録</a>
+    </form>
+    <script>function addRowEquipment() {}</script>`;
+
+  await page.route('http://equipment-create.test/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('registered') === '1') registered = true;
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: equipmentHtml(),
+    });
+  });
+
+  const result = await pushEquipmentViaForm(page, {
+    create_if_missing: true,
+    resource_id: 'internal-resource-id',
+    name: '新規テストベッド',
+    max_rsv_num: 1,
+    sort_no: 1,
+  }, { baseUrl: 'http://equipment-create.test/', enablePush: true });
+
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  assert.equal(result.externalId, 'EQNEW001');
+  await browser.close();
+}
+
+async function testMenuCanCreateIntoBlankSalonBoardSlotIdempotently() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  let registered = false;
+
+  const menuHtml = () => `
+    <nav>予約管理 掲載管理</nav>
+    <form id="menuEditForm" action="/CNK/draft/menuEdit">
+      <select name="frmMenuEditMenuDetailList[0].menuCategoryCd"><option value=""></option><option value="MC_OTHER">その他</option></select>
+      <select name="frmMenuEditMenuDetailList[0].searchCategoryCd"><option value=""></option><option value="SE_OTHER">その他</option></select>
+      <textarea name="frmMenuEditMenuDetailList[0].menuName">${registered ? '新規テストメニュー' : ''}</textarea>
+      <textarea name="frmMenuEditMenuDetailList[0].explanation"></textarea>
+      <input name="frmMenuEditMenuDetailList[0].price" value="">
+      <input name="frmMenuEditMenuDetailList[0].sejyutsuAimTime" value="">
+      <input name="frmMenuEditMenuDetailList[0].sortNo" value="1">
+      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="1" checked>
+      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="0">
+      <input name="frmMenuEditMenuDetailList[0].menuId" value="${registered ? 'MNEW001' : ''}">
+      <a class="jsc_menuEdit_btn_reg" href="/CNK/draft/menuEdit?registered=1">登録</a>
+    </form>`;
+
+  await page.route('http://menu-create.test/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('registered') === '1') registered = true;
+    await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: menuHtml() });
+  });
+
+  const result = await pushMenuViaForm(page, {
+    menu_id: 'internal-kireidot-id',
+    create_if_missing: true,
+    name: '新規テストメニュー',
+    price: 6000,
+    duration_min: 60,
+    description: '新規同期テスト',
+  }, { baseUrl: 'http://menu-create.test/', genre: 'esthetic', enablePush: true });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.externalId, 'MNEW001');
+  assert.equal(result.confirmed.matchedBy, 'blank_slot');
+  await browser.close();
+}
+
+async function testCouponCanCreateAndRecoverSalonBoardId() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+  let registered = false;
+
+  const listHtml = () => `
+    <nav>予約管理 掲載管理</nav>
+    <form id="couponAddForm" action="/CNK/draft/couponEdit" method="post"></form>
+    <form id="couponEditForm" action="/CNK/draft/couponEdit" method="post"><input name="couponId" value=""></form>
+    ${registered ? `<table><tr><td><input name="frmCouponListDto[0].couponId" value="CPNEW001"></td><td></td><td>全員</td><td>新規テストクーポン</td></tr></table>` : ''}`;
+  const editHtml = (existing = false) => `
+    <nav>予約管理 掲載管理</nav>
+    <form id="draft_couponEditForm">
+      <input type="radio" name="frmCouponEditCnkDto.selectedCpCouponSetting" value="1"><input type="radio" name="frmCouponEditCnkDto.selectedCpCouponSetting" value="0">
+      <select name="frmCouponEditCnkDto.selectedCouponTypeCd"><option value=""></option><option value="CT01">全員</option></select>
+      <input name="frmCouponEditCnkDto.couponName" value="${existing ? '新規テストクーポン' : ''}">
+      <textarea name="frmCouponEditCnkDto.contentExplanation"></textarea>
+      <select name="frmCouponEditCnkDto.selectedTeijiJoukenCd"><option value=""></option><option value="TJ01">予約時</option></select>
+      <input name="frmCouponEditCnkDto.useCondition" value="">
+      <input type="radio" name="frmCouponEditCnkDto.checkedAutoExpiration" value="true" checked>
+      <input type="radio" name="frmCouponEditCnkDto.checkedAutoExpiration" value="false">
+      <select name="frmCouponEditCnkDto.selectedSchCouponCategory"><option value=""></option><option value="SE_OTHER">その他</option></select>
+      <input type="radio" name="frmCouponEditCnkDto.selectedApplyMenu" value="1" checked>
+      <input type="checkbox" name="frmCouponEditCnkDto.selectedMenuCategoryCd" value="MC_OTHER">
+      <input name="frmCouponEditCnkDto.price" value="">
+      <input name="frmCouponEditCnkDto.sejyutsuAimTime" value="">
+      <a id="registBtn" href="/CNK/draft/couponList?registered=1">登録</a>
+    </form>`;
+
+  await page.route('http://coupon-create.test/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname.endsWith('/couponList')) {
+      if (url.searchParams.get('registered') === '1') registered = true;
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: listHtml() });
+      return;
+    }
+    const existing = registered && /couponId=CPNEW001/.test(request.postData() || '');
+    await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: editHtml(existing) });
+  });
+
+  const result = await pushCouponViaForm(page, {
+    menu_id: 'internal-kireidot-id',
+    create_if_missing: true,
+    name: '新規テストクーポン',
+    price: 5000,
+    duration_min: 60,
+    content: '新規同期テスト',
+  }, { baseUrl: 'http://coupon-create.test/', genre: 'esthetic', enablePush: true });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.externalId, 'CPNEW001');
+  assert.equal(result.confirmed.createNew, true);
+  await browser.close();
+}
 
 async function testMenuPublicationStateIsIndependentFromImportActivity() {
   const browser = await chromium.launch({ headless: true, channel: 'chrome' });
@@ -828,7 +968,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     pcWorkerSource,
-    /\.eq\('job_type', 'push_photo_gallery'\)[\s\S]{0,120}\.eq\('executor', 'playwright'\)/,
+    /\.in\('job_type', PC_CLAIMABLE_PUSH_JOB_TYPES\)[\s\S]{0,120}\.eq\('executor', 'playwright'\)/,
     'the desktop fallback poller must ignore all Cloud-authoritative jobs',
   );
   assert.match(
@@ -864,8 +1004,18 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     console.log('coupon publication test: ok');
     return;
   }
+  if (process.env.WORKER_TEST_CASE === 'menu-coupon-create') {
+    await testMenuCanCreateIntoBlankSalonBoardSlotIdempotently();
+    await testCouponCanCreateAndRecoverSalonBoardId();
+    await testEquipmentCanCreateAndRecoverSalonBoardIdIdempotently();
+    console.log('menu/coupon/equipment create tests: ok');
+    return;
+  }
   await testMenuPublicationStateIsIndependentFromImportActivity();
   await testCouponPublicationStateFromInverseActionLabel();
+  await testMenuCanCreateIntoBlankSalonBoardSlotIdempotently();
+  await testCouponCanCreateAndRecoverSalonBoardId();
+  await testEquipmentCanCreateAndRecoverSalonBoardIdIdempotently();
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
   await testExplicitSingleSalonContextAndUnpublishedStaffSort();
