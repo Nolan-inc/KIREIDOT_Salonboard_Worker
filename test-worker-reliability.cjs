@@ -915,6 +915,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     scraperSource,
+    /a#sendMailConfirm:visible[\s\S]{0,300}a#sendMail:visible[\s\S]{0,2500}finalBtn\.click/,
+    'HotPepper network reservation changes must complete both mail confirmation steps',
+  );
+  assert.match(
+    scraperSource,
     /errorCandidate = bodyHead[\s\S]{0,300}ハイフンなしで入力してください[\s\S]{0,450}operationStateLost/,
     'static no-hyphen helper text must not be misclassified as a booking validation error',
   );

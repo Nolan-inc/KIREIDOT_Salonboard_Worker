@@ -8514,6 +8514,9 @@ async function changeBookingViaForm(page, payload, opts = {}) {
     await page.waitForTimeout(2500);
     // 「確定する」後に確認画面/ダイアログが出る場合があるので、最終確定ボタンを押す。
     //   ① HTMLダイアログ「はい」(a.accept) ② 確認画面の「登録する」(a#regist) / 「確定する」(a#change)
+    //   ③ HotPepper予約の日時/指名変更は mailInput → mailConfirm → doComplete が必須。
+    //      #mailEntry の次画面で #sendMailConfirm と #sendMail を順に押さない限り、
+    //      メール本文には新日時が出ても予約自体は一切更新されない。
     // 時間超過警告(「予約時間を過ぎていますがよろしいですか？」)→確認画面 のように
     // 確認が多段で出ることがあるため、完了表示が出るまで最大3回まで押し進める。
     for (let round = 0; round < 3; round++) {
@@ -8582,7 +8585,15 @@ async function changeBookingViaForm(page, payload, opts = {}) {
         continue;
       }
       const finalBtn = page
-        .locator('a.accept:visible, .buttons a.accept, a#regist:visible, a:has-text("登録する"):visible, a#change:visible')
+        .locator([
+          'a#sendMailConfirm:visible',
+          'a#sendMail:visible',
+          'a.accept:visible',
+          '.buttons a.accept',
+          'a#regist:visible',
+          'a:has-text("登録する"):visible',
+          'a#change:visible',
+        ].join(', '))
         .first();
       await finalBtn.waitFor({ state: 'visible', timeout: round === 0 ? 6_000 : 2_500 }).catch(() => {});
       if ((await finalBtn.count().catch(() => 0)) === 0) {
