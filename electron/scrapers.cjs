@@ -2393,12 +2393,30 @@ async function scrapeCoupons(page, opts = {}) {
         expires = text(tds[4]) || null;
       }
       if (!name) continue;
+      // 一覧右端の操作は「現在とは逆の操作」を表示する。
+      //   非掲載にする = 現在は掲載中
+      //   掲載にする   = 現在は非掲載
+      // input/button の value、画像ボタンの alt、リンク本文のいずれにも対応する。
+      const actionSignal = Array.from(
+        tr.querySelectorAll('input,button,img,a'),
+      ).map((el) => [
+        el.getAttribute('value'),
+        el.getAttribute('alt'),
+        el.getAttribute('title'),
+        text(el),
+      ].filter(Boolean).join(' ')).join(' ');
+      const isPublished = /非掲載にする/.test(actionSignal)
+        ? true
+        : /掲載にする/.test(actionSignal)
+          ? false
+          : true;
       items.push({
         external_id: externalId,
         name,
         category,
         expires_label: expires,
         photo_url: photo ? (photo.getAttribute('src') || '').replace(/&amp;/g, '&') : null,
+        is_published: isPublished,
       });
     }
     return {
@@ -2504,6 +2522,7 @@ async function scrapeCoupons(page, opts = {}) {
       condition_label: d.condition_label ?? null,
       use_condition: d.use_condition ?? null,
       is_active: true,
+      is_published: it.is_published !== false,
     };
   });
   return {

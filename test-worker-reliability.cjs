@@ -6,6 +6,7 @@ const {
   cancelBookingViaForm,
   pushStaffViaForm,
   scrapeMenus,
+  scrapeCoupons,
   _internal,
 } = require('./electron/scrapers.cjs');
 
@@ -50,6 +51,66 @@ async function testMenuPublicationStateIsIndependentFromImportActivity() {
     [
       { external_id: 'M001', is_active: true, is_published: true },
       { external_id: 'M002', is_active: true, is_published: false },
+    ],
+  );
+  await browser.close();
+}
+
+async function testCouponPublicationStateFromInverseActionLabel() {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const page = await browser.newPage();
+
+  await page.route('http://coupon.test/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname.endsWith('/couponEdit')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        body: '<input name="frmCouponEditCnkDto.couponName" value="詳細"><input name="frmCouponEditCnkDto.price" value="5500"><input name="frmCouponEditCnkDto.sejyutsuAimTime" value="60">',
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `
+        <nav>予約管理 掲載管理</nav>
+        <form id="couponEditForm" action="/CNK/draft/couponEdit" method="post">
+          <input name="couponId" value="">
+        </form>
+        <table>
+          <tr>
+            <td class="td_value_store_c"><input name="frmCouponListDto[0].couponId" value="C001"><input value="1"></td>
+            <td class="td_value_store_c"><img name="couponPhoto" src="published.jpg"></td>
+            <td class="td_value_store_c">全員</td><td class="td_value_store_c">掲載クーポン</td><td class="td_value_store_c">なし</td>
+            <td class="td_value_store_c">OK</td><td class="td_value_store_c">詳細</td>
+            <td class="td_value_store_c"><input type="button" value="非掲載にする"><input type="button" value="削除する"></td>
+          </tr>
+          <tr>
+            <td class="td_value_store_c"><input name="frmCouponListDto[1].couponId" value="C002"><input value="2"></td>
+            <td class="td_value_store_c"><img name="couponPhoto" src="unpublished.jpg"></td>
+            <td class="td_value_store_c">新規</td><td class="td_value_store_c">非掲載クーポン</td><td class="td_value_store_c">なし</td>
+            <td class="td_value_store_c">OK</td><td class="td_value_store_c">詳細</td>
+            <td class="td_value_store_c"><img alt="掲載にする" src="publish.gif"><input type="button" value="削除する"></td>
+          </tr>
+        </table>`,
+    });
+  });
+
+  const result = await scrapeCoupons(page, {
+    baseUrl: 'http://coupon.test/',
+    genre: 'esthetic',
+  });
+  assert.deepEqual(
+    result.rows.map((row) => ({
+      external_id: row.external_id,
+      is_active: row.is_active,
+      is_published: row.is_published,
+    })),
+    [
+      { external_id: 'C001', is_active: true, is_published: true },
+      { external_id: 'C002', is_active: true, is_published: false },
     ],
   );
   await browser.close();
@@ -798,7 +859,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     console.log('menu publication test: ok');
     return;
   }
+  if (process.env.WORKER_TEST_CASE === 'coupon-publication') {
+    await testCouponPublicationStateFromInverseActionLabel();
+    console.log('coupon publication test: ok');
+    return;
+  }
   await testMenuPublicationStateIsIndependentFromImportActivity();
+  await testCouponPublicationStateFromInverseActionLabel();
   await testHtmlDeleteConfirmation();
   await testNeverSyncedCancelIsIdempotent();
   await testExplicitSingleSalonContextAndUnpublishedStaffSort();
