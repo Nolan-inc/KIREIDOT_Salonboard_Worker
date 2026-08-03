@@ -99,27 +99,43 @@ async function testMenuFallsBackToNativeSubmitWhenRegisterLinkIsNoop() {
   const page = await browser.newPage();
   let registered = false;
   let postCount = 0;
+  let lastPostData = '';
 
   const menuHtml = () => `
     <nav>予約管理 掲載管理</nav>
     <form id="menuEditForm" method="POST" action="/CNK/draft/menuEdit/doRegister" onsubmit="return false;">
       <input type="hidden" name="modified" value="0">
-      <select name="frmMenuEditMenuDetailList[0].menuCategoryCd"><option value=""></option><option value="MC_OTHER">その他</option></select>
-      <select name="frmMenuEditMenuDetailList[0].searchCategoryCd"><option value=""></option><option value="SE_OTHER">その他</option></select>
-      <textarea name="frmMenuEditMenuDetailList[0].menuName">${registered ? 'JS未初期化テストメニュー' : ''}</textarea>
-      <textarea name="frmMenuEditMenuDetailList[0].explanation"></textarea>
-      <input name="frmMenuEditMenuDetailList[0].price" value="">
-      <input name="frmMenuEditMenuDetailList[0].sejyutsuAimTime" value="">
-      <input name="frmMenuEditMenuDetailList[0].sortNo" value="1">
-      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="1" checked>
-      <input type="radio" name="frmMenuEditMenuDetailList[0].presentFlg" value="0">
-      <input name="frmMenuEditMenuDetailList[0].menuId" value="${registered ? 'M-NATIVE-001' : ''}">
+      <table><tr><td>
+        <select name="frmMenuEditMenuDetailList[0].menuCategoryCd"><option value="GR06~MC25" selected>エステ：フェイシャル</option></select>
+        <select name="frmMenuEditMenuDetailList[0].searchCategoryCd"><option value="SE22" selected>エステ：フェイシャル</option></select>
+        <textarea name="frmMenuEditMenuDetailList[0].menuName">既存メニュー</textarea>
+        <input name="frmMenuEditMenuDetailList[0].menuId" value="M-EXISTING">
+      </td></tr></table>
+      <table><tr><td>
+        <select name="frmMenuEditMenuDetailList[1].menuCategoryCd"><option value=""></option><option value="GR01~MC01">リラク</option><option value="GR06~MC25">エステ：フェイシャル</option></select>
+        <select name="frmMenuEditMenuDetailList[1].searchCategoryCd"><option value=""></option><option value="SE16">リラク</option><option value="SE22">エステ：フェイシャル</option></select>
+        <textarea name="frmMenuEditMenuDetailList[1].menuName">${registered ? 'JS未初期化テストメニュー' : ''}</textarea>
+        <textarea name="frmMenuEditMenuDetailList[1].explanation"></textarea>
+        <input name="frmMenuEditMenuDetailList[1].price" value="">
+        <input name="frmMenuEditMenuDetailList[1].sejyutsuAimTime" value="">
+        <input name="frmMenuEditMenuDetailList[1].sortNo" value="2">
+        <input type="radio" name="frmMenuEditMenuDetailList[1].presentFlg" value="1" checked>
+        <input type="radio" name="frmMenuEditMenuDetailList[1].presentFlg" value="0">
+        <input name="frmMenuEditMenuDetailList[1].menuId" value="${registered ? 'M-NATIVE-001' : ''}">
+      </td></tr></table>
       <a class="jsc_menuEdit_btn_reg" href="javascript:void(0);">登録</a>
-    </form>`;
+    </form>
+    <script>
+      document.querySelector('[name="frmMenuEditMenuDetailList[1].menuCategoryCd"]').addEventListener('change', () => {
+        document.querySelector('[name="frmMenuEditMenuDetailList[1].menuName"]').value = '';
+        document.querySelector('[name="frmMenuEditMenuDetailList[1].sejyutsuAimTime"]').value = '';
+      });
+    </script>`;
 
   await page.route('http://menu-native-submit.test/**', async (route) => {
     if (route.request().method() === 'POST') {
       postCount += 1;
+      lastPostData = route.request().postData() || '';
       registered = true;
     }
     await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: menuHtml() });
@@ -138,6 +154,9 @@ async function testMenuFallsBackToNativeSubmitWhenRegisterLinkIsNoop() {
   assert.equal(result.confirmed.diag.clicked, true);
   assert.equal(result.confirmed.diag.clickSubmitted, false);
   assert.equal(result.confirmed.diag.nativeSubmitted, true);
+  assert.equal(result.confirmed.menuCategoryValue, 'GR06~MC25');
+  assert.equal(result.confirmed.searchCategoryValue, 'SE22');
+  assert.match(lastPostData, /frmMenuEditMenuDetailList%5B1%5D\.sejyutsuAimTime=75/);
   await browser.close();
 }
 

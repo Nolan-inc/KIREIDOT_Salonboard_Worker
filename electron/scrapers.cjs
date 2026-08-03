@@ -14724,6 +14724,42 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     return fail(`メニュー編集フォーム (menuEditForm) に到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
+  // SalonBoard は既存件数を10件単位で表示し、次の空き行群を display:none で
+  // 先読みしている。非表示行へ値だけ入れても登録対象に含まれないため、表示中の
+  // 空き行がない時は公式の「新規追加する」で次の行群を開く。
+  if (createIfMissing) {
+    const blankVisibility = await page.evaluate(({ extId, name }) => {
+      const idxOf = (el) => { const m = (el.name || '').match(/\[(\d+)\]/); return m ? parseInt(m[1], 10) : -1; };
+      const ids = Array.from(document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]'));
+      const alreadyExists = ids.some((h) => (extId && h.value === extId) || (() => {
+        const idx = idxOf(h);
+        const n = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuName"]`);
+        return !!name && (n?.value || '').trim() === name;
+      })());
+      if (alreadyExists) return { alreadyExists: true, hasVisibleBlank: true };
+      let hasVisibleBlank = false;
+      let hasHiddenBlank = false;
+      for (const h of ids) {
+        if ((h.value || '').trim()) continue;
+        const idx = idxOf(h);
+        const n = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].menuName"]`);
+        if (!n || (n.value || '').trim()) continue;
+        const table = n.closest('table');
+        const visible = !table || window.getComputedStyle(table).display !== 'none';
+        if (visible) hasVisibleBlank = true;
+        else hasHiddenBlank = true;
+      }
+      return { alreadyExists: false, hasVisibleBlank, hasHiddenBlank };
+    }, { extId, name }).catch(() => ({ alreadyExists: false, hasVisibleBlank: true, hasHiddenBlank: false }));
+    if (!blankVisibility.hasVisibleBlank && blankVisibility.hasHiddenBlank) {
+      const add = page.locator('#ADD_MENU_ROW').first();
+      if ((await add.count().catch(() => 0)) > 0) {
+        await add.click({ timeout: 8_000 }).catch(() => {});
+        await page.waitForTimeout(300);
+      }
+    }
+  }
+
   const applied = await page.evaluate(({ extId, name, price, dur, sortNo, description, wantPublished, createIfMissing, menuCategoryCd, searchCategoryCd }) => {
     const setVal = (el, v) => { if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
     const setSelect = (el, preferred) => {
@@ -14753,22 +14789,40 @@ async function pushMenuViaForm(page, payload, opts = {}) {
         if ((h.value || '').trim()) continue;
         const candidate = idxOf(h);
         const nameEl = document.querySelector(`[name="frmMenuEditMenuDetailList[${candidate}].menuName"]`);
-        if (nameEl && !(nameEl.value || '').trim()) { idx = candidate; matchedBy = 'blank_slot'; break; }
+        const table = nameEl?.closest('table');
+        const visible = !table || window.getComputedStyle(table).display !== 'none';
+        if (visible && nameEl && !(nameEl.value || '').trim()) { idx = candidate; matchedBy = 'blank_slot'; break; }
       }
     }
     if (idx < 0) return { ok: false, reason: 'menu_not_found' };
     const byField = (f) => document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].${f}"]`);
     const currentExternalId = (byField('menuId')?.value || '').trim() || null;
     const r = { idx, matchedBy, externalId: currentExternalId };
+    if (matchedBy === 'blank_slot') {
+      // 未指定時は先頭候補ではなく、同じ店舗の既存メニューで最も多い分類を
+      // 引き継ぐ。カテゴリと検索カテゴリの不整合によるサイレント破棄を防ぐ。
+      const existingIds = Array.from(document.querySelectorAll('input[name^="frmMenuEditMenuDetailList"][name$=".menuId"]'))
+        .filter((h) => (h.value || '').trim());
+      const mostFrequent = (field) => {
+        const counts = new Map();
+        for (const h of existingIds) {
+          const existingIdx = idxOf(h);
+          const value = document.querySelector(`[name="frmMenuEditMenuDetailList[${existingIdx}].${field}"]`)?.value || '';
+          if (value) counts.set(value, (counts.get(value) || 0) + 1);
+        }
+        return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+      };
+      r.menuCategoryValue = menuCategoryCd || mostFrequent('menuCategoryCd');
+      r.searchCategoryValue = searchCategoryCd || mostFrequent('searchCategoryCd');
+      r.menuCategory = setSelect(byField('menuCategoryCd'), r.menuCategoryValue);
+      r.searchCategory = setSelect(byField('searchCategoryCd'), r.searchCategoryValue);
+    }
+    // カテゴリ change ハンドラが従属項目を初期化するため、値はカテゴリ確定後に設定する。
     if (name) r.name = setVal(byField('menuName'), name);
     if (price != null) r.price = setVal(byField('price'), price);
     if (dur != null) r.dur = setVal(byField('sejyutsuAimTime'), dur);
     if (sortNo != null) r.sortNo = setVal(byField('sortNo'), sortNo);
     if (description != null) r.description = setVal(byField('explanation'), description);
-    if (matchedBy === 'blank_slot') {
-      r.menuCategory = setSelect(byField('menuCategoryCd'), menuCategoryCd);
-      r.searchCategory = setSelect(byField('searchCategoryCd'), searchCategoryCd);
-    }
     if (wantPublished != null || matchedBy === 'blank_slot') {
       const desired = wantPublished == null ? '1' : (wantPublished ? '1' : '0');
       const radio = document.querySelector(`[name="frmMenuEditMenuDetailList[${idx}].presentFlg"][value="${desired}"]`);
@@ -14790,6 +14844,7 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     const base = `[name="frmMenuEditMenuDetailList[${applied.idx}].`;
     if (name) { await page.fill(`${base}menuName"]`, '', { timeout: 6000 }).catch(() => {}); await page.fill(`${base}menuName"]`, name, { timeout: 6000 }).catch(() => {}); }
     if (price != null) { await page.fill(`${base}price"]`, String(price), { timeout: 6000 }).catch(() => {}); }
+    if (dur != null) { await page.fill(`${base}sejyutsuAimTime"]`, String(dur), { timeout: 6000 }).catch(() => {}); }
   }
   if (!enablePush) return { status: 'confirm_only', confirmed: applied };
 
