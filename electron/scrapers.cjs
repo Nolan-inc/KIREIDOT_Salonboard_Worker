@@ -2354,12 +2354,16 @@ async function scrapeMenus(page, opts = {}) {
 // ----------------- クーポン一覧 (couponList) -----------------
 //
 // ホットペッパー(SalonBoard)ではメニューとクーポンは別概念。
-// クーポンは /CNK/draft/couponList の一覧テーブルから取得する。
-// 各行は <tr> 内に hidden input name="frmCouponListDto[N].couponId" を持ち、
-// 同じ <tr> 内の td.td_value_store_c が以下の列順で並ぶ:
-//   [0] 順番(No. の input)  [1] クーポン写真(img[name=couponPhoto])
-//   [2] 種別(新規/再来/全員) [3] クーポン名  [4] 有効期限(「YYYY/MM/DD まで」/「なし」)
-//   [5] チェック  [6] 詳細  [7] 非掲載/削除
+// クーポンは /CNK(エステ)・/CNB(美容室)/draft/couponList の一覧テーブルから取得する。
+// 各行は <tr> 内に hidden input name="frmCouponListDto[N].couponId" を持つ。
+// 列構成はジャンルで異なる:
+//   エステ(CNK): 順番 / 写真 / 種別 / クーポン名 / 有効期限 / チェック / 詳細 / 非掲載・削除
+//   美容室(CNB): 順番 / 写真 / 種別 / クーポン名 / 利用条件 / チェック / 詳細 / 非掲載・削除
+// さらに CNB はクーポン名セルの class が td_value_store_c ではないため、class 絞り込みで
+// セルを集めると名前列だけが抜けて以降が 1 列ずつ前にズレる (hair 全店でクーポン名に
+// 利用条件「来店日条件：…」が保存されていた真因 2026-08-03)。列位置は同じ table の
+// ヘッダ行 (th) の文言から解決し、行内の全 td を同じ並びとして読む。
+// 順番(No.)と掲載状態は行内 input (seq / presentFlg) から取るのが最も確実。
 const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
 
 async function scrapeCoupons(page, opts = {}) {
@@ -2375,6 +2379,19 @@ async function scrapeCoupons(page, opts = {}) {
   const raw = await page.evaluate(() => {
     const text = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
     const items = [];
+    // 同じ table 内のヘッダ行 (th が並ぶ tr) から列名の並びを得る。
+    // 「クーポン一覧」タイトル行は th 1 個 (colspan) なので除外される。
+    const headerLabels = (table) => {
+      if (!table) return null;
+      for (const row of table.querySelectorAll('tr')) {
+        const ths = Array.from(row.querySelectorAll('th'));
+        if (ths.length < 4) continue;
+        const labels = ths.map((th) => text(th));
+        if (labels.some((l) => l.includes('クーポン名'))) return labels;
+      }
+      return null;
+    };
+    const headerCache = new Map();
     // couponId の hidden input を起点に、その属する行 (tr) を特定する
     const idInputs = document.querySelectorAll('input[name^="frmCouponListDto"][name$=".couponId"]');
     for (const inp of idInputs) {
@@ -2382,52 +2399,79 @@ async function scrapeCoupons(page, opts = {}) {
       if (!externalId) continue;
       const tr = inp.closest('tr');
       if (!tr) continue;
-      // まず td.td_value_store_c を使い、無ければ行内の全 td にフォールバック。
-      let tds = Array.from(tr.querySelectorAll('td.td_value_store_c'));
-      if (tds.length < 4) tds = Array.from(tr.querySelectorAll('td'));
-      if (tds.length < 4) continue;
+      const table = tr.closest('table');
+      let labels = headerCache.get(table);
+      if (labels === undefined) { labels = headerLabels(table); headerCache.set(table, labels); }
+      const allTds = Array.from(tr.querySelectorAll('td'));
+      if (allTds.length < 4) continue;
       const photo = tr.querySelector('img[name="couponPhoto"], img.couponImgSize');
-      // 写真セル以降に「種別・クーポン名・有効期限」が並ぶ。
-      // 写真を含む td のインデックスを基準に相対参照し、列ズレに強くする。
-      let photoIdx = -1;
-      for (let i = 0; i < tds.length; i++) {
-        if (tds[i].querySelector('img[name="couponPhoto"], img.couponImgSize')) { photoIdx = i; break; }
-      }
-      let category, name, expires;
-      if (photoIdx >= 0) {
-        category = text(tds[photoIdx + 1]) || null;     // 種別
-        name = text(tds[photoIdx + 2]);                  // クーポン名
-        expires = text(tds[photoIdx + 3]) || null;       // 有効期限
+      const colOf = (needle) => (labels ? labels.findIndex((l) => l.includes(needle)) : -1);
+      let category = null;
+      let name = '';
+      let expires = null;
+      const nameIdx = colOf('クーポン名');
+      if (nameIdx >= 0 && labels.length === allTds.length) {
+        // ヘッダの列名と td の並びが 1:1 で対応しているときは列名で解決する (CNK/CNB 共通)。
+        // CNB はクーポン名セルの class が td_value_store_c でなく、class 絞り込みだと
+        // 名前列だけ抜けて以降が総ズレするため、class には依存しない。
+        name = text(allTds[nameIdx]);
+        const catIdx = colOf('種別');
+        if (catIdx >= 0) category = text(allTds[catIdx]) || null;
+        const expIdx = colOf('有効期限'); // CNB には無い列 (利用条件)。無ければ null のまま
+        if (expIdx >= 0) expires = text(allTds[expIdx]) || null;
       } else {
-        // 写真が無いレイアウト: 固定インデックス (No, 写真, 種別, 名前, 期限)
-        category = text(tds[2]) || null;
-        name = text(tds[3]);
-        expires = text(tds[4]) || null;
+        // ヘッダが取れない/列数が合わないレイアウト向けの旧ロジック:
+        // 写真を含む td のインデックスを基準に相対参照する。
+        let tds = Array.from(tr.querySelectorAll('td.td_value_store_c'));
+        if (tds.length < 4) tds = allTds;
+        let photoIdx = -1;
+        for (let i = 0; i < tds.length; i++) {
+          if (tds[i].querySelector('img[name="couponPhoto"], img.couponImgSize')) { photoIdx = i; break; }
+        }
+        if (photoIdx >= 0) {
+          category = text(tds[photoIdx + 1]) || null;     // 種別
+          name = text(tds[photoIdx + 2]);                  // クーポン名
+          expires = text(tds[photoIdx + 3]) || null;       // 有効期限
+        } else {
+          // 写真が無いレイアウト: 固定インデックス (No, 写真, 種別, 名前, 期限)
+          category = text(tds[2]) || null;
+          name = text(tds[3]);
+          expires = text(tds[4]) || null;
+        }
       }
       if (!name) continue;
-      // 一覧右端の操作は「現在とは逆の操作」を表示する。
-      //   非掲載にする = 現在は掲載中
-      //   掲載にする   = 現在は非掲載
-      // input/button の value、画像ボタンの alt、リンク本文のいずれにも対応する。
-      const actionSignal = Array.from(
-        tr.querySelectorAll('input,button,img,a'),
-      ).map((el) => [
-        el.getAttribute('value'),
-        el.getAttribute('alt'),
-        el.getAttribute('title'),
-        text(el),
-      ].filter(Boolean).join(' ')).join(' ');
-      const isPublished = /非掲載にする/.test(actionSignal)
-        ? true
-        : /掲載にする/.test(actionSignal)
-          ? false
-          : true;
+      // 順番(No.)は行内の seq input から (レイアウト非依存)。非掲載クーポンは空欄。
+      const seqEl = tr.querySelector('input[name^="frmCouponListDto"][name$=".seq"]');
+      const seq = seqEl ? (seqEl.value || '').replace(/[^\d]/g, '') : '';
+      // 掲載状態は行内 hidden presentFlg ('1'=掲載中) を第一候補にする。
+      // 無い場合は右端の操作ボタンから推定 (「現在とは逆の操作」が表示される):
+      //   非掲載にする = 現在は掲載中 / 掲載にする = 現在は非掲載
+      const presentEl = tr.querySelector('input[name^="frmCouponListDto"][name$=".presentFlg"]');
+      let isPublished;
+      if (presentEl) {
+        isPublished = String(presentEl.value) === '1';
+      } else {
+        const actionSignal = Array.from(
+          tr.querySelectorAll('input,button,img,a'),
+        ).map((el) => [
+          el.getAttribute('value'),
+          el.getAttribute('alt'),
+          el.getAttribute('title'),
+          text(el),
+        ].filter(Boolean).join(' ')).join(' ');
+        isPublished = /非掲載にする/.test(actionSignal)
+          ? true
+          : /掲載にする/.test(actionSignal)
+            ? false
+            : true;
+      }
       items.push({
         external_id: externalId,
         name,
         category,
         expires_label: expires,
         photo_url: photo ? (photo.getAttribute('src') || '').replace(/&amp;/g, '&') : null,
+        sort_no: seq ? Number(seq) : null,
         is_published: isPublished,
       });
     }
@@ -2475,9 +2519,12 @@ async function scrapeCoupons(page, opts = {}) {
       }, it.external_id);
       if (!submitted) { detailFail++; continue; }
 
-      // 編集ページのクーポン名フィールドが現れるまで待つ
+      // 編集ページのクーポン名フィールドが現れるまで待つ。
+      // DTO 名はジャンルで違う (エステ=frmCouponEditCnkDto.*、美容室=別名) ため、
+      // 接頭辞に依存しない末尾一致 ([name$=".couponName"] 等) で参照する。
+      // これが Cnk 固定だった間、美容室は詳細 (金額/内容/条件) が全件取得失敗していた。
       await page
-        .waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 })
+        .waitForSelector('input[name$=".couponName"]', { timeout: 15_000 })
         .catch(() => {});
 
       const d = await page.evaluate(() => {
@@ -2491,17 +2538,17 @@ async function scrapeCoupons(page, opts = {}) {
           return (el.options[el.selectedIndex]?.textContent ?? '').trim();
         };
         const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
-        const price = onlyDigits(val('input[name="frmCouponEditCnkDto.price"]'));
-        const duration = onlyDigits(val('input[name="frmCouponEditCnkDto.sejyutsuAimTime"]'));
-        const content = val('textarea[name="frmCouponEditCnkDto.contentExplanation"]');
+        const price = onlyDigits(val('input[name$=".price"]'));
+        const duration = onlyDigits(val('input[name$=".sejyutsuAimTime"]'));
+        const content = val('textarea[name$=".contentExplanation"]');
         // 提示条件 select は name が確実でないため ID ベースでフォールバック
         const condition =
-          selectedText('select[name="frmCouponEditCnkDto.selectedCouponConditionCd"]') ||
+          selectedText('select[name$=".selectedCouponConditionCd"]') ||
           selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
           selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
-        const useCondition = val('input[name="frmCouponEditCnkDto.useCondition"]');
+        const useCondition = val('input[name$=".useCondition"]');
         return {
-          ok: !!document.querySelector('input[name="frmCouponEditCnkDto.couponName"]'),
+          ok: !!document.querySelector('input[name$=".couponName"]'),
           price: price || null,
           duration_min: duration || null,
           content: content || null,
@@ -2528,6 +2575,7 @@ async function scrapeCoupons(page, opts = {}) {
       category: it.category,
       expires_label: it.expires_label,
       photo_url: it.photo_url,
+      sort_no: it.sort_no ?? null,
       price: d.price != null ? Number(d.price) : null,
       duration_min: d.duration_min != null ? Number(d.duration_min) : null,
       content: d.content ?? null,

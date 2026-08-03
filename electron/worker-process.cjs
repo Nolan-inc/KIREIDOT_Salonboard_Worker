@@ -2711,7 +2711,8 @@ async function processShop(target, channels, runId, opts = {}) {
     if (channelSet.has('coupons')) {
       try {
         emit('shop:progress', { shopId, step: 'coupons', msg: 'クーポン一覧を取得中…' });
-        const { rows, debug } = await scrapeCoupons(page);
+        // genre を渡さないと hair 店でも /CNK/draft/couponList を見て 0 件になる
+        const { rows, debug } = await scrapeCoupons(page, { genre, salonId: creds.salonId ?? null, shopName });
         // 診断ログ: 0 件のとき原因切り分けに使う (到達URL・検出数・詳細取得数)
         emit('log', {
           level: debug?.itemsFound ? 'info' : 'warn',
