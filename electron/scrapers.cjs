@@ -2409,6 +2409,7 @@ async function scrapeCoupons(page, opts = {}) {
       let category = null;
       let name = '';
       let expires = null;
+      let usageCondition = null;
       const nameIdx = colOf('クーポン名');
       if (nameIdx >= 0 && labels.length === allTds.length) {
         // ヘッダの列名と td の並びが 1:1 で対応しているときは列名で解決する (CNK/CNB 共通)。
@@ -2419,6 +2420,9 @@ async function scrapeCoupons(page, opts = {}) {
         if (catIdx >= 0) category = text(allTds[catIdx]) || null;
         const expIdx = colOf('有効期限'); // CNB には無い列 (利用条件)。無ければ null のまま
         if (expIdx >= 0) expires = text(allTds[expIdx]) || null;
+        // CNB のみ: 利用条件列 (来店日条件/対象スタイリスト/その他条件 の合成テキスト)
+        const useIdx = colOf('利用条件');
+        if (useIdx >= 0) usageCondition = text(allTds[useIdx]) || null;
       } else {
         // ヘッダが取れない/列数が合わないレイアウト向けの旧ロジック:
         // 写真を含む td のインデックスを基準に相対参照する。
@@ -2470,6 +2474,7 @@ async function scrapeCoupons(page, opts = {}) {
         name,
         category,
         expires_label: expires,
+        usage_condition_label: usageCondition,
         photo_url: photo ? (photo.getAttribute('src') || '').replace(/&amp;/g, '&') : null,
         sort_no: seq ? Number(seq) : null,
         is_published: isPublished,
@@ -2495,95 +2500,179 @@ async function scrapeCoupons(page, opts = {}) {
   const details = {};
   let detailOk = 0;
   let detailFail = 0;
-  for (const it of baseItems) {
-    try {
-      // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
-      if (!page.url().includes('/draft/couponList')) {
-        await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-        await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  // 失敗診断: 最初の数件だけ「どのページに居たか」を残す (非掲載クーポンで
+  // 編集ページに入れない等の切り分け用。debug 経由で job result に出る)。
+  const detailFailSamples = [];
+  const scrapeDetailOnce = async (it) => {
+    // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
+    if (!page.url().includes('/draft/couponList')) {
+      await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    }
+    // couponEditForm に couponId をセットして submit
+    const submitted = await page.evaluate((couponId) => {
+      const form = document.querySelector('#couponEditForm');
+      if (!form) return false;
+      let idInput = form.querySelector('input[name="couponId"]');
+      if (!idInput) {
+        idInput = document.createElement('input');
+        idInput.type = 'hidden';
+        idInput.name = 'couponId';
+        form.appendChild(idInput);
       }
-      // couponEditForm に couponId をセットして submit
-      const submitted = await page.evaluate((couponId) => {
-        const form = document.querySelector('#couponEditForm');
-        if (!form) return false;
-        let idInput = form.querySelector('input[name="couponId"]');
-        if (!idInput) {
-          idInput = document.createElement('input');
-          idInput.type = 'hidden';
-          idInput.name = 'couponId';
-          form.appendChild(idInput);
+      idInput.value = couponId;
+      form.submit();
+      return true;
+    }, it.external_id);
+    if (!submitted) return { ok: false, fail_reason: 'edit_form_not_found' };
+
+    // 編集ページのクーポン名フィールドが現れるまで待つ。
+    // DTO 名はジャンルで違う (エステ=frmCouponEditCnkDto.*、美容室=別名) ため、
+    // 接頭辞に依存しない末尾一致 ([name$=".couponName"] 等) で参照する。
+    // これが Cnk 固定だった間、美容室は詳細 (金額/内容/条件) が全件取得失敗していた。
+    await page
+      .waitForSelector('input[name$=".couponName"]', { timeout: 15_000 })
+      .catch(() => {});
+
+    return page.evaluate(() => {
+      const textOf = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
+      // input/select/textarea を同じ name 末尾一致で読む。CNB(美容室) は
+      // 施術目安時間が <select> で、input だけ見ると hair 全店で空になる (2026-08-03)。
+      const fieldVal = (suffix) => {
+        const el = document.querySelector(
+          `input[name$="${suffix}"], select[name$="${suffix}"], textarea[name$="${suffix}"]`,
+        );
+        if (!el) return '';
+        if (el.tagName === 'SELECT') {
+          if (el.selectedIndex < 0) return '';
+          return textOf(el.options[el.selectedIndex]) || (el.value ?? '').trim();
         }
-        idInput.value = couponId;
-        form.submit();
-        return true;
-      }, it.external_id);
-      if (!submitted) { detailFail++; continue; }
-
-      // 編集ページのクーポン名フィールドが現れるまで待つ。
-      // DTO 名はジャンルで違う (エステ=frmCouponEditCnkDto.*、美容室=別名) ため、
-      // 接頭辞に依存しない末尾一致 ([name$=".couponName"] 等) で参照する。
-      // これが Cnk 固定だった間、美容室は詳細 (金額/内容/条件) が全件取得失敗していた。
-      await page
-        .waitForSelector('input[name$=".couponName"]', { timeout: 15_000 })
-        .catch(() => {});
-
-      const d = await page.evaluate(() => {
-        const val = (sel) => {
-          const el = document.querySelector(sel);
-          return el ? (el.value ?? '').trim() : '';
-        };
-        const selectedText = (sel) => {
-          const el = document.querySelector(sel);
-          if (!el || el.selectedIndex < 0) return '';
-          return (el.options[el.selectedIndex]?.textContent ?? '').trim();
-        };
-        const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
-        const price = onlyDigits(val('input[name$=".price"]'));
-        const duration = onlyDigits(val('input[name$=".sejyutsuAimTime"]'));
-        const content = val('textarea[name$=".contentExplanation"]');
-        // 提示条件 select は name が確実でないため ID ベースでフォールバック
-        const condition =
-          selectedText('select[name$=".selectedCouponConditionCd"]') ||
-          selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
-          selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
-        const useCondition = val('input[name$=".useCondition"]');
-        return {
-          ok: !!document.querySelector('input[name$=".couponName"]'),
-          price: price || null,
-          duration_min: duration || null,
-          content: content || null,
-          condition_label: condition || null,
-          use_condition: useCondition || null,
-        };
-      });
-      if (d?.ok) {
-        details[it.external_id] = d;
-        detailOk++;
-      } else {
-        detailFail++;
+        return (el.value ?? '').trim();
+      };
+      const selectedText = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el || el.selectedIndex < 0) return '';
+        return textOf(el.options[el.selectedIndex]);
+      };
+      // ヘッダ文言 (行の最初の th/td) で行を探す保険。DTO 名がジャンルで揺れても効く。
+      const rowByHeader = (needle) => {
+        for (const tr of document.querySelectorAll('tr')) {
+          const head = tr.querySelector('th, td');
+          if (head && textOf(head).includes(needle)) return tr;
+        }
+        return null;
+      };
+      const rowFieldVal = (needle) => {
+        const tr = rowByHeader(needle);
+        if (!tr) return '';
+        const el = tr.querySelector('select, textarea, input:not([type="hidden"]):not([type="checkbox"])');
+        if (!el) return '';
+        if (el.tagName === 'SELECT') {
+          if (el.selectedIndex < 0) return '';
+          return textOf(el.options[el.selectedIndex]) || (el.value ?? '').trim();
+        }
+        return (el.value ?? '').trim();
+      };
+      const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
+      const price = onlyDigits(fieldVal('.price') || rowFieldVal('価格'));
+      const duration = onlyDigits(fieldVal('.sejyutsuAimTime') || rowFieldVal('施術目安時間'));
+      const content = fieldVal('.contentExplanation') || rowFieldVal('クーポン内容');
+      // 提示条件 select は name が確実でないため ID ベースでフォールバック
+      const condition =
+        fieldVal('.selectedCouponConditionCd') ||
+        selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
+        selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
+      const useCondition = fieldVal('.useCondition') || rowFieldVal('その他条件');
+      // カテゴリ (カット/カラー等のチェックボックス群、CNB のみ)。
+      // カテゴリ行内で checked なもののラベル文言を集める。
+      const categories = (() => {
+        const tr = rowByHeader('カテゴリ');
+        if (!tr) return [];
+        const out = [];
+        for (const cb of tr.querySelectorAll('input[type="checkbox"]')) {
+          if (!cb.checked) continue;
+          const label = cb.closest('label')
+            || (cb.id ? document.querySelector(`label[for="${cb.id}"]`) : null)
+            || cb.parentElement;
+          const t = textOf(label);
+          if (t) out.push(t);
+        }
+        return out;
+      })();
+      const ok = !!document.querySelector('input[name$=".couponName"]');
+      return {
+        ok,
+        price: price || null,
+        duration_min: duration || null,
+        content: content || null,
+        condition_label: condition || null,
+        use_condition: useCondition || null,
+        categories,
+        // 失敗時の切り分け用 (編集ページに到達できていないケースの居場所)
+        fail_reason: ok ? null : 'coupon_name_field_not_found',
+        fail_url: ok ? null : location.href,
+        fail_title: ok ? null : document.title,
+        fail_snippet: ok ? null : (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 200),
+      };
+    });
+  };
+  for (const it of baseItems) {
+    let d = null;
+    // ナビゲーション断などの一過性例外は 1 回だけやり直す。
+    // ok=false (編集ページ自体に入れない) は決定的なので再試行しない。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        d = await scrapeDetailOnce(it);
+        break;
+      } catch (e) {
+        d = { ok: false, fail_reason: `exception: ${String(e?.message || e).slice(0, 120)}` };
       }
-    } catch (_e) {
+    }
+    if (d?.ok) {
+      details[it.external_id] = d;
+      detailOk++;
+    } else {
       detailFail++;
+      if (detailFailSamples.length < 5) {
+        detailFailSamples.push({
+          id: it.external_id,
+          published: it.is_published,
+          reason: d?.fail_reason || 'unknown',
+          url: d?.fail_url || null,
+          title: d?.fail_title || null,
+          snippet: d?.fail_snippet || null,
+        });
+      }
     }
   }
 
   const rows = baseItems.map((it) => {
-    const d = details[it.external_id] || {};
-    return {
+    const d = details[it.external_id];
+    const row = {
       external_id: it.external_id,
       name: it.name,
       category: it.category,
       expires_label: it.expires_label,
       photo_url: it.photo_url,
       sort_no: it.sort_no ?? null,
-      price: d.price != null ? Number(d.price) : null,
-      duration_min: d.duration_min != null ? Number(d.duration_min) : null,
-      content: d.content ?? null,
-      condition_label: d.condition_label ?? null,
-      use_condition: d.use_condition ?? null,
       is_active: true,
       is_published: it.is_published !== false,
     };
+    // 利用条件: 編集ページの提示条件 (CNK) を優先し、無ければ CNB 一覧の
+    // 利用条件列 (来店日条件/対象スタイリスト/その他条件) を使う。
+    const cond = (d && d.condition_label) || it.usage_condition_label || null;
+    if (cond) row.condition_label = cond;
+    // 詳細が取れなかったクーポンは詳細系キー自体を送らない。RPC 側は
+    // 「キーが在るときだけ上書き」なので、一過性の詳細取得失敗や非掲載化で
+    // 既存の金額/内容/所要時間を null で消さないため。
+    if (d) {
+      row.price = d.price != null ? Number(d.price) : null;
+      row.duration_min = d.duration_min != null ? Number(d.duration_min) : null;
+      row.content = d.content ?? null;
+      row.use_condition = d.use_condition ?? null;
+      if (Array.isArray(d.categories) && d.categories.length > 0) row.categories = d.categories;
+    }
+    return row;
   });
   return {
     rows,
@@ -2592,6 +2681,7 @@ async function scrapeCoupons(page, opts = {}) {
       fieldsTotal: raw.total,
       detailOk,
       detailFail,
+      detailFailSamples,
       url: raw.url,
       title: raw.title,
       trCount: raw.trCount,
