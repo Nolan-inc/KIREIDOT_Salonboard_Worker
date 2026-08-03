@@ -2366,6 +2366,92 @@ async function scrapeMenus(page, opts = {}) {
 // 順番(No.)と掲載状態は行内 input (seq / presentFlg) から取るのが最も確実。
 const COUPON_LIST_URL = 'https://salonboard.com/CNK/draft/couponList';
 
+// couponEdit ページから詳細 (金額/所要時間/内容/条件/カテゴリ) を抜く共通ロジック。
+// 「画面遷移して document を読む」経路と「fetch 直POSTのHTMLを DOMParser で読む」経路の
+// 両方で同じ抽出を使うため、self-contained な関数にして .toString() でページへ合成する
+// (ページ内 eval を使わないので CSP の影響を受けない)。ブラウザ内で実行される。
+function couponDetailExtract(doc) {
+  const textOf = (el) => ((el && el.textContent) || '').replace(/\s+/g, ' ').trim();
+  const q = (sel) => doc.querySelector(sel);
+  // input/select/textarea を同じ name 末尾一致で読む。CNB(美容室) は
+  // 施術目安時間が <select> で、input だけ見ると hair 全店で空になる (2026-08-03)。
+  const fieldVal = (suffix) => {
+    const el = q(`input[name$="${suffix}"], select[name$="${suffix}"], textarea[name$="${suffix}"]`);
+    if (!el) return '';
+    if (el.tagName === 'SELECT') {
+      if (el.selectedIndex < 0) return '';
+      return textOf(el.options[el.selectedIndex]) || (el.value || '').trim();
+    }
+    return (el.value || '').trim();
+  };
+  const selectedText = (sel) => {
+    const el = q(sel);
+    if (!el || el.selectedIndex < 0) return '';
+    return textOf(el.options[el.selectedIndex]);
+  };
+  // ヘッダ文言 (行の最初の th/td) で行を探す保険。DTO 名がジャンルで揺れても効く。
+  const rowByHeader = (needle) => {
+    for (const tr of doc.querySelectorAll('tr')) {
+      const head = tr.querySelector('th, td');
+      if (head && textOf(head).includes(needle)) return tr;
+    }
+    return null;
+  };
+  const rowFieldVal = (needle) => {
+    const tr = rowByHeader(needle);
+    if (!tr) return '';
+    const el = tr.querySelector('select, textarea, input:not([type="hidden"]):not([type="checkbox"])');
+    if (!el) return '';
+    if (el.tagName === 'SELECT') {
+      if (el.selectedIndex < 0) return '';
+      return textOf(el.options[el.selectedIndex]) || (el.value || '').trim();
+    }
+    return (el.value || '').trim();
+  };
+  const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
+  const price = onlyDigits(fieldVal('.price') || rowFieldVal('価格'));
+  const duration = onlyDigits(fieldVal('.sejyutsuAimTime') || rowFieldVal('施術目安時間'));
+  const content = fieldVal('.contentExplanation') || rowFieldVal('クーポン内容');
+  // 提示条件 select は name が確実でないため ID ベースでフォールバック
+  const condition =
+    fieldVal('.selectedCouponConditionCd') ||
+    selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
+    selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
+  const useCondition = fieldVal('.useCondition') || rowFieldVal('その他条件');
+  // カテゴリ (カット/カラー等のチェックボックス群、CNB のみ)。
+  // カテゴリ行内で checked なもののラベル文言を集める。
+  const categories = (() => {
+    const tr = rowByHeader('カテゴリ');
+    if (!tr) return [];
+    const out = [];
+    for (const cb of tr.querySelectorAll('input[type="checkbox"]')) {
+      if (!cb.checked) continue;
+      const label = cb.closest('label')
+        || (cb.id ? doc.querySelector(`label[for="${cb.id}"]`) : null)
+        || cb.parentElement;
+      const t = textOf(label);
+      if (t) out.push(t);
+    }
+    return out;
+  })();
+  const ok = !!q('input[name$=".couponName"]');
+  return {
+    ok,
+    price: price || null,
+    duration_min: duration || null,
+    content: content || null,
+    condition_label: condition || null,
+    use_condition: useCondition || null,
+    categories,
+    // 失敗時の切り分け用 (編集ページに到達できていないケースの居場所)
+    fail_reason: ok ? null : 'coupon_name_field_not_found',
+    fail_url: ok ? null : ((doc.location && doc.location.href) || null),
+    fail_title: ok ? null : (doc.title || null),
+    fail_snippet: ok ? null : ((doc.body && doc.body.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+  };
+}
+const COUPON_DETAIL_EXTRACT_SRC = couponDetailExtract.toString();
+
 async function scrapeCoupons(page, opts = {}) {
   // 掲載管理はジャンルで URL 接頭辞が違う(hair=/CNB/、他=/CNK/)。genre を受けないと
   // hair 店でも /CNK/ を見て 0 件になる(ADER 開発店で判明 2026-07-12)。
@@ -2494,17 +2580,55 @@ async function scrapeCoupons(page, opts = {}) {
   const baseItems = raw.items ?? [];
 
   // ---- 各クーポンの編集ページ (couponEdit) から詳細 (金額/所要時間/内容/条件) を取得 ----
-  // 一覧には金額・所要時間・内容が無く、編集ページにのみ存在するため 1 件ずつ開く。
-  // 一覧ページ内の #couponEditForm に couponId をセットして submit すると編集ページへ遷移する
-  // (CSRF / userId / couponSortDate は既にフォームに入っている)。
+  // 一覧には金額・所要時間・内容が無く、編集ページにのみ存在するため 1 件ずつ読む。
+  // 主経路: 一覧の #couponEditForm と同じパラメータを fetch で直POSTし、返ったHTMLを
+  //   DOMParser で読む (画面遷移なし・~0.5秒/件)。150件級の店舗でも read ジョブの
+  //   10分安全弁 (READ_JOB_SAFETY_TIMEOUT) に収まる。従来の「一覧へ戻る→submit→
+  //   編集ページ描画」は 2 遷移/件で 150 件が 10 分に収まらず、末尾 (=非掲載含む) が
+  //   毎回打ち切られていた (2026-08-03 森田で実測)。
+  // 予備経路: fetch が連続で弾かれる場合 (CSRF 一回性など) は従来の画面遷移方式へ落とす。
   const details = {};
   let detailOk = 0;
   let detailFail = 0;
-  // 失敗診断: 最初の数件だけ「どのページに居たか」を残す (非掲載クーポンで
-  // 編集ページに入れない等の切り分け用。debug 経由で job result に出る)。
+  // 失敗診断: 最初の数件だけ「どのページに居たか」を残す (debug 経由で docker logs に出る)。
   const detailFailSamples = [];
-  const scrapeDetailOnce = async (it) => {
-    // 一覧ページに居ることを保証 (前回ループで編集ページに遷移しているため毎回戻る)
+  // 一覧フォームの hidden 一式 (CSRF / userId / couponSortDate) を一度だけ吸い出す。
+  const editFormSpec = await page.evaluate(() => {
+    const form = document.querySelector('#couponEditForm');
+    if (!form) return null;
+    const params = {};
+    for (const el of form.querySelectorAll('input, select, textarea')) {
+      if (el.name) params[el.name] = el.value ?? '';
+    }
+    return {
+      action: new URL(form.getAttribute('action') || location.href, location.href).toString(),
+      params,
+    };
+  }).catch(() => null);
+  const scrapeDetailViaFetch = async (it) => {
+    const script = `(async () => {
+      const extract = ${COUPON_DETAIL_EXTRACT_SRC};
+      const spec = ${JSON.stringify(editFormSpec)};
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(spec.params)) params.set(k, v);
+      params.set('couponId', ${JSON.stringify(it.external_id)});
+      const res = await fetch(spec.action, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+      });
+      if (!res.ok) return { ok: false, fail_reason: 'fetch_status_' + res.status };
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const d = extract(doc);
+      if (!d.ok) d.fail_reason = 'fetch_' + (d.fail_reason || 'parse_failed');
+      return d;
+    })()`;
+    return page.evaluate(script);
+  };
+  const scrapeDetailViaNav = async (it) => {
+    // 一覧ページに居ることを保証 (前回の nav で編集ページに遷移しているため毎回戻る)
     if (!page.url().includes('/draft/couponList')) {
       await page.goto(couponListUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
@@ -2525,102 +2649,17 @@ async function scrapeCoupons(page, opts = {}) {
       return true;
     }, it.external_id);
     if (!submitted) return { ok: false, fail_reason: 'edit_form_not_found' };
-
     // 編集ページのクーポン名フィールドが現れるまで待つ。
     // DTO 名はジャンルで違う (エステ=frmCouponEditCnkDto.*、美容室=別名) ため、
     // 接頭辞に依存しない末尾一致 ([name$=".couponName"] 等) で参照する。
-    // これが Cnk 固定だった間、美容室は詳細 (金額/内容/条件) が全件取得失敗していた。
     await page
       .waitForSelector('input[name$=".couponName"]', { timeout: 15_000 })
       .catch(() => {});
-
-    return page.evaluate(() => {
-      const textOf = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
-      // input/select/textarea を同じ name 末尾一致で読む。CNB(美容室) は
-      // 施術目安時間が <select> で、input だけ見ると hair 全店で空になる (2026-08-03)。
-      const fieldVal = (suffix) => {
-        const el = document.querySelector(
-          `input[name$="${suffix}"], select[name$="${suffix}"], textarea[name$="${suffix}"]`,
-        );
-        if (!el) return '';
-        if (el.tagName === 'SELECT') {
-          if (el.selectedIndex < 0) return '';
-          return textOf(el.options[el.selectedIndex]) || (el.value ?? '').trim();
-        }
-        return (el.value ?? '').trim();
-      };
-      const selectedText = (sel) => {
-        const el = document.querySelector(sel);
-        if (!el || el.selectedIndex < 0) return '';
-        return textOf(el.options[el.selectedIndex]);
-      };
-      // ヘッダ文言 (行の最初の th/td) で行を探す保険。DTO 名がジャンルで揺れても効く。
-      const rowByHeader = (needle) => {
-        for (const tr of document.querySelectorAll('tr')) {
-          const head = tr.querySelector('th, td');
-          if (head && textOf(head).includes(needle)) return tr;
-        }
-        return null;
-      };
-      const rowFieldVal = (needle) => {
-        const tr = rowByHeader(needle);
-        if (!tr) return '';
-        const el = tr.querySelector('select, textarea, input:not([type="hidden"]):not([type="checkbox"])');
-        if (!el) return '';
-        if (el.tagName === 'SELECT') {
-          if (el.selectedIndex < 0) return '';
-          return textOf(el.options[el.selectedIndex]) || (el.value ?? '').trim();
-        }
-        return (el.value ?? '').trim();
-      };
-      const onlyDigits = (s) => (s || '').replace(/[^\d]/g, '');
-      const price = onlyDigits(fieldVal('.price') || rowFieldVal('価格'));
-      const duration = onlyDigits(fieldVal('.sejyutsuAimTime') || rowFieldVal('施術目安時間'));
-      const content = fieldVal('.contentExplanation') || rowFieldVal('クーポン内容');
-      // 提示条件 select は name が確実でないため ID ベースでフォールバック
-      const condition =
-        fieldVal('.selectedCouponConditionCd') ||
-        selectedText('#TagTD_NM_COUPON_CONDITION_CD_01 select') ||
-        selectedText('[id^="TagTD_NM_COUPON_CONDITION_CD"] select');
-      const useCondition = fieldVal('.useCondition') || rowFieldVal('その他条件');
-      // カテゴリ (カット/カラー等のチェックボックス群、CNB のみ)。
-      // カテゴリ行内で checked なもののラベル文言を集める。
-      const categories = (() => {
-        const tr = rowByHeader('カテゴリ');
-        if (!tr) return [];
-        const out = [];
-        for (const cb of tr.querySelectorAll('input[type="checkbox"]')) {
-          if (!cb.checked) continue;
-          const label = cb.closest('label')
-            || (cb.id ? document.querySelector(`label[for="${cb.id}"]`) : null)
-            || cb.parentElement;
-          const t = textOf(label);
-          if (t) out.push(t);
-        }
-        return out;
-      })();
-      const ok = !!document.querySelector('input[name$=".couponName"]');
-      return {
-        ok,
-        price: price || null,
-        duration_min: duration || null,
-        content: content || null,
-        condition_label: condition || null,
-        use_condition: useCondition || null,
-        categories,
-        // 失敗時の切り分け用 (編集ページに到達できていないケースの居場所)
-        fail_reason: ok ? null : 'coupon_name_field_not_found',
-        fail_url: ok ? null : location.href,
-        fail_title: ok ? null : document.title,
-        fail_snippet: ok ? null : (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 200),
-      };
-    });
+    return page.evaluate(`(${COUPON_DETAIL_EXTRACT_SRC})(document)`);
   };
   // ADER 系グループは他ジョブ (別サロンの fetch_bookings 等) と同一 SB アカウントを
-  // 取り合い、ループ途中でセッションが失効して以降の詳細が全滅する (2026-08-03 森田で
-  // 実測: 先頭 53 件成功→残り全件 edit_form_not_found 即死。非掲載が詳細ゼロだったのも
-  // 処理順が最後なだけで同根)。失敗したらサロン文脈を張り直し、ジョブ中 1 回だけ
-  // relogin まで使って自己回復する。
+  // 取り合い、ループ途中でセッションが失効して以降の詳細が全滅する。失敗したら
+  // サロン文脈を張り直し、ジョブ中 1 回だけ relogin まで使って自己回復する。
   let reloginUsed = false;
   let consecutiveFails = 0;
   const recoverListContext = async () => {
@@ -2644,17 +2683,38 @@ async function scrapeCoupons(page, opts = {}) {
     }
     return false;
   };
+  // read ジョブの 10 分安全弁で Chrome を落とされる前に自分で切り上げる
+  // (打ち切っても既存詳細は row 側のキー省略で保持される)。
+  const detailDeadline = Date.now() + 8 * 60_000;
+  let fetchMode = !!editFormSpec;
+  let fetchFails = 0;
+  let truncatedAt = null;
   for (const it of baseItems) {
+    if (Date.now() > detailDeadline) { truncatedAt = it.external_id; break; }
     let d = null;
-    // 失敗時 (例外・編集ページ不達とも) は文脈を張り直して 1 回だけやり直す。
-    for (let attempt = 0; attempt < 2; attempt++) {
+    if (fetchMode) {
       try {
-        d = await scrapeDetailOnce(it);
+        d = await scrapeDetailViaFetch(it);
       } catch (e) {
-        d = { ok: false, fail_reason: `exception: ${String(e?.message || e).slice(0, 120)}` };
+        d = { ok: false, fail_reason: `fetch_exception: ${String(e?.message || e).slice(0, 120)}` };
       }
-      if (d?.ok) break;
-      if (attempt === 0) await recoverListContext();
+      if (!d?.ok) {
+        fetchFails++;
+        // fetch 経路が構造的に効かない (CSRF 一回性/フィルタ) なら以降は nav 一本にする
+        if (fetchFails >= 3) fetchMode = false;
+      }
+    }
+    if (!d?.ok) {
+      // nav 経路 (fetch 失敗時の同一 item 救済も兼ねる)。失敗時は文脈回復して 1 回だけ再試行。
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          d = await scrapeDetailViaNav(it);
+        } catch (e) {
+          d = { ok: false, fail_reason: `exception: ${String(e?.message || e).slice(0, 120)}` };
+        }
+        if (d?.ok) break;
+        if (attempt === 0) await recoverListContext();
+      }
     }
     if (d?.ok) {
       details[it.external_id] = d;
@@ -2715,6 +2775,9 @@ async function scrapeCoupons(page, opts = {}) {
       detailOk,
       detailFail,
       detailFailSamples,
+      detailFetchMode: fetchMode,
+      detailFetchFails: fetchFails,
+      detailTruncatedAt: truncatedAt,
       url: raw.url,
       title: raw.title,
       trCount: raw.trCount,
