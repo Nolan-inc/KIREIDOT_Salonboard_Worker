@@ -14698,7 +14698,10 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   const fail = (reason, errorCode, manualRequired) => ({ status: 'failed', reason, errorCode, manualRequired });
 
   const extId = String(p.external_id || '').trim();
-  const name = String(p.name || p.menu_name || '').trim();
+  // SalonBoard の校閲は波ダッシュ(U+301C)を「確認が必要な文字」として扱い、
+  // 新規行を保存しない。一方、全角チルダ(U+FF5E)は既存メニューでも利用される。
+  // 照合・作成・事後検証を同じ正規化値で行い、再試行時の重複も防ぐ。
+  const name = String(p.name || p.menu_name || '').trim().replace(/\u301c/g, '\uff5e');
   if (!extId && !name) return fail('メニューの external_id も name もありません', 'UNKNOWN_ERROR', true);
   const createIfMissing = p.create_if_missing === true || p.operation === 'create';
   const price = p.price ?? null;

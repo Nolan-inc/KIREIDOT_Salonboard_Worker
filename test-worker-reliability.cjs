@@ -114,7 +114,7 @@ async function testMenuFallsBackToNativeSubmitWhenRegisterLinkIsNoop() {
       <table><tr><td>
         <select name="frmMenuEditMenuDetailList[1].menuCategoryCd"><option value=""></option><option value="GR01~MC01">リラク</option><option value="GR06~MC25">エステ：フェイシャル</option></select>
         <select name="frmMenuEditMenuDetailList[1].searchCategoryCd"><option value=""></option><option value="SE16">リラク</option><option value="SE22">エステ：フェイシャル</option></select>
-        <textarea name="frmMenuEditMenuDetailList[1].menuName">${registered ? 'JS未初期化テストメニュー' : ''}</textarea>
+        <textarea name="frmMenuEditMenuDetailList[1].menuName">${registered ? '友人２回目～　テスト' : ''}</textarea>
         <textarea name="frmMenuEditMenuDetailList[1].explanation"></textarea>
         <input name="frmMenuEditMenuDetailList[1].price" value="">
         <input name="frmMenuEditMenuDetailList[1].sejyutsuAimTime" value="">
@@ -143,7 +143,7 @@ async function testMenuFallsBackToNativeSubmitWhenRegisterLinkIsNoop() {
 
   const result = await pushMenuViaForm(page, {
     create_if_missing: true,
-    name: 'JS未初期化テストメニュー',
+    name: '友人２回目〜　テスト',
     price: 9900,
     duration_min: 75,
   }, { baseUrl: 'http://menu-native-submit.test/', genre: 'esthetic', enablePush: true });
@@ -157,6 +157,7 @@ async function testMenuFallsBackToNativeSubmitWhenRegisterLinkIsNoop() {
   assert.equal(result.confirmed.menuCategoryValue, 'GR06~MC25');
   assert.equal(result.confirmed.searchCategoryValue, 'SE22');
   assert.match(lastPostData, /frmMenuEditMenuDetailList%5B1%5D\.sejyutsuAimTime=75/);
+  assert.ok(lastPostData.includes(encodeURIComponent('友人２回目～　テスト')));
   await browser.close();
 }
 
