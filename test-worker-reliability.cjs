@@ -920,6 +920,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /getElementById\('menuEditForm'\)[\s\S]{0,500}HTMLFormElement\.prototype\.submit\.call\(form\)/,
+    'menu creation must submit menuEditForm directly instead of trusting an uninitialized click handler',
+  );
+  assert.match(
+    source,
     /openChangeFormViaReserveList[\s\S]{0,6000}reserveLink\.click[\s\S]{0,5000}onForm = await openChangeFormViaReserveList/,
     'esthetic booking updates must open the real reservation-row link before direct URL fallbacks',
   );

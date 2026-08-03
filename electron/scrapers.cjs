@@ -14703,25 +14703,44 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   }
   if (!enablePush) return { status: 'confirm_only', confirmed: applied };
 
+  // 通常は画面の登録導線を使う。一方、Cloud上で画面JSの初期化前に click すると
+  // 「click成功・POSTなし」になり、入力だけが消えることがあるため、同じ
+  // form action/CSRFを使うnative submitも冪等に実行して送信を保証する。
   let dialogAccepted = false;
+  let clicked = false;
   const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   try {
     const btn = page.locator('a.jsc_menuEdit_btn_reg, a#registBtn, a:has-text("登録する")').first();
-    if ((await btn.count().catch(() => 0)) === 0) {
-      const cap = await captureScrapeDebug(page, 'menu', 'no_regist', { diagnostics: { url: page.url() } });
-      return fail(`メニューの登録ボタンが見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
+    if ((await btn.count().catch(() => 0)) > 0) {
+      clicked = await btn.click({ timeout: 12_000 }).then(() => true).catch(() => false);
+      await page.waitForTimeout(500);
+      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible').first();
+      if ((await yes.count().catch(() => 0)) > 0) {
+        await yes.click({ timeout: 8_000 }).catch(() => {});
+        await page.waitForTimeout(500);
+      }
     }
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {}),
-      btn.click({ timeout: 12_000 }).catch(() => {}),
-    ]);
-    await page.waitForTimeout(1500);
-    const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible').first();
-    if ((await yes.count().catch(() => 0)) > 0) { await yes.click({ timeout: 8_000 }).catch(() => {}); await page.waitForTimeout(1200); }
   } finally {
     page.off('dialog', onDialog);
   }
+  const nativeSubmitted = await Promise.all([
+    page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+    page.evaluate(() => {
+      const form = document.getElementById('menuEditForm');
+      if (!(form instanceof HTMLFormElement)) return false;
+      const modified = form.querySelector('input[name="modified"]');
+      if (modified) modified.value = '1';
+      HTMLFormElement.prototype.submit.call(form);
+      return true;
+    }).catch(() => false),
+  ]).then(([, ok]) => ok);
+  const submitted = clicked || nativeSubmitted;
+  if (!submitted) {
+    const cap = await captureScrapeDebug(page, 'menu', 'no_regist', { diagnostics: { url: page.url() } });
+    return fail(`メニュー登録フォームを送信できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', false);
+  }
+  await page.waitForTimeout(1500);
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
   // 送信後に menuEdit を再取得し、menuId 行の名前が新値で保存されているか確認
