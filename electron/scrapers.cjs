@@ -14848,6 +14848,30 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   }
   if (!enablePush) return { status: 'confirm_only', confirmed: applied };
 
+  const beforeSubmitState = await page.evaluate(({ idx }) => {
+    const prefix = `frmMenuEditMenuDetailList[${idx}].`;
+    const fields = {};
+    for (const el of document.querySelectorAll(`[name^="${prefix}"]`)) {
+      const key = (el.getAttribute('name') || '').slice(prefix.length);
+      if (!key) continue;
+      if ((el.type === 'radio' || el.type === 'checkbox') && !el.checked) continue;
+      fields[key] = el.value ?? '';
+    }
+    const nameEl = document.querySelector(`[name="${prefix}menuName"]`);
+    const table = nameEl?.closest('table');
+    return {
+      url: location.href,
+      action: document.getElementById('menuEditForm')?.getAttribute('action') || null,
+      modified: document.querySelector('#menuEditForm [name="modified"]')?.value ?? null,
+      jsChangeFlg: document.querySelector('[name="JS_CHANGE_FLG"]')?.value ?? null,
+      tableDisplay: table ? window.getComputedStyle(table).display : null,
+      fields,
+    };
+  }, { idx: applied.idx }).catch(() => null);
+  await captureScrapeDebug(page, 'menu', 'before_submit', {
+    diagnostics: { applied, beforeSubmitState },
+  });
+
   // 通常は画面の登録導線を使う。一方、Cloud上で画面JSの初期化前に click すると
   // 「click成功・POSTなし」になり、入力だけが消えることがあるため、同じ
   // form action/CSRFを使うnative submitも冪等に実行して送信を保証する。
@@ -14904,6 +14928,18 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   await page.waitForTimeout(1500);
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
+  await captureScrapeDebug(page, 'menu', 'after_submit', {
+    diagnostics: {
+      applied,
+      beforeSubmitState,
+      dialogAccepted,
+      clicked,
+      clickSubmitted,
+      nativeSubmitted,
+      afterUrl: page.url(),
+      err: errMatch ? errMatch[0].trim() : null,
+    },
+  });
   // 送信後に menuEdit を再取得し、menuId 行の名前が新値で保存されているか確認
   await page.goto(draftUrl(opts.genre, 'menuEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
