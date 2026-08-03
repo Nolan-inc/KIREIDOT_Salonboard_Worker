@@ -690,6 +690,10 @@ function testGuardWaitsForOriginalResultBeforeTimeoutCallback() {
 
 function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   const source = readFileSync(require.resolve('./electron/scrapers.cjs'), 'utf8');
+  const menuSection = source.slice(
+    source.indexOf('async function pushMenuViaForm'),
+    source.indexOf('/**\n * クーポンを SalonBoard', source.indexOf('async function pushMenuViaForm')),
+  );
   const cloudSource = readFileSync(require.resolve('./worker.ts'), 'utf8');
   const pcWorkerSource = readFileSync(require.resolve('./electron/worker-process.cjs'), 'utf8');
   const pcFallbackGateMigration = readFileSync(
@@ -839,6 +843,21 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
     source,
     /if \(!rlastupdate \|\| staleTokenRetry % 2 === 1\)/,
     'new booking must alternate an official schedule token with a current-time fallback across stale retries',
+  );
+  assert.match(
+    source,
+    /findHairReserveOnSchedule[\s\S]{0,9000}genre === 'hair'[\s\S]{0,700}hairExisting/,
+    'hair booking retry preflight must stay on the hair schedule instead of opening the KLP reserve list',
+  );
+  assert.match(
+    source,
+    /if \(genre !== 'hair'\) await ensureReserveSalonContext/,
+    'hair booking creation must not repeat group-store selection after schedule preflight',
+  );
+  assert.match(
+    source,
+    /if \(!page\.isClosed\(\)[\s\S]{0,120}ERR_ABORTED\|frame/,
+    'a closed browser must not recursively retry the booking form after the job safety timeout',
   );
   assert.doesNotMatch(
     source,
@@ -992,11 +1011,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /const nativeSubmitted = clicked \? false : await Promise\.all\([\s\S]{0,700}HTMLFormElement\.prototype\.submit\.call\(form\)/,
+    /const nativeSubmitted = clickSubmitted \? false : await Promise\.all\([\s\S]{0,700}HTMLFormElement\.prototype\.submit\.call\(form\)/,
     'menu creation may use native submit only when the registration link was not clicked',
   );
   assert.doesNotMatch(
-    source,
+    menuSection,
     /a\.accept:visible, a:has-text\("はい"\):visible, a:has-text\("登録する"\):visible/,
     'menu confirmation must not click the registration link again after SalonBoard reloads the form',
   );
@@ -1088,7 +1107,7 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     scraperSource,
-    /a#mailEntry:visible[\s\S]{0,18000}form\.id === 'reserveChange'[\s\S]{0,300}net_reservation_requires_official_button/,
+    /a#mailEntry:visible[\s\S]{0,18000}form\.id === 'reserveChange'[\s\S]{0,180}form\.id === 'tmpReserveChange'[\s\S]{0,400}net_reservation_requires_official_button/,
     'HotPepper network reservations must use the official mailEntry change flow instead of direct doComplete submission',
   );
   assert.match(

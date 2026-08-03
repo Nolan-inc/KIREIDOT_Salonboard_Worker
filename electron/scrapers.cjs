@@ -3065,6 +3065,74 @@ async function findReserveIdForBooking(page, target, opts = {}) {
     new Promise((resolve) => setTimeout(() => resolve(null), 90_000)),
   ]).catch(() => null);
 }
+
+// 美容室(hair)の再実行前確認専用。
+// エステ用 /KLP/reserve/reserveList/init を開くと hair の店舗文脈が壊れ、
+// groupTop 選択の多段再試行がジョブ期限まで続くことがある。対象日のスケジュールを
+// 1回だけ開き、日時・スタッフ・顧客名から既存予約を確認する。描画できなかった場合は
+// absent と断定せず unknown を返し、二重登録を防ぐ。
+async function findHairReserveOnSchedule(page, target, opts = {}) {
+  const baseUrl = opts.baseUrl || 'https://salonboard.com/';
+  try {
+    const u = new URL('/CLP/bt/schedule/salonSchedule/', baseUrl);
+    u.searchParams.set('date', target.yyyymmdd);
+    await page.goto(u.toString(), { waitUntil: 'domcontentloaded', timeout: 25_000 });
+    const rendered = await page
+      .waitForSelector('#scheduleItemArea, #stylistScheduleArea', { timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!rendered) return { status: 'unknown', reserveId: null };
+
+    const match = await page.evaluate(({ yyyymmdd, hhmm, staffExt, customerName }) => {
+      const norm = (value) => String(value || '')
+        .normalize('NFKC')
+        .replace(/\s*様\s*$/, '')
+        .replace(/[\s\u3000]+/g, '')
+        .toLowerCase();
+      const wantedTime = String(hhmm || '').replace(':', '').padStart(4, '0');
+      const wantedStaff = String(staffExt || '').trim().toUpperCase();
+      const wantedCustomer = norm(customerName);
+      const candidates = [];
+      for (const rv of Array.from(document.querySelectorAll('div.panel_reserve[id^="reserve_item_"]'))) {
+        const text = (cls) => String(rv.querySelector(`.${cls}`)?.textContent || '').trim();
+        const date = text('panel_reserve_date');
+        const start = text('panel_reserve_start').padStart(4, '0');
+        const staff = text('panel_reserve_stylistId').toUpperCase();
+        if (yyyymmdd && date !== yyyymmdd) continue;
+        if (wantedTime && start !== wantedTime) continue;
+        if (wantedStaff && staff && staff !== wantedStaff) continue;
+        const reserveId = text('panel_reserve_id') || null;
+        const customer = norm(rv.querySelector('.reserveItemCustomer')?.textContent || '');
+        candidates.push({ reserveId, customer });
+      }
+      if (candidates.length === 0) return { status: 'absent', reserveId: null };
+      if (candidates.length === 1) {
+        const only = candidates[0];
+        // 顧客名が双方にある場合は別客を既存扱いしない。
+        if (wantedCustomer && only.customer &&
+            !(only.customer.includes(wantedCustomer) || wantedCustomer.includes(only.customer))) {
+          return { status: 'absent', reserveId: null };
+        }
+        return { status: 'found', reserveId: only.reserveId };
+      }
+      if (wantedCustomer) {
+        const byCustomer = candidates.filter((c) => c.customer &&
+          (c.customer.includes(wantedCustomer) || wantedCustomer.includes(c.customer)));
+        if (byCustomer.length === 1) return { status: 'found', reserveId: byCustomer[0].reserveId };
+      }
+      // 同一枠に複数候補があり一意化できない。重複登録を避けるため unknown。
+      return { status: 'unknown', reserveId: null };
+    }, target);
+    console.log(
+      `[preflight] hair schedule ${target.yyyymmdd} ${target.hhmm} ` +
+      `staff=${target.staffExt || '?'} status=${match.status} reserveId=${match.reserveId || '-'}`,
+    );
+    return match;
+  } catch (e) {
+    console.log(`[preflight] hair schedule failed: ${String(e?.message ?? e).split('\n')[0]}`);
+    return { status: 'unknown', reserveId: null };
+  }
+}
 async function _findReserveIdForBookingImpl(page, target, opts = {}) {
   const baseUrl = opts.baseUrl || 'https://salonboard.com/';
   try {
@@ -6164,13 +6232,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     // 顧客名が空だと一覧の名前照合ができず全件スキャンで詰まる (240s ハングの一因)。
     // 顧客名がある時だけ照合し、無ければ照合をスキップして新規登録へ進む。
     if (p.customer_name && String(p.customer_name).trim()) {
-      const existing = await findReserveIdForBooking(page, {
+      const preflightTarget = {
         yyyymmdd: when.yyyymmdd,
         hhmm: when.hhmm,
         staffExt: p.salonboard_staff_external_id,
         customerName: p.customer_name,
-      }, { baseUrl }).catch(() => null);
+      };
+      const hairExisting = genre === 'hair'
+        ? await findHairReserveOnSchedule(page, preflightTarget, { baseUrl })
+        : null;
+      const existing = genre === 'hair'
+        ? hairExisting?.reserveId || null
+        : await findReserveIdForBooking(page, preflightTarget, { baseUrl }).catch(() => null);
       if (existing) {
+        // hair スケジュール上の予約ブロックは有効予約そのもの。KLP(エステ)の
+        // reserveDetail へ再遷移して存在確認すると hair 文脈を壊すため、その場で確定する。
+        if (genre === 'hair') return okExisting(existing);
         // ★一覧マッチだけで already_exists と断定しない (2026-07-11): 一覧はキャンセル行や
         //   同時刻別客と紛れやすい。詳細ページで「現在も有効な予約か」を最終確認し、
         //   active のときだけ既登録として成功を返す。cancelled/not_found は新規登録へ進む。
@@ -6188,13 +6265,22 @@ async function pushBookingViaForm(page, payload, opts = {}) {
         }
         // cancelled / not_found → 有効な既存予約は無い → 下の新規登録フローへ。
       }
+      if (genre === 'hair' && hairExisting?.status === 'unknown') {
+        return fail(
+          '美容室スケジュールで既存予約の有無を確認できませんでした。二重登録防止のため、fresh browserで再試行します。',
+          'SB_SERVER_ERROR',
+          false,
+        );
+      }
     }
   }
 
   // --- グループ店舗(hair含む)のサロン選択 ---
   // 郡山(ADER=グループhair)等は先に /CNC/groupTop/ で対象サロンを選び、店舗文脈を
   // 確立してからスケジュール/登録に入る。未選択のままだと「SALON BOARD : エラー」着地。
-  await ensureReserveSalonContext(page, baseUrl, opts);
+  // hair の preflight は対象日の hair スケジュール上で完了し、店舗文脈も維持される。
+  // ここで再度 groupTop を開くと選択処理が重複し、最悪ジョブ期限まで待つため不要。
+  if (genre !== 'hair') await ensureReserveSalonContext(page, baseUrl, opts);
 
   // --- 重要 ---
   // 登録フォームは rlastupdate (スケジュール画面に埋め込まれたタイムスタンプ) を
@@ -6376,7 +6462,8 @@ async function pushBookingViaForm(page, payload, opts = {}) {
     const message = String(e?.message ?? e);
     // SalonBoard側の遷移が同時更新で中断された場合は、古いrlastupdateを握ったまま
     // 続行せず、スケジュールから最新トークンを取り直して登録工程を再実行する。
-    if (/ERR_ABORTED|frame (?:was )?detached|Target page, context or browser has been closed/i.test(message)
+    if (!page.isClosed()
+      && /ERR_ABORTED|frame (?:was )?detached/i.test(message)
       && staleTokenRetry < 4) {
       await page.waitForTimeout(150 + staleTokenRetry * 100).catch(() => {});
       return pushBookingViaForm(page, payload, {
@@ -8771,7 +8858,15 @@ async function changeBookingViaForm(page, payload, opts = {}) {
           .filter(([name]) => /^equip/i.test(String(name)))
           .map(([name, value]) => [String(name), String(value)])
         : [];
-      if (form.id === 'reserveChange') {
+      // hair のHotPepper予約変更フォームは実DOMで tmpReserveChange
+      // (/CLP/bt/reserve/net/instantReserveChange/) を使う。reserveChange だけを
+      // 判定すると doComplete へ直送してしまい、SBが「入力情報が失われた」と拒否する。
+      // net/instant 系は必ず公式 #mailEntry → メール確認フローを通す。
+      const isNetChangeForm =
+        form.id === 'reserveChange'
+        || form.id === 'tmpReserveChange'
+        || /\/reserve\/net\/|instantReserveChange/i.test(location.pathname);
+      if (isNetChangeForm) {
         return {
           submitted: false,
           reason: 'net_reservation_requires_official_button',
