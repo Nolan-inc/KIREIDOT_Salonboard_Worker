@@ -14798,11 +14798,19 @@ async function pushMenuViaForm(page, payload, opts = {}) {
   // form action/CSRFを使うnative submitも冪等に実行して送信を保証する。
   let dialogAccepted = false;
   let clicked = false;
+  let clickSubmitted = false;
+  const beforeClickUrl = page.url();
   const onDialog = async (d) => { dialogAccepted = true; try { await d.accept(); } catch (_e) { /* noop */ } };
   page.on('dialog', onDialog);
   try {
     const btn = page.locator('a.jsc_menuEdit_btn_reg, a#registBtn, a:has-text("登録する")').first();
     if ((await btn.count().catch(() => 0)) > 0) {
+      // Playwright の click() 成功は、SalonBoard の登録ハンドラが実際に
+      // POST したことを意味しない。Cloud ではページ固有 JS の初期化前に
+      // javascript:void(0) のリンクだけがクリックされることがある。
+      const postStarted = page.waitForRequest((req) => (
+        req.method() === 'POST' && /\/menuEdit\/doRegister(?:[/?#]|$)/.test(req.url())
+      ), { timeout: 4_000 }).then(() => true).catch(() => false);
       clicked = await btn.click({ timeout: 12_000 }).then(() => true).catch(() => false);
       await page.waitForTimeout(500);
       // 「登録する」を確認ボタン候補に含めると、native confirm を受理して
@@ -14813,15 +14821,16 @@ async function pushMenuViaForm(page, payload, opts = {}) {
         await yes.click({ timeout: 8_000 }).catch(() => {});
         await page.waitForTimeout(500);
       }
+      const posted = await postStarted;
       await page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {});
+      clickSubmitted = posted || page.url() !== beforeClickUrl;
     }
   } finally {
     page.off('dialog', onDialog);
   }
-  // ネイティブsubmitは登録リンク自体を押せなかった場合だけ使う。
-  // click後はすでに遷移先の空フォームになり得るため、同じフォームを
-  // 再submitしてはいけない。
-  const nativeSubmitted = clicked ? false : await Promise.all([
+  // ネイティブsubmitは登録リンクからPOST/遷移が始まらなかった場合だけ使う。
+  // click() 自体の成功ではなく、実際の送信開始を判定して二重送信を防ぐ。
+  const nativeSubmitted = clickSubmitted ? false : await Promise.all([
       page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
       page.evaluate(() => {
         const form = document.getElementById('menuEditForm');
@@ -14832,7 +14841,7 @@ async function pushMenuViaForm(page, payload, opts = {}) {
         return true;
       }).catch(() => false),
     ]).then(([, ok]) => ok);
-  const submitted = clicked || nativeSubmitted;
+  const submitted = clickSubmitted || nativeSubmitted;
   if (!submitted) {
     const cap = await captureScrapeDebug(page, 'menu', 'no_regist', { diagnostics: { url: page.url() } });
     return fail(`メニュー登録フォームを送信できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', false);
@@ -14867,7 +14876,7 @@ async function pushMenuViaForm(page, payload, opts = {}) {
       published: publishedEl ? String(publishedEl.value) === '1' : null,
     };
   }, { extId: extId || applied.externalId || '', wantName: name }).catch(() => ({ persisted: false, current: null, externalId: null, published: null }));
-  const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
+  const diag = { dialogAccepted, clicked, clickSubmitted, nativeSubmitted, err: errMatch ? errMatch[0].trim() : null, reRead };
   if (name && !reRead.persisted) {
     const cap = await captureScrapeDebug(page, 'menu', 'not_persisted', { diagnostics: diag });
     return { status: 'failed', reason: `メニュー名が保存されませんでした (err=${diag.err}, current=${reRead.current}, capture=${cap || '?'})`, errorCode: 'UNKNOWN_ERROR', manualRequired: true, diag };
