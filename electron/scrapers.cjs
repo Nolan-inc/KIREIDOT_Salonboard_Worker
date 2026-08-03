@@ -7908,36 +7908,55 @@ async function changeBookingViaForm(page, payload, opts = {}) {
   //    要素の存在チェック付きで両方試す (存在しない方は no-op)。
   const staffExt = (p.salonboard_staff_external_id || '').trim();
   if (staffExt) {
-    await page.locator('select#salonStaffList').first().selectOption({ value: staffExt }).catch(() => {});
-    await page.evaluate((ext) => {
-      const setVal = (el) => { if (el) { el.value = ext; el.dispatchEvent(new Event('change', { bubbles: true })); } };
-      setVal(document.getElementById('staffId'));
-      document.querySelectorAll('input[name="staffId"]').forEach(setVal);
-      for (const name of ['salonStaffList', 'staffIdList', 'stylistId']) {
-        const sel = document.querySelector(`select[name="${name}"]`);
-        if (sel && Array.from(sel.options).some((o) => o.value === ext)) { sel.value = ext; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    // SalonBoard の staff change handler はフォーム行を非同期で差し替えることがある。
+    // さらに既に正しい担当が選択済みでも change を重ねて発火すると、差替中の一瞬
+    // controls=0 となり、正しい予約を CONFIRMATION_MISMATCH にしていた。値が異なる
+    // control だけ変更し、DOM差替後も同じ値が安定するまで再確認する。
+    let appliedStaff = { ok: false, values: [] };
+    for (let staffTry = 1; staffTry <= 5 && !appliedStaff.ok; staffTry++) {
+      appliedStaff = await page.evaluate((wanted) => {
+        const normalizedWanted = String(wanted || '').trim().toUpperCase();
+        const selectors = [
+          'select[name="stylistId"]',
+          'select[name="staffIdList"]',
+          'select#salonStaffList',
+          'select[name="salonStaffList"]',
+          'input#staffId',
+          'input[name="staffId"]',
+        ];
+        const controls = Array.from(document.querySelectorAll(selectors.join(',')))
+          .filter((el) => !el.disabled);
+
+        for (const el of controls) {
+          const tag = String(el.tagName || '').toLowerCase();
+          const current = String(el.value || '').trim().toUpperCase();
+          if (current === normalizedWanted) continue;
+          if (tag === 'select' && !Array.from(el.options || []).some(
+            (option) => String(option.value || '').trim().toUpperCase() === normalizedWanted,
+          )) continue;
+          el.value = wanted;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        const values = controls
+          .map((el) => String(el.value || '').trim().toUpperCase())
+          .filter(Boolean);
+        return { ok: values.includes(normalizedWanted), values };
+      }, staffExt).catch(() => ({ ok: false, values: [] }));
+      if (!appliedStaff.ok) {
+        await page.waitForLoadState('domcontentloaded', { timeout: 2_000 }).catch(() => {});
+        await page.waitForTimeout(250).catch(() => {});
       }
-    }, staffExt).catch(() => {});
-    const appliedStaff = await page.evaluate((wanted) => {
-      const selectors = [
-        'select#salonStaffList',
-        'input#staffId',
-        'input[name="staffId"]',
-        'select[name="salonStaffList"]',
-        'select[name="staffIdList"]',
-        'select[name="stylistId"]',
-      ];
-      const values = Array.from(document.querySelectorAll(selectors.join(',')))
-        .filter((el) => !el.disabled)
-        .map((el) => String(el.value || '').trim().toUpperCase())
-        .filter(Boolean);
-      const normalizedWanted = String(wanted || '').trim().toUpperCase();
-      return { ok: values.includes(normalizedWanted), values };
-    }, staffExt).catch(() => ({ ok: false, values: [] }));
+    }
     if (!appliedStaff.ok) {
+      const staffCap = await captureScrapeDebug(page, 'change', `staff_mismatch_${reserveId}`, {
+        diagnostics: { reserveId, requested: staffExt, actual: appliedStaff.values, url: page.url() },
+      });
       return fail(
         `予約変更フォームで担当スタッフを選択できませんでした ` +
-        `(requested=${staffExt}, actual=${appliedStaff.values.join(',') || 'none'})`,
+        `(requested=${staffExt}, actual=${appliedStaff.values.join(',') || 'none'}` +
+        `${staffCap ? `, capture=${staffCap}` : ''})`,
         'CONFIRMATION_MISMATCH',
         true,
       );

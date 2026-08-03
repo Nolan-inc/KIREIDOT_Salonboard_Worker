@@ -812,8 +812,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /const appliedStaff =[\s\S]{0,1800}'CONFIRMATION_MISMATCH'/,
+    /let appliedStaff =[\s\S]{0,4200}'CONFIRMATION_MISMATCH'/,
     'booking changes must reject a form that did not accept the requested staff',
+  );
+  assert.match(
+    source,
+    /staffTry <= 5[\s\S]{0,2200}current === normalizedWanted\) continue/,
+    'booking changes must not fire duplicate staff change events and must survive SalonBoard DOM replacement',
   );
   assert.match(
     source,
