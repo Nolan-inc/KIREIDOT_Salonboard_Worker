@@ -2616,23 +2616,53 @@ async function scrapeCoupons(page, opts = {}) {
       };
     });
   };
+  // ADER 系グループは他ジョブ (別サロンの fetch_bookings 等) と同一 SB アカウントを
+  // 取り合い、ループ途中でセッションが失効して以降の詳細が全滅する (2026-08-03 森田で
+  // 実測: 先頭 53 件成功→残り全件 edit_form_not_found 即死。非掲載が詳細ゼロだったのも
+  // 処理順が最後なだけで同根)。失敗したらサロン文脈を張り直し、ジョブ中 1 回だけ
+  // relogin まで使って自己回復する。
+  let reloginUsed = false;
+  let consecutiveFails = 0;
+  const recoverListContext = async () => {
+    try {
+      await gotoWithSalonContext(page, couponListUrl, opts);
+      await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+      const hasForm = await page
+        .evaluate(() => !!document.querySelector('#couponEditForm'))
+        .catch(() => false);
+      if (hasForm) return true;
+    } catch (_e) { /* fallthrough to relogin */ }
+    if (!reloginUsed && typeof opts.relogin === 'function') {
+      reloginUsed = true;
+      try {
+        await opts.relogin();
+        await gotoWithSalonContext(page, couponListUrl, opts);
+        return await page
+          .evaluate(() => !!document.querySelector('#couponEditForm'))
+          .catch(() => false);
+      } catch (_e) { /* give up quietly */ }
+    }
+    return false;
+  };
   for (const it of baseItems) {
     let d = null;
-    // ナビゲーション断などの一過性例外は 1 回だけやり直す。
-    // ok=false (編集ページ自体に入れない) は決定的なので再試行しない。
+    // 失敗時 (例外・編集ページ不達とも) は文脈を張り直して 1 回だけやり直す。
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         d = await scrapeDetailOnce(it);
-        break;
       } catch (e) {
         d = { ok: false, fail_reason: `exception: ${String(e?.message || e).slice(0, 120)}` };
       }
+      if (d?.ok) break;
+      if (attempt === 0) await recoverListContext();
     }
     if (d?.ok) {
       details[it.external_id] = d;
       detailOk++;
+      consecutiveFails = 0;
     } else {
       detailFail++;
+      consecutiveFails++;
       if (detailFailSamples.length < 5) {
         detailFailSamples.push({
           id: it.external_id,
@@ -2643,6 +2673,9 @@ async function scrapeCoupons(page, opts = {}) {
           snippet: d?.fail_snippet || null,
         });
       }
+      // 回復不能 (relogin 済みでなお連続失敗) なら残りを諦めて一覧分だけ返す。
+      // 既存詳細は row 側でキー省略により保持されるので、null 上書きの実害は無い。
+      if (consecutiveFails >= 8 && reloginUsed) break;
     }
   }
 

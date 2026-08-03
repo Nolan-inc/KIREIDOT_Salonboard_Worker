@@ -2474,6 +2474,11 @@ async function handleJob(job: Job): Promise<void> {
             rows.length === 0 && res?.debug
               ? ` debug=${debugJson.slice(0, 1500)}`
               : "";
+          // 件数が取れていても部分欠損 (クーポン詳細の途中失敗等) の切り分けに使うため、
+          // debug は docker logs に常に短く残す。
+          if (debugJson) {
+            console.log(`[fetch] ${job.job_type} ${tag} debug=${debugJson.slice(0, 900)}`);
+          }
           await report({
             job_id: job.id,
             job_type: job.job_type,
