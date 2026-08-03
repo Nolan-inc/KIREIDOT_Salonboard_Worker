@@ -2958,17 +2958,40 @@ async function resolveScheduleStaffExternalId(page, configuredExternalId, staffN
       .replace(/[^\p{L}\p{N}]/gu, '')
       .toLowerCase();
     const heads = Array.from(document.querySelectorAll('.scheduleMainHead[id^="STAFF_"], .jscScheduleMainHead[id^="STAFF_"]'));
-    const parsed = heads.map((head) => {
+    const estheticStaff = heads.map((head) => {
       const match = String(head.id || '').match(/^STAFF_([A-Z0-9]+)_/i);
       const name = head.querySelector('.scheduleLink[title]')?.getAttribute('title')
         || head.querySelector('.scheduleLinkInner')?.textContent
         || head.textContent
         || '';
       return { externalId: match ? match[1].toUpperCase() : '', name: String(name).trim() };
-    }).filter((entry) => entry.externalId);
+    });
+    // 美容室は横並びの STAFF_* ヘッダではなく、左列の
+    // div.mod_btn_22#stylist_T... と select#stylistNameList を使う。
+    const hairStaff = Array.from(document.querySelectorAll([
+      'div.mod_btn_22[id^="stylist_"]',
+      'select#stylistNameList option[value^="stylist_"]',
+    ].join(','))).map((entry) => {
+      const rawId = entry.id || entry.getAttribute('value') || '';
+      const match = String(rawId).match(/^stylist_([A-Z0-9]+)$/i);
+      const name = entry.matches('option')
+        ? entry.textContent
+        : entry.querySelector('.name')?.textContent || entry.textContent;
+      return { externalId: match ? match[1].toUpperCase() : '', name: String(name || '').trim() };
+    });
+    const parsed = Array.from(new Map(
+      [...estheticStaff, ...hairStaff]
+        .filter((entry) => entry.externalId && entry.externalId !== '0000000000')
+        .map((entry) => [entry.externalId, entry]),
+    ).values());
     const configuredId = String(configured || '').trim().toUpperCase();
     if (configuredId && parsed.some((entry) => entry.externalId === configuredId)) {
       return { externalId: configuredId, changed: false, valid: true, candidates: parsed };
+    }
+    // スタッフ一覧DOM自体を一件も読めない画面は「担当が存在しない」証拠にならない。
+    // 登録フォーム側でも指定IDを検証するため、ここでは一時的な未判定として続行する。
+    if (parsed.length === 0) {
+      return { externalId: configuredId || null, changed: false, valid: null, candidates: [] };
     }
     const wanted = norm(wantedName);
     if (!wanted) return { externalId: configuredId || null, changed: false, valid: false, candidates: parsed };

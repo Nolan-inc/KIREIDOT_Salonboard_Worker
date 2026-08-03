@@ -826,6 +826,11 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
+    /resolveScheduleStaffExternalId[\s\S]{0,5000}mod_btn_22\[id\^="stylist_"\][\s\S]{0,2200}parsed\.length === 0[\s\S]{0,240}valid: null/,
+    'hair booking creation must resolve stylist_* staff DOM and must not treat an unreadable list as a missing mapping',
+  );
+  assert.match(
+    source,
     /wantStaffExt[\s\S]{0,1800}staffOk[\s\S]{0,900}persistedState\?\.staffOk/,
     'booking updates must re-read and verify the persisted SalonBoard staff',
   );
