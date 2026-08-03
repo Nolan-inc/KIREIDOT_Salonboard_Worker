@@ -920,8 +920,13 @@ function testKnownSalonBoardRecoveryBranchesStayEnabled() {
   );
   assert.match(
     source,
-    /getElementById\('menuEditForm'\)[\s\S]{0,500}HTMLFormElement\.prototype\.submit\.call\(form\)/,
-    'menu creation must submit menuEditForm directly instead of trusting an uninitialized click handler',
+    /const nativeSubmitted = clicked \? false : await Promise\.all\([\s\S]{0,700}HTMLFormElement\.prototype\.submit\.call\(form\)/,
+    'menu creation may use native submit only when the registration link was not clicked',
+  );
+  assert.doesNotMatch(
+    source,
+    /a\.accept:visible, a:has-text\("はい"\):visible, a:has-text\("登録する"\):visible/,
+    'menu confirmation must not click the registration link again after SalonBoard reloads the form',
   );
   assert.match(
     source,

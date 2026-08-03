@@ -14715,26 +14715,33 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     if ((await btn.count().catch(() => 0)) > 0) {
       clicked = await btn.click({ timeout: 12_000 }).then(() => true).catch(() => false);
       await page.waitForTimeout(500);
-      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible, a:has-text("登録する"):visible').first();
+      // 「登録する」を確認ボタン候補に含めると、native confirm を受理して
+      // リロードした直後の空フォームで登録リンクをもう一度押してしまう。
+      // 二重送信により、1回目に作成したメニューが空値で上書きされる。
+      const yes = page.locator('a.accept:visible, a:has-text("はい"):visible').first();
       if ((await yes.count().catch(() => 0)) > 0) {
         await yes.click({ timeout: 8_000 }).catch(() => {});
         await page.waitForTimeout(500);
       }
+      await page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {});
     }
   } finally {
     page.off('dialog', onDialog);
   }
-  const nativeSubmitted = await Promise.all([
-    page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
-    page.evaluate(() => {
-      const form = document.getElementById('menuEditForm');
-      if (!(form instanceof HTMLFormElement)) return false;
-      const modified = form.querySelector('input[name="modified"]');
-      if (modified) modified.value = '1';
-      HTMLFormElement.prototype.submit.call(form);
-      return true;
-    }).catch(() => false),
-  ]).then(([, ok]) => ok);
+  // ネイティブsubmitは登録リンク自体を押せなかった場合だけ使う。
+  // click後はすでに遷移先の空フォームになり得るため、同じフォームを
+  // 再submitしてはいけない。
+  const nativeSubmitted = clicked ? false : await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 12_000 }).catch(() => {}),
+      page.evaluate(() => {
+        const form = document.getElementById('menuEditForm');
+        if (!(form instanceof HTMLFormElement)) return false;
+        const modified = form.querySelector('input[name="modified"]');
+        if (modified) modified.value = '1';
+        HTMLFormElement.prototype.submit.call(form);
+        return true;
+      }).catch(() => false),
+    ]).then(([, ok]) => ok);
   const submitted = clicked || nativeSubmitted;
   if (!submitted) {
     const cap = await captureScrapeDebug(page, 'menu', 'no_regist', { diagnostics: { url: page.url() } });
