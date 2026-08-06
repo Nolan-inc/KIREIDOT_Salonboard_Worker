@@ -1178,6 +1178,11 @@ async function handleJob(job: Job): Promise<void> {
         lt++
       ) {
         if (isCredentialFailure(loginResult.reason ?? "")) break;
+        // SB画像認証(IMAGE_AUTH_REQUIRED)はアカウント/Akamaiフラグ起因で、出口を替えて
+        // 連続再ログインしても解けない(B:ALLで毎晩3連敗、2026-08-06夜はUne limitでも発生)。
+        // 試行を重ねるほどフラグを強化し、ログインペーシングとアカウントレーンを数十分
+        // 占有して予約書込の遅延源になるため、1回目で打ち切って次回に任せる。
+        if (/IMAGE_AUTH_REQUIRED|画像認証/i.test(loginResult.reason ?? "")) break;
         // 出口起因と判定できる失敗だけを、その試行で使った出口の実害として数える
         // (ID/PW 不一致は上で break 済みなのでここには来ない)。
         if (shouldRotateLoginEndpoint(loginResult.reason ?? "")) {

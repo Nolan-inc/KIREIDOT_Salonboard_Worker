@@ -14445,10 +14445,53 @@ async function scrapeReviews(page, opts = {}) {
   let visited = 0;
   let url = listUrl;
 
+  // 口コミ一覧は「直URL入場」がグループアカウント(ADER/GINA)でセッション失効扱いに
+  // なり、直後の管理TOPまで「ログインの有効期限が切れました」に落ちる (2026-08-02以降
+  // 毎晩全滅・単独アカウントは直URLでも成功)。URL自体は正しい(実DOMサンプルと一致)ため、
+  // 予約系と同じく「管理TOPで店舗文脈を確立→ナビの口コミリンクで遷移」の正規導線に変更。
+  // リンクが見つからない場合のみ従来の直URLへフォールバックする(単独店は従来挙動で成功実績)。
+  const topEntry = genre === 'hair'
+    ? new URL('/CLP/bt/top/', baseUrl).toString()
+    : new URL('/KLP/top/', baseUrl).toString();
+  await gotoWithSalonContext(page, topEntry, { ...opts, baseUrl, genre });
+  const viaNav = await (async () => {
+    const link = page
+      .locator('a[href*="/review/reviewList"], a[href$="reviewList/"], nav a:has-text("口コミ"), a:has-text("口コミ")')
+      .first();
+    if ((await link.count().catch(() => 0)) === 0) return false;
+    await link.click({ timeout: 10_000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 20_000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+    return /reviewList/i.test(page.url());
+  })();
+  if (!viaNav) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  }
+  // 一覧に到達できたかを肯定確認。失効/エラーページなら証跡を残して文脈エラーで
+  // 返す(0件成功として空データを取り込まないため)。
+  const landing = await page.evaluate(() => {
+    const title = document.title || '';
+    const body = ((document.body && document.body.innerText) || '').replace(/\s+/g, '').slice(0, 400);
+    return {
+      title,
+      expired: /有効期限が切れ|再度ログイン|ログインしなおし|操作されなかった/.test(body),
+      errored: /エラー/.test(title) || /ユーザエラー|サロンが選択されていません/.test(body),
+    };
+  }).catch(() => ({ title: '', expired: false, errored: false }));
+  if (landing.expired || landing.errored) {
+    const cap = await captureScrapeDebug(page, 'review', 'list_landing_error', {
+      diagnostics: { url: page.url(), title: landing.title, viaNav },
+    });
+    const err = new Error(
+      `口コミ一覧へ遷移できませんでした (url=${page.url()}, title=${landing.title}, viaNav=${viaNav}, capture=${cap || '?'})`,
+    );
+    err.code = 'SALON_CONTEXT_INVALID';
+    throw err;
+  }
+
   for (let i = 0; i < maxPages; i++) {
-    if (i === 0) {
-      await gotoWithSalonContext(page, url, { ...opts, baseUrl, genre });
-    } else {
+    if (i > 0) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     }
