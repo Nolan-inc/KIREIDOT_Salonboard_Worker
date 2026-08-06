@@ -1670,6 +1670,15 @@ const PC_CLAIMABLE_PUSH_JOB_TYPES = [
 
 let pushJobPollTimer = null;
 const PUSH_JOB_POLL_MS = 20_000;
+// 検知(supabase count)は「ログイン中ユーザーのセッション + RLS」越しに動くため、
+// セッション失効や org スコープの都合で queued が見えないことがある。その場合でも
+// claim 自体 (device 認証の Admin API = supabase 非依存) は通るので、一定周期で
+// 検知結果に関係なく runPushJobs を直接試すフェイルセーフを併設する。
+// (2026-08-06: セッション失効で count がエラー→silent return が続き、Realtime も
+//  死んでいたため queued の push_photo_gallery が数時間 claim されず滞留した)
+const PUSH_JOB_FAILSAFE_EVERY = 9; // 20s × 9 = 約3分ごと。空claimはHTTP1往復で即終了するため安価
+let pushJobPollTick = 0;
+let pushJobPollErrorLoggedAt = 0;
 function startPushJobPoller() {
   if (pushJobPollTimer) return; // 多重起動防止
   pushJobPollTimer = setInterval(async () => {
@@ -1697,6 +1706,8 @@ function startPushJobPoller() {
       // 待機端末は claim しても Admin 側 (X-Machine-Id 照合) で弾かれるだけなので
       // ポーリング起動もしない (アクティブ端末が処理する)。
       if (!workerActive) return;
+      pushJobPollTick += 1;
+      const failsafeDue = pushJobPollTick % PUSH_JOB_FAILSAFE_EVERY === 0;
       const { count, error } = await supabase
         .from('salonboard_sync_jobs')
         .select('id', { count: 'exact', head: true })
@@ -1704,11 +1715,32 @@ function startPushJobPoller() {
         .eq('executor', 'playwright')
         .eq('status', 'queued')
         .lte('run_at', new Date().toISOString());
-      if (error) return;
-      if ((count ?? 0) > 0) {
+      if (error) {
+        // 従来はここで silent return → セッション失効中は Realtime も同時に死ぬため
+        // 誰も claim を起動せず queued が滞留した。ログを出しつつセッションの
+        // 自己回復を試み、フェイルセーフ周期なら claim 自体は続行する。
+        const nowMs = Date.now();
+        if (nowMs - pushJobPollErrorLoggedAt > 10 * 60_000) {
+          pushJobPollErrorLoggedAt = nowMs;
+          log(
+            `保険ポーリング: ジョブ検知クエリに失敗 (${error.message ?? error.code ?? 'unknown'})。` +
+              'Supabaseセッション失効の可能性 → セッション再取得を試行し、フェイルセーフ claim で継続します',
+            'warn',
+          );
+          try { void supabase.auth.refreshSession(); } catch (_e) { /* noop */ }
+        }
+        if (!failsafeDue) return;
+      } else if ((count ?? 0) > 0) {
         log(`保険ポーリング: 未処理のPC書込ジョブ ${count} 件を検知 → push 処理`, 'info');
         runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER }).catch(() => {});
+        return;
+      } else if (!failsafeDue) {
+        return;
       }
+      // フェイルセーフ: 検知に頼らず claim を直接試す (device 認証のため
+      // supabase セッションの状態や RLS の見え方に左右されない)。
+      // キューが空なら claim 1往復で即終了し、ブラウザも起動しない。
+      runPushJobs({ showBrowser: AUTO_PUSH_SHOW_BROWSER, quiet: true }).catch(() => {});
     } catch (_e) { /* noop */ }
   }, PUSH_JOB_POLL_MS);
 }
@@ -3913,8 +3945,9 @@ async function markCredentialError(shopId, reason, blockedUntil, errorCode) {
  * 進めて confirm_only → callback で manual_required に倒す (誤登録防止)。
  *
  * @param showBrowser ブラウザ画面を表示するか
+ * @param quiet フェイルセーフ定期実行用。処理対象が無かった場合は開始/完了ログを出さない
  */
-async function runPushJobs({ showBrowser } = {}) {
+async function runPushJobs({ showBrowser, quiet } = {}) {
   // 待機モード (別の端末がアクティブ): ジョブ処理しない。
   if (!workerActive) {
     log('予約書き込み: 待機モードのためスキップ (アクティブ端末が処理します)', 'info');
@@ -3935,10 +3968,13 @@ async function runPushJobs({ showBrowser } = {}) {
   try {
   const enablePush = !!deviceAuth.enablePush;
   // 開始を必ずログに出す (ユーザーが「実行されたか」を確認できるように)。
-  log(
-    `予約書き込み(push_booking)チェック開始 — 実登録(SalonBoardへ書込)=${enablePush ? 'ON' : 'OFF (確認のみ)'}`,
-    'info',
-  );
+  // フェイルセーフ定期実行 (quiet) は3分毎に走るため、対象ゼロの回はログを抑制する。
+  if (!quiet) {
+    log(
+      `予約書き込み(push_booking)チェック開始 — 実登録(SalonBoardへ書込)=${enablePush ? 'ON' : 'OFF (確認のみ)'}`,
+      'info',
+    );
+  }
   const MAX_BATCHES = 30; // バッチ取得の最大回数 (暴走防止)
   let processed = 0;
   let drainedOther = 0;
@@ -4964,12 +5000,15 @@ async function runPushJobs({ showBrowser } = {}) {
     );
   }
   // 終了サマリを必ず出す (0件でも「実行されたが対象なし」が分かるように)。
-  log(
-    `予約書き込みチェック完了 — 書込ジョブ処理 ${processed} 件` +
-      (drainedOther > 0 ? ` / 対象外ジョブ整理 ${drainedOther} 件 (cancel等)` : '') +
-      (processed === 0 && drainedOther === 0 ? ' (キューに対象なし)' : ''),
-    'info',
-  );
+  // ただしフェイルセーフ定期実行 (quiet) の0件回は3分毎のノイズになるため抑制する。
+  if (!quiet || processed > 0 || drainedOther > 0) {
+    log(
+      `予約書き込みチェック完了 — 書込ジョブ処理 ${processed} 件` +
+        (drainedOther > 0 ? ` / 対象外ジョブ整理 ${drainedOther} 件 (cancel等)` : '') +
+        (processed === 0 && drainedOther === 0 ? ' (キューに対象なし)' : ''),
+      'info',
+    );
+  }
   } finally {
     pushJobsRunning = false;
     pushJobsRunningSince = 0;
