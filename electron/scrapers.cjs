@@ -15314,8 +15314,9 @@ async function pushCouponViaForm(page, payload, opts = {}) {
       if (!tr) continue;
       const cells = Array.from(tr.querySelectorAll('td'));
       const rowName = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
+      const normEq = (a, b) => String(a || '').replace(/[\s　]+/g, '') === String(b || '').replace(/[\s　]+/g, '');
       if (id && String(input.value || '').trim() !== id) continue;
-      if (!id && wantedName && rowName !== wantedName) continue;
+      if (!id && wantedName && !normEq(rowName, wantedName)) continue;
       const match = String(input.name || '').match(/\[(\d+)\]/);
       const presentInput = match
         ? document.querySelector(`input[name="frmCouponListDto[${match[1]}].presentFlg"]`)
@@ -15397,7 +15398,9 @@ async function pushCouponViaForm(page, payload, opts = {}) {
         const tr = input.closest('tr');
         const cells = tr ? Array.from(tr.querySelectorAll('td')) : [];
         const candidate = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
-        if (candidate === wantName) return (input.value || '').trim();
+        // 空白の全角/半角ゆれを無視して一致判定 (KD取込は空白正規化済みのため)
+        const normEq = (a, b) => String(a || '').replace(/[\s　]+/g, '') === String(b || '').replace(/[\s　]+/g, '');
+        if (normEq(candidate, wantName)) return (input.value || '').trim();
       }
       return '';
     }, name).catch(() => '');
@@ -15548,7 +15551,9 @@ async function pushCouponViaForm(page, payload, opts = {}) {
         const tr = input.closest('tr');
         const cells = tr ? Array.from(tr.querySelectorAll('td')) : [];
         const candidate = (cells[3]?.innerText || cells[3]?.textContent || '').trim();
-        if (candidate === wantName) return (input.value || '').trim();
+        // 空白の全角/半角ゆれを無視して一致判定 (KD取込は空白正規化済みのため)
+        const normEq = (a, b) => String(a || '').replace(/[\s　]+/g, '') === String(b || '').replace(/[\s　]+/g, '');
+        if (normEq(candidate, wantName)) return (input.value || '').trim();
       }
       return '';
     }, name).catch(() => '');
@@ -15565,10 +15570,14 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     i.value = couponId; form.submit();
   }, resolvedExtId).catch(() => {});
   await page.waitForSelector('input[name$=".couponName"]', { timeout: 15_000 }).catch(() => {});
+  // 保存検証は空白非依存で比較する。KD取込時に空白正規化(全角→半角/連続圧縮)した名前で
+  // 更新をかけると、SB側は原本の全角スペースを保持したままになり、厳密一致だと
+  // 「保存されませんでした」の偽失敗になる (2026-08-08 ADER19件で実例)。
   const reRead = await page.evaluate((wantName) => {
+    const norm = (s) => String(s || '').replace(/[\s　]+/g, '');
     const el = document.querySelector('input[name$=".couponName"]');
     const cur = el ? (el.value || '') : null;
-    return { persisted: cur === wantName, current: cur };
+    return { persisted: norm(cur) === norm(wantName), current: cur };
   }, name).catch(() => ({ persisted: false, current: null }));
   const diag = { dialogAccepted, err: errMatch ? errMatch[0].trim() : null, reRead };
   if (name && !reRead.persisted) {
