@@ -192,7 +192,19 @@ function readWorkerIdFile(): string {
 const WORKER_ID = (process.env.WORKER_ID || readWorkerIdFile() || "local-dev").slice(0, 64);
 // クラウドworkerが申告する capability(カンマ区切り)。Admin claim が「required ⊆ worker」で
 // 絞り込む想定。未指定の旧クライアント(PC)は Admin 側で全capability保有とみなす(後方互換)。
-const WORKER_CAPABILITIES = (process.env.WORKER_CAPABILITIES ?? "").trim();
+// レーン分割(機能要望 2026-08-07)は 'lane_realtime' / 'lane_bulk' を申告して常時系/一括系を
+// 分ける。稼働中コンテナの env は差し替えられないため、こちらは worker_id と逆に
+// ホット設定ファイルが env より優先(ファイルが存在する場合のみ)。
+function readWorkerCapabilitiesFile(): string {
+  try {
+    return readFileSync("/home/pwuser/.kireidot/worker_capabilities", "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+const WORKER_CAPABILITIES = (
+  readWorkerCapabilitiesFile() || process.env.WORKER_CAPABILITIES || ""
+).trim();
 const APP_VERSION = process.env.APP_VERSION ?? readPkgVersion();
 const PLATFORM = process.platform;
 const POLL_MS = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
