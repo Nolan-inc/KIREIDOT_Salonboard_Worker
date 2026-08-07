@@ -14993,8 +14993,9 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     return fail('所要時間は5分単位で指定してください', 'VALIDATION_ERROR', true);
   }
 
-  await page.goto(draftUrl(opts.genre, 'menuEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  // グループアカウントはサロン選択が無いとメニュー編集フォームに到達できない
+  // (push_coupon と同根 2026-08-07)。文脈確立込みで入場する。
+  await gotoWithSalonContext(page, draftUrl(opts.genre, 'menuEdit', baseUrl), opts);
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
@@ -15220,7 +15221,7 @@ async function pushMenuViaForm(page, payload, opts = {}) {
     },
   });
   // 送信後に menuEdit を再取得し、menuId 行の名前が新値で保存されているか確認
-  await page.goto(draftUrl(opts.genre, 'menuEdit', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await gotoWithSalonContext(page, draftUrl(opts.genre, 'menuEdit', baseUrl), opts).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   const reRead = await page.evaluate(({ extId, wantName }) => {
     let idx = -1;
@@ -15298,8 +15299,9 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     return fail('所要時間は5分単位で指定してください', 'VALIDATION_ERROR', true);
   }
 
-  await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
+  // グループアカウント(ADER等)はサロン選択が無いと一覧に couponEditForm が出ず、
+  // 素の goto では 2026-08-07 の一括push(72件)が全滅した。文脈確立込みで入場する。
+  await gotoWithSalonContext(page, draftUrl(opts.genre, 'couponList', baseUrl), opts);
   if ((await page.locator('iframe[src*="recaptcha"]').count().catch(() => 0)) > 0) {
     return fail('reCAPTCHA が表示されました', 'RECAPTCHA_REQUIRED', true);
   }
@@ -15332,9 +15334,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   }, { id: couponId, name: couponName }).catch(() => ({ found: false, externalId: null, name: null, published: null, action: null }));
 
   const ensureCouponPublication = async (couponId, couponName, desired) => {
-    await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), {
-      waitUntil: 'domcontentloaded', timeout: 30_000,
-    }).catch(() => {});
+    await gotoWithSalonContext(page, draftUrl(opts.genre, 'couponList', baseUrl), opts).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     const before = await readCouponPublication(couponId, couponName);
     if (!before.found) return { ok: false, reason: 'coupon_not_found', before, after: null };
@@ -15378,9 +15378,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     }
     if (!clicked) return { ok: false, reason: 'publication_action_not_found', before, after: null };
 
-    await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), {
-      waitUntil: 'domcontentloaded', timeout: 30_000,
-    }).catch(() => {});
+    await gotoWithSalonContext(page, draftUrl(opts.genre, 'couponList', baseUrl), opts).catch(() => {});
     await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
     const after = await readCouponPublication(before.externalId, couponName);
     return {
@@ -15521,7 +15519,7 @@ async function pushCouponViaForm(page, payload, opts = {}) {
   const afterBody = ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
   const errMatch = afterBody.match(/.{0,30}(利用不可文字|入力してください|必須|エラー|不正).{0,30}/);
   // 送信後に couponList からIDを回収する。新規作成でもここで正式なcouponIdを得る。
-  await page.goto(draftUrl(opts.genre, 'couponList', baseUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  await gotoWithSalonContext(page, draftUrl(opts.genre, 'couponList', baseUrl), opts).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 3_500 }).catch(() => {});
   if (!resolvedExtId && name) {
     resolvedExtId = await page.evaluate((wantName) => {
