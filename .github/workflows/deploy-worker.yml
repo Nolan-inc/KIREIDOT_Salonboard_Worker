@@ -26,8 +26,11 @@ permissions:
 env:
   AWS_REGION: ap-northeast-1
   EC2_INSTANCE_ID: i-0f1cc0aff1ac8dd2e
+  # 一括系(lane_bulk)ワーカー箱。メインと同一バンドルを配布する (2026-08-07 レーン分割)。
+  BULK_EC2_INSTANCE_ID: i-06a56736ddc6512f8
   DEPLOY_BUCKET: kireidot-sb-worker-debug-972293797066
   CONTAINER_NAME: sb-worker-cloud
+  BULK_CONTAINER_NAME: sb-worker-bulk
   REMOTE_WORKER_PATH: /opt/kireidot/worker.cjs
 
 jobs:
@@ -98,9 +101,43 @@ jobs:
             --instance-id "$EC2_INSTANCE_ID" \
             --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}'
 
+      # 一括系(lane_bulk)ワーカー箱へ同一バンドルを配布。メイン成功後に実行する
+      # (失敗した場合はワークフローが赤くなり、両箱のバージョン乖離に気付ける)。
+      - name: Deploy to Bulk EC2 through SSM
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(aws s3 presign "s3://$DEPLOY_BUCKET/deploy/$GITHUB_SHA/worker.cjs" --expires-in 900)
+          PARAMS=$(jq -nc --arg url "$URL" --arg path "$REMOTE_WORKER_PATH" --arg container "$BULK_CONTAINER_NAME" --arg sha "$GITHUB_SHA" '{commands:[
+            "set -e",
+            ("curl -fL --retry 3 --connect-timeout 10 " + ($url|@sh) + " -o " + ($path + ".next"|@sh)),
+            ("test -s " + ($path + ".next"|@sh)),
+            ("docker stop -t 40 " + ($container|@sh)),
+            ("mv " + ($path + ".next"|@sh) + " " + ($path|@sh)),
+            ("docker start " + ($container|@sh)),
+            ("docker inspect " + ($container|@sh) + " " + ("--format=Status={{.State.Status}} Started={{.State.StartedAt}} RestartCount={{.RestartCount}}"|@sh)),
+            ("echo deployed_commit=" + $sha)
+          ]}')
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$BULK_EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy-salonboard-bulk-worker-$GITHUB_SHA" \
+            --parameters "$PARAMS" \
+            --query Command.CommandId --output text)
+          aws ssm wait command-executed \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$BULK_EC2_INSTANCE_ID"
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$BULK_EC2_INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Error:StandardErrorContent}'
+
       - name: Deployment summary
         run: |
           echo "### SalonBoard Cloud Worker" >> "$GITHUB_STEP_SUMMARY"
           echo "- commit: \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- instance: \`$EC2_INSTANCE_ID\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- container: \`$CONTAINER_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- instance: \`$EC2_INSTANCE_ID\` + bulk \`$BULK_EC2_INSTANCE_ID\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- container: \`$CONTAINER_NAME\` + \`$BULK_CONTAINER_NAME\`" >> "$GITHUB_STEP_SUMMARY"
