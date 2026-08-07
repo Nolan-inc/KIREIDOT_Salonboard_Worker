@@ -44,7 +44,9 @@ cmds = [
     " echo SB_BROWSER_CHANNEL=chrome;"
     " echo SB_HEADLESS=0;"
     " echo SALONBOARD_ENABLE_PUSH=1;"
-    " echo SB_PROXY_POOL=isp.decodo.com:10001,isp.decodo.com:10002,isp.decodo.com:10003,isp.decodo.com:10004,isp.decodo.com:10005,isp.decodo.com:10006,isp.decodo.com:10007,isp.decodo.com:10008,isp.decodo.com:10009,isp.decodo.com:10010;"
+    # ⚠️ メイン箱のプール(20 IP)と同一構成にすること。FNV-1a hashの店舗→IP sticky割当は
+    #    プールサイズ/順序に依存するため、両ワーカーで揃わないと同一店舗が別出口IPになる。
+    " echo SB_PROXY_POOL=isp.decodo.com:10001,isp.decodo.com:10002,isp.decodo.com:10003,isp.decodo.com:10004,isp.decodo.com:10005,isp.decodo.com:10006,isp.decodo.com:10007,isp.decodo.com:10008,isp.decodo.com:10009,isp.decodo.com:10010,isp.decodo.com:10011,isp.decodo.com:10012,isp.decodo.com:10013,isp.decodo.com:10014,isp.decodo.com:10015,isp.decodo.com:10016,isp.decodo.com:10017,isp.decodo.com:10018,isp.decodo.com:10019,isp.decodo.com:10020;"
     " echo SB_PROXY_USERNAME=$(P /kireidot/worker/SB_PROXY_USERNAME);"
     " echo SB_PROXY_PASSWORD=$(P /kireidot/worker/SB_PROXY_PASSWORD);"
     " echo SALONBOARD_WORKER_TOKEN=$(P /kireidot/worker/SALONBOARD_WORKER_TOKEN);"
