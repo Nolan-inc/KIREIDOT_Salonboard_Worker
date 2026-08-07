@@ -15445,14 +15445,35 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     const cap = await captureScrapeDebug(page, 'coupon', 'no_list_form', { diagnostics: { url: page.url() } });
     return fail(`クーポン一覧の couponEditForm が見つかりません (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
-  await page.waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 }).catch(() => {});
-  if ((await page.locator('input[name="frmCouponEditCnkDto.couponName"]').count().catch(() => 0)) === 0) {
+  // DTO 接頭辞はジャンルで違う (エステ=frmCouponEditCnkDto.*、美容室=別名)。
+  // Cnk 固定だと hair の編集ページを「未到達」と誤判定して全滅する (2026-08-07
+  // 実capture: 編集ページ表示済みなのに no_edit_form 失敗)。末尾一致で参照する。
+  await page.waitForSelector('input[name$=".couponName"]', { timeout: 15_000 }).catch(() => {});
+  if ((await page.locator('input[name$=".couponName"]').count().catch(() => 0)) === 0) {
     const cap = await captureScrapeDebug(page, 'coupon', 'no_edit_form', { diagnostics: { url: page.url() } });
     return fail(`クーポン編集ページに到達できませんでした (capture=${cap || '?'})`, 'UNKNOWN_ERROR', true);
   }
 
   const applied = await page.evaluate(({ name, price, dur, content, createNew, couponTypeCd, teijiJoukenCd, useCondition, searchCategoryCd, menuCategoryCd }) => {
-    const setVal = (sel, v) => { const el = document.querySelector(sel); if (!el) return false; el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
+    // hair は施術目安時間などが <select> のため、setVal は select にも対応する
+    // (値一致 → 数字一致「150」↔「150分」の順で解決)。
+    const setVal = (sel, v) => {
+      const el = document.querySelector(sel); if (!el) return false;
+      if (el.tagName === 'SELECT') {
+        const want = String(v);
+        const wantDigits = want.replace(/[^\d]/g, '');
+        const opts = Array.from(el.options || []);
+        const opt = opts.find((o) => o.value === want)
+          || (wantDigits && opts.find((o) => ((o.textContent || '').replace(/[^\d]/g, '')) === wantDigits));
+        if (!opt) return false;
+        el.value = opt.value;
+      } else {
+        el.value = String(v);
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
     const setChecked = (sel) => { const el = document.querySelector(sel); if (!el) return false; el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
     const selectSafe = (sel, preferred, fallbackLast = false) => {
       const el = document.querySelector(sel); if (!el) return false;
@@ -15463,21 +15484,21 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     };
     const r = { createNew };
     if (createNew) {
-      r.cpSetting = setChecked('input[name="frmCouponEditCnkDto.selectedCpCouponSetting"][value="0"]');
-      r.couponType = selectSafe('select[name="frmCouponEditCnkDto.selectedCouponTypeCd"]', couponTypeCd || 'CT01');
-      r.teiji = selectSafe('select[name="frmCouponEditCnkDto.selectedTeijiJoukenCd"]', teijiJoukenCd || 'TJ01');
-      r.useCondition = setVal('input[name="frmCouponEditCnkDto.useCondition"]', useCondition || '利用条件なし');
-      r.expiration = setChecked('input[name="frmCouponEditCnkDto.checkedAutoExpiration"][value="true"]');
-      r.searchCategory = selectSafe('select[name="frmCouponEditCnkDto.selectedSchCouponCategory"]', searchCategoryCd, true);
-      r.applyMenu = setChecked('input[name="frmCouponEditCnkDto.selectedApplyMenu"][value="1"]');
-      const menuCategories = Array.from(document.querySelectorAll('input[type="checkbox"][name="frmCouponEditCnkDto.selectedMenuCategoryCd"]'));
+      r.cpSetting = setChecked('input[name$=".selectedCpCouponSetting"][value="0"]');
+      r.couponType = selectSafe('select[name$=".selectedCouponTypeCd"]', couponTypeCd || 'CT01');
+      r.teiji = selectSafe('select[name$=".selectedTeijiJoukenCd"]', teijiJoukenCd || 'TJ01');
+      r.useCondition = setVal('input[name$=".useCondition"]', useCondition || '利用条件なし');
+      r.expiration = setChecked('input[name$=".checkedAutoExpiration"][value="true"]');
+      r.searchCategory = selectSafe('select[name$=".selectedSchCouponCategory"]', searchCategoryCd, true);
+      r.applyMenu = setChecked('input[name$=".selectedApplyMenu"][value="1"]');
+      const menuCategories = Array.from(document.querySelectorAll('input[type="checkbox"][name$=".selectedMenuCategoryCd"]'));
       const menuCategory = (menuCategoryCd && menuCategories.find((el) => el.value === menuCategoryCd)) || menuCategories.at(-1);
       if (menuCategory) { menuCategory.checked = true; menuCategory.dispatchEvent(new Event('change', { bubbles: true })); r.menuCategory = true; } else r.menuCategory = false;
     }
-    if (name) r.name = setVal('input[name="frmCouponEditCnkDto.couponName"]', name);
-    if (price != null) r.price = setVal('input[name="frmCouponEditCnkDto.price"]', price);
-    if (dur != null) r.dur = setVal('input[name="frmCouponEditCnkDto.sejyutsuAimTime"]', dur);
-    if (content != null || createNew) r.content = setVal('textarea[name="frmCouponEditCnkDto.contentExplanation"]', content || name);
+    if (name) r.name = setVal('input[name$=".couponName"]', name);
+    if (price != null) r.price = setVal('input[name$=".price"]', price);
+    if (dur != null) r.dur = setVal('input[name$=".sejyutsuAimTime"], select[name$=".sejyutsuAimTime"]', dur);
+    if (content != null || createNew) r.content = setVal('textarea[name$=".contentExplanation"]', content || name);
     return { ok: true, ...r };
   }, {
     name, price, dur, content, createNew: !resolvedExtId,
@@ -15490,8 +15511,8 @@ async function pushCouponViaForm(page, payload, opts = {}) {
 
   // dirty state: couponName を locator.fill で実入力し直す
   if (name) {
-    await page.fill('input[name="frmCouponEditCnkDto.couponName"]', '', { timeout: 6000 }).catch(() => {});
-    await page.fill('input[name="frmCouponEditCnkDto.couponName"]', name, { timeout: 6000 }).catch(() => {});
+    await page.fill('input[name$=".couponName"]', '', { timeout: 6000 }).catch(() => {});
+    await page.fill('input[name$=".couponName"]', name, { timeout: 6000 }).catch(() => {});
   }
 
   if (!enablePush) return { status: 'confirm_only', confirmed: applied };
@@ -15543,9 +15564,9 @@ async function pushCouponViaForm(page, payload, opts = {}) {
     if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = 'couponId'; form.appendChild(i); }
     i.value = couponId; form.submit();
   }, resolvedExtId).catch(() => {});
-  await page.waitForSelector('input[name="frmCouponEditCnkDto.couponName"]', { timeout: 15_000 }).catch(() => {});
+  await page.waitForSelector('input[name$=".couponName"]', { timeout: 15_000 }).catch(() => {});
   const reRead = await page.evaluate((wantName) => {
-    const el = document.querySelector('input[name="frmCouponEditCnkDto.couponName"]');
+    const el = document.querySelector('input[name$=".couponName"]');
     const cur = el ? (el.value || '') : null;
     return { persisted: cur === wantName, current: cur };
   }, name).catch(() => ({ persisted: false, current: null }));
