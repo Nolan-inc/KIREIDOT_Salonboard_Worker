@@ -68,6 +68,26 @@
           <mxGeometry x="1030" y="330" width="280" height="180" as="geometry" />
         </mxCell>
 
+        <!-- ===== Icons ===== -->
+        <mxCell id="ic-vercel" style="shape=image;html=1;imageAspect=0;aspect=fixed;image=https://icons.diagrams.net/assets/tabler-filled/1/Brand_Vercel.svg;" vertex="1" parent="vercel">
+          <mxGeometry x="10" y="7" width="22" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="ic-supabase" style="shape=image;html=1;imageAspect=0;aspect=fixed;image=https://icons.diagrams.net/assets/tabler-outline/1/Brand_Supabase.svg;" vertex="1" parent="supabase">
+          <mxGeometry x="10" y="7" width="22" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="ic-aws" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=#F78E04;gradientDirection=north;fillColor=#D05C17;strokeColor=#ffffff;dashed=0;html=1;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ec2;" vertex="1" parent="aws">
+          <mxGeometry x="10" y="7" width="24" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ic-store" style="shape=image;html=1;imageAspect=0;aspect=fixed;image=https://icons.diagrams.net/icon-cache1/Google_iOS_7_app_icons-2688/google_chrome-1460.png;" vertex="1" parent="store">
+          <mxGeometry x="10" y="7" width="24" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ic-docker-main" style="image;sketch=0;aspect=fixed;html=1;image=https://app.diagrams.net/img/lib/mscae/Docker.svg;" vertex="1" parent="ec2main">
+          <mxGeometry x="310" y="6" width="30" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="ic-docker-fb" style="image;sketch=0;aspect=fixed;html=1;image=https://app.diagrams.net/img/lib/mscae/Docker.svg;" vertex="1" parent="ec2fb">
+          <mxGeometry x="155" y="5" width="28" height="23" as="geometry" />
+        </mxCell>
+
         <!-- ===== Edges ===== -->
         <mxCell id="e1" value="ジョブ生成 (トリガ/RPC)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="admin" target="db">
           <mxGeometry relative="1" as="geometry">
