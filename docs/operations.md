@@ -20,7 +20,7 @@
 | バンドル置き場 | `s3://kireidot-sb-worker-debug-972293797066/deploy/<commit SHA>/worker.cjs` | イミュータブル。ロールバックの起点 |
 | ワーカー本体(箱上) | `/opt/kireidot/worker.cjs`(コンテナに read-only bind-mount) | 差替→`docker restart`で反映 |
 | ホット設定 | コンテナ内 `/home/pwuser/.kireidot/`(`worker_capabilities`・`max_concurrency`・`anthropic_api_key`) | 読込はプロセス起動時のみ→変更後は restart 必要 |
-| デバッグcapture | コンテナ内 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。**⚠️7日ローテのお掃除スクリプトは全4箱に設置済みだが未稼働**(AL2023にcronデーモンが無い → [§5](#5-未解決-デバッグcaptureのお掃除が動いていない)) |
+| デバッグcapture | コンテナ内 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。7日ローテのお掃除は systemd timer で全4箱稼働中([§5](#5-デバッグcaptureのお掃除systemd-timer)) |
 | 通知 | Slack `#kireidot-info` | 成功/失敗の4分類通知+予約明細 |
 
 ---
@@ -189,45 +189,53 @@ claim→即defer(cooldown中など)の反復は外からは無活動に見える
 
 ---
 
-## 5. 未解決: デバッグcaptureのお掃除が動いていない
+## 5. デバッグcaptureのお掃除(systemd timer)
 
-**状態(2026-08-09 実測)**: `/etc/cron.daily/sb-debug-cleanup` は全4箱に設置済みだが、**一度も実行されていない**。
+**⚠️ 箱で定期実行を仕込むときは cron ではなく systemd timer を使うこと。** 箱のOSは **Amazon Linux 2023** で `cronie` / `cronie-anacron` が入っておらず、`/etc/cron.daily/` は**単なるディレクトリ**(それを回す crond + anacron が存在しない)。`systemctl list-unit-files | grep cron` はゼロ件。
 
-**原因**: 箱のOSが **Amazon Linux 2023** で、`cronie` / `cronie-anacron` が**インストールされていない**。`/etc/cron.daily/` は単なるディレクトリで、それを回す仕組み(crond + anacron の run-parts)が存在しない。`systemctl list-unit-files | grep cron` の結果もゼロ件。
+この罠で、2026-08-08に設置された `/etc/cron.daily/sb-debug-cleanup` は**一度も実行されていなかった**(2026-08-09に発覚)。
 
+### 現在の構成(2026-08-09 稼働開始)
+
+全4箱に systemd timer を設置済み。設置スクリプトは **`scripts/setup-debug-cleanup-timer.sh`**(冪等・再実行可)。
+
+| ユニット | 内容 |
+|---|---|
+| `sb-debug-cleanup.service` | `docker exec <container> find ~/.kireidot/salonboard-debug -mindepth 2 -maxdepth 2 -type d -mtime +7 -exec rm -rf {} +` |
+| `sb-debug-cleanup.timer` | `OnCalendar=daily`(00:00 UTC = 09:00 JST)/ `Persistent=true`(停止中に逃した回を起動後に補填)/ `RandomizedDelaySec=900` |
+
+`SuccessExitStatus=0 1` を付けている。captureディレクトリが未作成の箱(新設直後の投稿箱など)では `find` が exit 1 を返すため。
+
+**動作実証済み**(2026-08-09): ダミーディレクトリで10日前=削除・1日前=残存を確認。
+
+### 保持期間を変える / 再設置する
+
+```bash
+bash scripts/setup-debug-cleanup-timer.sh        # 7日(既定)
+bash scripts/setup-debug-cleanup-timer.sh 14     # 14日に変更
 ```
-package cronie is not installed
-package cronie-anacron is not installed
-NO CRON UNIT FILES
+
+### 確認方法
+
+```bash
+# タイマー登録と次回実行時刻
+systemctl list-timers --all | grep sb-debug
+# 直近の実行結果
+systemctl show sb-debug-cleanup.service -p Result -p ExecMainStatus
+journalctl -u sb-debug-cleanup.service --no-pager -n 20
 ```
 
-**現在の実害**: まだ無い。2026-08-08に手動で古いcaptureを削除した直後のため、7日超のディレクトリは0件。ただし**放置すれば再び溜まり続ける**。
+### 背景 — なぜ掃除が要るか
 
-| 箱 | ディスク使用率 | capture量 | 増加ペース |
+capture は**書込失敗が多い箱ほど溜まる**。2026-08-08にメイン箱のディスクが91%に到達した(手動削除で38%へ)。発覚時点の実測:
+
+| 箱 | ディスク | capture量 | 増加ペース |
 |---|---|---|---|
-| メイン(50GB) | 39% | 1.8GB / 6,710ディレクトリ(8/1〜) | **約225MB/日** |
-| 予備FB(20GB) | 29% | 76MB(8/3〜) | 約15MB/日 |
+| メイン(50GB) | 39% | 1.8GB / 6,710ディレクトリ | **約225MB/日** |
+| 予備FB(20GB) | 29% | 76MB | 約15MB/日 |
 | 一括(30GB) | 20% | 4KB | ほぼゼロ |
 | 投稿(50GB) | 11% | 0 | ゼロ(新設) |
 
-メイン箱の内訳: bookings 851MB / change 460MB / schedule 152MB / cancel 138MB / menu 107MB。**書込失敗が多い箱ほど溜まる**構造。
+メイン箱の内訳: bookings 851MB / change 460MB / schedule 152MB / cancel 138MB / menu 107MB。
 
-**推奨する直し方(未実施)**: cronieを入れるより、AL2023ネイティブの systemd timer にするのが確実。全4箱に設置し、`scripts/` に冪等スクリプトとして置いてリポジトリ管理下にする。
-
-```ini
-# /etc/systemd/system/sb-debug-cleanup.service
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'docker exec <container> sh -c "find /home/pwuser/.kireidot/salonboard-debug -mindepth 2 -maxdepth 2 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null" || true'
-
-# /etc/systemd/system/sb-debug-cleanup.timer
-[Timer]
-OnCalendar=daily
-Persistent=true
-[Install]
-WantedBy=timers.target
-```
-
-`systemctl enable --now sb-debug-cleanup.timer` で有効化し、`systemctl list-timers | grep sb-debug` で登録を確認する。
-
-**⚠️ 同じ罠が他にもある可能性**: 「箱上に `/etc/cron.*` を置いた」系の運用はすべて動いていない。箱で定期実行を仕込むときは **systemd timer を使い、`systemctl list-timers` で登録を確認する**こと。
+ディスク逼迫は **Chrome起動失敗**という分かりにくい形で現れる。原因不明の起動失敗時は `df -h` を確認すること。

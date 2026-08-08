@@ -125,11 +125,13 @@ KD由来(`source='kireidot'`)で confirmed/pending、`external_booking_id` が�
 
 無効化: `SALONBOARD_DEBUG_CAPTURE=0`(既定は有効)。
 
-**⚠️ ディスク**: captureは放置すると溜まります(2026-08-08に常時系のディスク使用率が91%に到達)。7日ローテのお掃除スクリプトが `/etc/cron.daily/sb-debug-cleanup` に設置されていますが、**AL2023にcronデーモンが無いため実行されていません**([operations.md §5](operations.md#5-未解決-デバッグcaptureのお掃除が動いていない))。当面は手動確認が必要です。
+**ディスク**: captureは放置すると溜まります(2026-08-08に常時系のディスク使用率が91%に到達)。現在は **systemd timer `sb-debug-cleanup.timer`** が全4箱で日次稼働し、7日超を削除します(設置: `scripts/setup-debug-cleanup-timer.sh`、詳細: [operations.md §5](operations.md#5-デバッグcaptureのお掃除systemd-timer))。
+
+タイマーの生存確認:
 
 ```
-aws ssm send-command --instance-ids i-0f1cc0aff1ac8dd2e --document-name AWS-RunShellScript \
-  --parameters 'commands=["df -h /","docker exec sb-worker-cloud du -sh /home/pwuser/.kireidot/salonboard-debug"]'
+systemctl list-timers --all | grep sb-debug
+systemctl show sb-debug-cleanup.service -p Result -p ExecMainStatus
 ```
 
 ディスク逼迫はChrome起動失敗という分かりにくい形で現れるため、原因不明の起動失敗時は `df -h` を確認してください。
