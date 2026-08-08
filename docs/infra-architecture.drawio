@@ -1,0 +1,119 @@
+<mxfile host="app.diagrams.net" agent="claude" version="24.7.8" type="device">
+  <diagram id="kireidot-sb-infra" name="インフラ構成">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1360" pageHeight="920" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ===== Vercel ===== -->
+        <mxCell id="vercel" value="Vercel" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=14;fillColor=#E6F0FF;strokeColor=#4A78C2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="380" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="admin" value="KireidotAdmin (Next.js)&#10;管理画面 / 予約台帳&#10;/api/salonboard/jobs (claim)&#10;/api/salonboard/callback" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A78C2;" vertex="1" parent="vercel">
+          <mxGeometry x="15" y="40" width="170" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="superadmin" value="Kireidot_SuperAdmin&#10;同期監視ダッシュボード&#10;一括取込UI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A78C2;" vertex="1" parent="vercel">
+          <mxGeometry x="200" y="40" width="165" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Supabase ===== -->
+        <mxCell id="supabase" value="Supabase (cxbqbjrx…)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=14;fillColor=#E8F8EE;strokeColor=#3E9A5F;" vertex="1" parent="1">
+          <mxGeometry x="470" y="40" width="480" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="db" value="PostgreSQL&#10;bookings&#10;salonboard_sync_jobs&#10;salonboard_*_imports&#10;salonboard_credentials" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFFFFF;strokeColor=#3E9A5F;" vertex="1" parent="supabase">
+          <mxGeometry x="15" y="35" width="150" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="cron" value="pg_cron (19本)&#10;毎分 self-heal / reroute&#10;00:00 シフト日次&#10;03:00 設定系fetch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3E9A5F;" vertex="1" parent="supabase">
+          <mxGeometry x="185" y="40" width="140" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="ef" value="Edge Functions&#10;salonboard-email-ingest&#10;(予約通知メール取込)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3E9A5F;" vertex="1" parent="supabase">
+          <mxGeometry x="340" y="40" width="130" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ===== AWS ===== -->
+        <mxCell id="aws" value="AWS EC2" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=14;fillColor=#FFF4E0;strokeColor=#D79B00;" vertex="1" parent="1">
+          <mxGeometry x="40" y="320" width="600" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="ec2main" value="i-0f1cc0aff1ac8dd2e (c6i.2xlarge)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=2;fillColor=#FFFBF2;strokeColor=#D79B00;" vertex="1" parent="aws">
+          <mxGeometry x="15" y="35" width="350" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="wcloud" value="docker: sb-worker-cloud&#10;常時系 (realtime)&#10;executor=playwright_cloud&#10;並行6 / 予約書込SLA担当" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="ec2main">
+          <mxGeometry x="15" y="35" width="155" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="wbulk" value="docker: sb-worker-bulk&#10;一括系 (bulk・移行中)&#10;設定系fetch / 一括取込" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;dashed=1;" vertex="1" parent="ec2main">
+          <mxGeometry x="185" y="35" width="150" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="ec2note" value="セッション: userDataDir永続&#10;(SIGTERM flushでデプロイ跨ぎ維持)" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8A6D3B;" vertex="1" parent="ec2main">
+          <mxGeometry x="15" y="160" width="320" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ec2fb" value="i-01a0956edcd369475&#10;docker: sb-worker-fallback&#10;予備 (fallback_cloud)&#10;Cloud失敗書込を1回だけ再試行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="aws">
+          <mxGeometry x="390" y="60" width="190" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 店舗側 ===== -->
+        <mxCell id="store" value="店舗側" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=14;fillColor=#F3E8FF;strokeColor=#8E5EA2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="680" width="380" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="pc" value="予約同期くん (Electron)&#10;Mac Studio 1台 / executor=playwright&#10;実Chrome常駐+拡張ブリッジ&#10;CAPTCHA非感受の避難レーン&#10;※affinity: ログイン設定済み店舗のみ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#8E5EA2;" vertex="1" parent="store">
+          <mxGeometry x="15" y="35" width="250" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Proxy ===== -->
+        <mxCell id="proxy" value="Decodo Proxy&#10;static ISP ×10 (書込・店舗sticky)&#10;residential (読み専用)&#10;※IP評判がCAPTCHA率に直結" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEBEC;strokeColor=#C0504D;" vertex="1" parent="1">
+          <mxGeometry x="720" y="400" width="230" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ===== SalonBoard ===== -->
+        <mxCell id="sb" value="SalonBoard / HotPepper&#10;salonboard.com&#10;(Akamai bot対策:&#10;画像認証CAPTCHA / POSTホールド /&#10;DC IP拒否 / 同一アカウント1セッション)" style="rounded=1;whiteSpace=wrap;html=1;fontStyle=1;fillColor=#EEEEEE;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="330" width="280" height="180" as="geometry" />
+        </mxCell>
+
+        <!-- ===== Edges ===== -->
+        <mxCell id="e1" value="ジョブ生成 (トリガ/RPC)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="admin" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="一括enqueue" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="superadmin" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="claim / callback&#10;(HTTPS+worker token)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="ec2main" target="admin">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="claim / callback" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="ec2fb" target="admin">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="claim / callback / heartbeat" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="pc" target="admin">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="440" y="740" /><mxPoint x="440" y="180" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" value="Playwright" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="ec2main" target="proxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="ec2fb" target="proxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="proxy" target="sb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="実Chrome (直回線)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="pc" target="sb">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1170" y="760" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" value="予約通知メール&#10;(ingest+code@inbound.kireidot.jp)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="sb" target="ef">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="1170" y="130" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11" value="定期enqueue / self-heal" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="cron" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ===== フォールバック注記 ===== -->
+        <mxCell id="legend" value="書込フォールバック連鎖: Cloud → 予備Cloud → 店舗PC (→failed)&#10;CAPTCHA時: fail-fast → アカウント冷却30分 → 予約系は即PC移管 (affinity必須)" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#333333;fillColor=#FFFDE7;strokeColor=#C0A000;rounded=1;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="470" y="680" width="480" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

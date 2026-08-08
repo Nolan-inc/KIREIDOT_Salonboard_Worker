@@ -1,473 +1,123 @@
-# KIREIDOT サロンデスク (KIREIDOT_Salonboard_Worker)
+# KIREIDOT Salonboard Worker
 
-サロンの「予約・スタッフ・シフト・ブログ」を 1 つの画面から確認・操作するための
-**Electron デスクトップアプリ** + **サロンボード連携ワーカー**。
+KIREIDOT と SalonBoard(ホットペッパービューティー管理画面)を**双方向同期**するワーカー群のリポジトリ。
 
-## 概要
+- **クラウドワーカー**(`worker.ts` + `electron/scrapers.cjs`): EC2上のDockerで常時稼働。予約書込・各種取込のメイン実行体
+- **予約同期くん**(Electronデスクトップアプリ): 店舗PC(Mac Studio)で実Chromeセッションを保持し、クラウドが書けない状況(CAPTCHA等)の避難レーン+フォト/スタイル投稿を担当
 
-- **デスクトップアプリ (Electron + React + Vite + Tailwind)**
-  - UI 骨組み + LP デザインシステム適用済み (Phase 1 完了)
-  - 6 画面: ダッシュボード / 予約 / スタッフ / シフト / ブログ / 設定
-- **サロンボードワーカー (Playwright)**
-  - 既存の `worker.ts` (CLI) として残置。今後 Electron 内のサービスとして統合予定
-
-## デスクトップアプリの起動
-
-```bash
-npm install
-npm run dev     # Vite と Electron が並行起動 (HMR 有効)
-```
-
-ビルド:
-```bash
-npm run build   # vite build → dist/ に成果物
-```
-
-型チェック:
-```bash
-npm run type-check
-```
-
-## ディレクトリ構成
-
-```
-electron/           Electron main + preload (CJS)
-renderer/           Vite + React UI
-  ├ index.html
-  └ src/
-     ├ main.tsx          エントリ
-     ├ App.tsx           ルーター (state ベース)
-     ├ components/       AppShell / Sidebar / Topbar / Card
-     ├ pages/            Dashboard, Bookings, Staff, Shifts, Blog, Settings
-     ├ lib/              nav 定義 / cn / mockData
-     └ styles/globals.css
-worker.ts           Playwright サロンボードワーカー (既存、温存)
-inspect.ts          DOM 調査用スクリプト (既存、温存)
-```
+アーキテクチャ全体・信頼性メカニズム・改善ロードマップは **[docs/system-architecture.md](docs/system-architecture.md)** を参照。
+インフラ構成図(編集可能): **[docs/infra-architecture.drawio](docs/infra-architecture.drawio)**
 
 ---
 
-# 旧ドキュメント: サロンボードワーカー (CLI)
+## 1. 要件
 
-KIREIDOT Admin が積んだ `salonboard_sync_jobs` を取り出して処理するワーカーの
-ローカル開発用スケルトン。本番では Fly.io に載せる前提。
+### 1.1 機能要件 — 同期対象エンティティ
 
-現段階の責務:
+| エンティティ | SB→KD(取込) | KD→SB(反映) | 備考 |
+|---|---|---|---|
+| 予約 | ○ 巡回fetch+**予約通知メール取込**(即時) | ○ create/update/cancel | KD→SBは**3分SLA**。担当解決の後続ジョブあり |
+| ブロック予定(休憩/会議等) | ○ スケジュール読取 | ○ | シフト日次反映に連動して再push |
+| シフト/勤務パターン | ○(パターン未使用店は営業時間方式) | ○ 日次00:00+編集即時 | シフト一括入力は予定を消すため日別モーダル方式 |
+| スタッフ | ○ | ○ プロフィール編集 | SB側再作成によるコード失効はclaim時に自動差替 |
+| メニュー | ○ | ○ | |
+| クーポン | ○ 9項目(No/写真/種別/名前/利用条件/内容/カテゴリ/金額/目安時間) | ○ 内容・掲載状態 | fetchは一覧+詳細のfetch直POST方式 |
+| 設備(ベッド等) | ○ | ○ 受付可能数(+/-)含む | |
+| 口コミ | ○ 一覧+全文 | ○ 返信投稿 | |
+| ブログ | ○ | ○ クーポン紐付け対応 | |
+| フォト/スタイル | ○ | ○ | 画像uploadはSB bot対策のため**PC経路**が既定 |
+| こだわり/特集/サロン情報 | ○ | 一部 | 連携開始時の一括取込対象 |
+| 売上 | 未実装 | - | scraper未実装(enqueue対象外にすること) |
 
-- `/api/salonboard/jobs` からジョブを 1 件 poll して取り出す
-- `DRY_RUN=true` ならサロンボードに一切アクセスせず即 succeeded を返す
-- そうでなければ Playwright (Chromium) でサロンボードへログインを試行し、
-  結果を `/api/salonboard/callback` に返す
+制御要件:
 
-実装状況:
+- **機能別×方向別トグル**: `sync_features` の `<feature>_fetch` / `<feature>_push`(未設定=ON)。店舗単位で読み取り専用運用が可能(例: ADERはシフト取込のみON)
+- **店舗形態**: 単独アカウント店と**グループアカウント店**(1ログインでN店舗・サロン選択必須)の両対応。hair(/CNB,/CLP)とesthetic(/CNK,/KLP)の**ジャンル混在**(GINA=ヘアグループ配下エステ)も対応
+- **冪等性**: 全書込は「POST受理≠保存」を前提に実在確認まで行い、同一ジョブ再実行が安全であること
 
-- `push_booking` (新規予約登録): 実装済み (MVP)。確認画面まで進めて payload と
-  照合し、`SALONBOARD_ENABLE_PUSH` が `1`/`true` のときのみ登録ボタンを押す。
-  既定は dryRun 相当で `manual_required` 停止。詳細は
-  [`docs/push_booking.md`](docs/push_booking.md)。
-  ※ 予約登録画面のセレクタは実 DOM 未確定のため暫定 (`// TODO: SELECTOR`)。
+### 1.2 非機能要件
 
-まだ実装していないこと:
+| 項目 | 要件 |
+|---|---|
+| SLO | 書込ジョブ成功率 **日次≥99%** / 実顧客予約の反映 **3分以内** |
+| 可用性 | 書込フォールバック連鎖 **Cloud→予備Cloud→店舗PC**。単一ワーカー停止でSLAを失わない |
+| SalonBoard側制約 | 同一アカウント同時1セッション/Akamai bot対策(画像認証CAPTCHA・ログインPOSTホールド)/データセンターIP拒否(**static ISP=書込・住宅IP=読み専用**)/予約枠15分刻み/クーポン名36字・内容90字・施術時間5分単位 |
+| フラグ対応 | CAPTCHA検知時はログイン連打禁止(fail-fast)→アカウント冷却→**予約系は即PC移管**。フラグは3〜4時間で自然減衰する前提で設計 |
+| セッション | userDataDir永続+SIGTERM flush でデプロイを跨いで維持。フレッシュログインは最終手段 |
+| 監視/通知 | SuperAdmin同期監視ダッシュボード+Slack `#kireidot-info` へ結果通知(成功/失敗/手動要) |
+| データ保護 | SB認証情報は `salonboard_credentials`(Supabase)のみ。ログ/通知に秘密情報を出さない |
 
-- 予約一覧の scrape (`fetch_bookings`)
-- 売上の scrape (`fetch_sales`)
-- 予約の変更 / キャンセル (`cancel_booking`)
+---
 
-これらはサロンボードの実 HTML 構造を見ながら `worker.ts` の TODO 箇所に
-書き足していく。
+## 2. リポジトリ構成
 
-## セットアップ
+```
+worker.ts               クラウドワーカー本体(claim/実行/callback/フォールバック)
+electron/
+  ├ scrapers.cjs        SalonBoard操作の実体(全エンティティのscraper/pusher 約1.6万行)
+  ├ worker-process.cjs  予約同期くん内のワーカープロセス
+  └ main.cjs ほか       Electronアプリ(予約同期くん)
+renderer/               予約同期くんUI (React + Vite + Tailwind)
+supabase/migrations/    ジョブ基盤のRPC/cron/テーブル定義
+docs/                   設計資料(system-architecture.md が入口)
+salonboard_code/        SB実DOMサンプル(パーサ検証用・エステ/美容室別)
+docker/                 EC2デプロイ用エントリポイント
+.github/workflows/
+  ├ deploy-worker.yml   main push→EC2自動デプロイ(paths: worker.ts/scrapers.cjs等のみ)
+  └ release-desktop.yml タグ v* →予約同期くんのビルド/公証/リリース
+```
+
+## 3. 開発
 
 ```bash
 cp .env.example .env.local
-# .env.local を編集:
-#   SALONBOARD_WORKER_TOKEN を Admin 側 (.env.local) と完全一致させる
+#   SALONBOARD_WORKER_TOKEN を Admin 側と完全一致させる
 #   KIREIDOT_API_URL は通常 http://localhost:3000
 
 npm install
 npx playwright install chromium
+
+npm run type-check                    # worker.ts の型チェック
+node --check electron/scrapers.cjs    # scraper の構文チェック
+npm run dev                           # 予約同期くん(デスクトップ)の開発起動
 ```
 
-## 実行
+ワーカーをローカルで回す(サロンボードに触らない疎通確認):
 
 ```bash
-# 1. まずは dry-run: サロンボードに触らず、queued ジョブを succeeded に変えるだけ
-npm run dry-run
-
-# 2. 1ジョブだけ処理して終了
-npm run once
-
-# 3. 通常のループ実行 (30秒ごとに poll)
-npm run dev
+npm run dry-run    # queuedジョブを即succeededに変えるだけ(UI動線確認用)
+npm run once       # 1ジョブだけ処理して終了
 ```
 
-`DRY_RUN=true` でループを回すと、Admin 画面の「同期ジョブ」に並んでる
-queued ジョブが順次 succeeded に遷移する。予約・売上データは空 or ダミーの
-0 件売上が 1 件入るだけなので、UI 動線の疎通確認用。
-
-## 停止
-
-`Ctrl+C` で SIGINT。
-
-## トラブルシューティング
+### トラブルシューティング(ローカル)
 
 | 症状 | 原因と対処 |
 |---|---|
 | `jobs fetch failed: 401` | `SALONBOARD_WORKER_TOKEN` が Admin と不一致 |
 | `jobs fetch failed: 500 worker token not configured` | Admin 側 `.env.local` に token が無い / dev server 再起動忘れ |
-| `navigation: ...timeout` | 実サーバー到達できず。まずは `DRY_RUN=1` で試す |
-| ジョブが常に `captcha` で止まる | 実ログインで reCAPTCHA が出ている。店舗様に一度手動ログインしてもらう |
+| `navigation: ...timeout` | 実サーバー到達不可。まず `DRY_RUN=true` で切り分け |
+| 画像認証/CAPTCHAで止まる | ログイン連打しない。冷却待ち or 店舗PCレーンへ(README §4 鉄則参照) |
 
-## 本番展開 (後日)
+## 4. デプロイ/運用
 
-1. Fly.io アプリ作成 (`fly launch --name kireidot-salonboard-worker --region nrt`)
-2. `fly secrets set` で env を投入
-3. `Dockerfile` を追加して Playwright 入り Node イメージをデプロイ
-4. 深夜帯 (1:00〜6:00 JST) の停止、ポーリングジッター追加などの本番ガード実装
-
-## ログイン (メール/パスワード + Google)
-
-予約同期くん (Electron) のログイン画面は 2 系統用意してあります:
-
-- **Google でログイン** (推奨): スタッフが招待時メールと同じ Google アカウント
-  で入る。サインインは外部ブラウザで Google → 認可後に
-  Deep Link (`kireidot-salondesk://auth/callback`) でアプリに戻る。
-- **メール / パスワード**: 従来通り Supabase の email/password 認証。
-
-### 仕組み
-
-- PKCE フロー (`supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo, skipBrowserRedirect: true } })`)
-- `electron/main.cjs` が `kireidot-salondesk://` を `setAsDefaultProtocolClient`
-  で登録し、`open-url` / `second-instance` イベントで Deep Link を受信
-- `electron/preload.cjs` の `window.kireidotApp.onOAuthCallback` で
-  renderer に IPC 配送 → `supabase.auth.exchangeCodeForSession(code)` で確立
-
-### Supabase ダッシュボード側の設定 (一度だけ)
-
-Authentication → URL Configuration → **Redirect URLs** に以下を追加:
-
-```
-kireidot-salondesk://auth/callback
-```
-
-※ Google Cloud Console 側の OAuth Client は KIREIDOT_Super_Admin /
-   KIREIDOT_Admin と同一 (Supabase 経由なので、アプリ側に Client ID を
-   持つ必要は無い)。Apple ID / App-specific password / 証明書 / 秘密鍵は
-   一切扱わない。
-
-### 開発時の Deep Link 動作確認
-
-`npm run dev` 中はターミナルから:
-
-```sh
-open "kireidot-salondesk://auth/callback?code=test"
-```
-
-を叩くと、Electron 上の DevTools コンソールに
-`[auth] exchangeCodeForSession failed: ...` (test コードは無効なので) が
-出れば配送経路が動いている証拠。本番動作確認は Google ログインフルフロー
-で行う。
-
-### トラブルシュート
-
-| 症状 | 原因と対処 |
-|---|---|
-| 「Electron 環境で起動してください」 | Vite dev server を `npm run dev:vite` のみで開いた。`npm run dev` (Electron 同梱) を使う |
-| ブラウザは開くがアプリに戻らない | Supabase の Redirect URLs に `kireidot-salondesk://auth/callback` を追加し忘れ |
-| 「Apple Notarize 版」で Deep Link が効かない | `package.json` の `build.mac.protocols` が反映されていない可能性。クリーンビルド (`rm -rf release && npm run dist:mac:arm64`) で再生成 |
-| Google で入れたが画面が真っ白 / すぐログアウトに戻る | 該当 Google アカウントの user_id に対応する `staff` 行が無い (招待されていない)。Admin で招待してもらう |
-# KIREIDOT_Salonboard_Worker
-
-
----
-
-## macOS ビルド & 配布 (Notarize 付き)
-
-「予約同期くん」.dmg を **macOS Gatekeeper でブロックされない** 形でビルドして
-配布する手順。
-
-### 前提
-
-| 項目 | 値 |
-|---|---|
-| appId | `jp.kireidot.salondesk` |
-| productName | `予約同期くん` |
-| アーキ | macOS arm64 (Apple Silicon) |
-| 署名 ID | `Developer ID Application: HIKARU UEDA (7FMVQPBJKA)` (キーチェーンに登録済み) |
-| Hardened Runtime | 有効 (`build-resources/entitlements.mac.plist`) |
-| Notarize ツール | `xcrun notarytool` (Apple 公証サービス、Xcode 13+ で標準) |
-
-### 手動準備 (一度だけ)
-
-1. **Apple Developer Program に登録** (Team `7FMVQPBJKA`)
-2. **Developer ID Application 証明書を Xcode で取得 / インポート**
-3. **App-specific password を発行**
-   - https://appleid.apple.com → サインインとセキュリティ → 「App用パスワード」
-   - 任意の名前 (例: `予約同期くん-notary`) を付けて生成 → メモする
-4. **notarytool に認証情報を保存** (推奨: Keychain profile 方式)
-
-   ```bash
-   xcrun notarytool store-credentials "予約同期くん-notary" \
-     --apple-id <YOUR_APPLE_ID> \
-     --team-id 7FMVQPBJKA \
-     --password <APP-SPECIFIC-PASSWORD>
-   ```
-
-5. **`.env.local` を作成** (このリポジトリ直下)
-
-   ```bash
-   cp .env.example .env.local
-   # .env.local を開いて以下を有効化:
-   #   APPLE_NOTARY_KEYCHAIN_PROFILE=予約同期くん-notary
-   ```
-
-   ⚠️ `.env.local` は **`.gitignore` で除外済み**。絶対に commit しないこと。
-
-### ビルド
-
-```bash
-# 依存インストール (初回 / 更新時)
-npm install
-
-# arm64 dmg を生成 + Apple 公証まで全自動
-npm run dist:mac:arm64
-```
-
-完了すると以下が生成される:
-
-```
-release/salonboard-sync-mac-arm64.dmg     ← 配布用 (公証ステープル済み)
-release/mac-arm64/予約同期くん.app         ← .app 本体 (検証用)
-```
-
-### 公証なし (開発用)
-
-```bash
-npm run dist:mac:nosign   # 公証スキップで dmg を作成 (Gatekeeper 警告が出る)
-```
-
-### 検証
-
-```bash
-npm run verify:mac
-```
-
-このスクリプトは以下を実施する:
-
-- `codesign --verify --deep` で署名検証
-- `spctl --assess` で Gatekeeper の承認チェック (公証済みなら accepted)
-- `xcrun stapler validate` で公証チケットの存在確認
-- dmg の **SHA256 ハッシュ** を `release/*.dmg.sha256` に出力 (改ざん検知用)
-
-### 配布
-
-ビルドした dmg を `KIREIDOT_Super_Admin/public/downloads/salonboard-sync-mac.dmg`
-に配置 → push & deploy。Super Admin の `/downloads` ページから誰でも
-ダウンロードできるようになる。
-
-### 環境変数フォールバック (CI 等)
-
-Keychain が使えない CI 環境では、`.env.local` (またはシークレット環境変数) に
-以下を設定する:
-
-```
-APPLE_ID=...
-APPLE_APP_SPECIFIC_PASSWORD=...
-APPLE_TEAM_ID=7FMVQPBJKA
-```
-
-⚠️ **絶対に Git にコミットしないこと**。`.env.local` および証明書類 (`*.p12`,
-`*.cer`, `AuthKey_*.p8`, `*.mobileprovision`) は `.gitignore` で除外済み。
-
-### トラブルシュート
-
-| 症状 | 原因 / 対処 |
-|---|---|
-| `[notarize] ⚠️ 認証情報が見つからない` | `.env.local` の `APPLE_NOTARY_KEYCHAIN_PROFILE` が未設定。 `xcrun notarytool store-credentials` を先に実行 |
-| `spctl --assess: rejected: Unnotarized Developer ID` | 公証されていない。`npm run dist:mac:arm64` を最後まで完走させる |
-| `codesign --verify: code object is not signed` | Developer ID 証明書がキーチェーンに無い。Xcode で取得 |
-| 公証で `Invalid` | 出力された `LogFileURL` を curl で取得して詳細確認: `xcrun notarytool log <submission-id> --keychain-profile 予約同期くん-notary` |
-
----
-
-## 自動アップデート (electron-updater)
-
-予約同期くんは起動後にバックグラウンドで新バージョンをチェック・
-ダウンロードし、**次回起動時に自動で適用**します (Sparkle 系の挙動)。
-ユーザーが「再ダウンロード」する必要はありません。
-
-### 仕組み
-
-- 配信元: `https://github.com/Nolan-inc/kireidot-salondesk-releases`
-  (公開リポジトリ。**ソースコードは別の private リポジトリで管理**し、
-  ビルド成果物の dmg だけここに置く)
-- 取得頻度: 起動直後 + 以後 6 時間ごと
-- ダウンロード: バックグラウンド (差分 blockmap で効率化)
-- 適用: アプリ終了時に自動 (`autoInstallOnAppQuit`)。
-  ユーザーは右下のトーストの「今すぐ再起動」ボタンで即時適用も可能。
-
-### 一度だけ準備すること (人間が GitHub 上で操作)
-
-1. **`Nolan-inc/kireidot-salondesk-releases` を作成** (Public)
-   ```bash
-   gh repo create Nolan-inc/kireidot-salondesk-releases --public \
-     --description "予約同期くん 配信用 (バイナリ専用)" \
-     --confirm
-   ```
-   このリポジトリにはバイナリしか置かない (README だけあれば十分)。
-
-2. **publish 用の Personal Access Token** (リリース作成専用)
-   - `repo` スコープを持つ Classic PAT を発行 (組織で SSO がある場合は SSO Authorize 必須)
-   - **`GH_TOKEN`** 環境変数として publish 時のだけ渡す。
-     `.env.local` には書かず、シェルで一時的に export する運用を推奨。
-
-### 新バージョンのリリース手順
-
-```bash
-cd KIREIDOT_Salonboard_Worker
-
-# 1. バージョンを上げる (semver)
-npm version patch  # or minor / major
-
-# 2. Apple 公証 + GitHub Releases へアップロードを一気にやる
-GH_TOKEN=ghp_xxxx npm run publish:mac:arm64
-```
-
-`publish:mac:arm64` 実行で:
-
-- dmg を生成 → afterSign で Apple Notary に提出 → staple
-- `latest-mac.yml` (manifest) + `salonboard-sync-mac-arm64.dmg.blockmap` を生成
-- 上記 3 ファイルを `kireidot-salondesk-releases` の **新規 Draft Release** に
-  アップロード (タグは `v<version>`)
-
-リリースを **Draft → Published** に切り替えれば、既存ユーザーのアプリは
-次回起動時 (= 最大 6 時間以内に) 検知してダウンロードする。
-即時テストしたい場合はアプリを再起動するだけで OK。
-
-### 動作確認
-
-```bash
-# 開発時 (アップデートはスキップされる)
-npm run dev
-
-# 本番ビルドで実際にチェック動作を試す
-npm run dist:mac:arm64
-open release/mac-arm64/予約同期くん.app
-# ユーザーディレクトリの logs/main.log に updater のログが出る:
-tail -f "~/Library/Application Support/予約同期くん/logs/main.log"
-```
-
-`SKIP_AUTO_UPDATE=1` を環境変数に設定するとアップデート機構を無効化できる
-(社内検証ビルドで意図せず本番リリースに置き換わるのを防ぐ用途)。
-
-### 注意点
-
-- **同じバージョンを上書きで再公開しないこと**。electron-updater は
-  バージョン番号で比較するので、同じバージョン番号の dmg を差し替えても
-  既存ユーザーには配信されない。バグ修正なら patch を 1 上げる。
-- **Apple 公証は毎リリース必須**。署名されていない dmg は Gatekeeper で
-  拒否され、アップデートも失敗する (`autoUpdater.on('error')`)。
-- **PAT を Git に絶対コミットしない**。`GH_TOKEN` は shell の一時 env で
-  渡す or `~/.zshrc` などに置く (リポジトリ外)。
-
----
-
-## SalonBoard Device 設定手順 (v0.2.2 以降)
-
-v0.2.2 から、店舗 PC ごとに **device token** を発行して SalonBoard 認証情報を取得する仕組みに切り替えました (それ以前の global token は本番では使えません)。
-
-### 1. Admin で device を発行する
-
-1. `https://admin.kireidot.jp/admin/salonboard/devices` を開く
-2. 「**デバイスを追加**」をクリック
-3. デバイス名 (例: 銀座本店-mac-01) と 管理スタッフを入力 → 発行
-4. ⚠️ **`SALONBOARD_DEVICE_ID` と `SALONBOARD_DEVICE_TOKEN` がモーダルに 1 回だけ平文表示** されます。閉じると二度と取れないので、必ずその場で保存してください
-5. 同じ画面で **「店舗を選択して追加」** から、この device に紐付ける店舗を選ぶ
-
-### 2. 店舗 PC の .env.local に設定する
-
-予約同期くん .app の中身ではなく、開発・運用用の `.env.local` (Worker root) に以下を追記:
-
-```env
-# Admin URL
-VITE_KIREIDOT_API_URL=https://admin.kireidot.jp
-
-# Admin で発行された device 情報
-VITE_SALONBOARD_DEVICE_ID=<モーダルに表示された uuid>
-VITE_SALONBOARD_DEVICE_TOKEN=<モーダルに表示された 43文字のトークン>
-
-# 任意の識別子 (Admin の同期履歴に出る)
-VITE_WORKER_ID=銀座本店-mac-01
-```
-
-> 注: VITE_* プレフィックスは Vite のビルド時に renderer (Electron 内ブラウザ側) に
-> 焼き込まれます。Worker (Electron 主プロセス) も同じ値を使うので、両方を兼ねます。
-
-### 3. アプリ再起動 → 設定 self-check
-
-予約同期くん .app を起動すると、画面上部に以下のいずれかが出ます:
-
-| 表示 | 意味 | 対処 |
+| 対象 | 方法 | 注意 |
 |---|---|---|
-| (バナーなし) | 正常 | そのまま使用可 |
-| デバイス設定が未完了 | `.env.local` 未設定 | 上記 step 2 を再確認 |
-| デバイス認証に失敗 | token 不一致 / Admin で revoked | Admin で device 状態を確認、または token 再発行 |
-| 担当店舗が未割当 | shop 紐付けがない | Admin の device 画面で紐付け追加 |
-| SalonBoard認証情報が未設定 | credentials を Admin で未登録 | `/admin/salonboard` で店舗の login/password を登録 |
-| SalonBoard連携の同意未取得 | consent レコードなし | オーナーが Admin で同意を取得 |
-| 全店舗が一時ブロック中 | reCAPTCHA / 403 等で 6h ブロック | 時間を空けて自動解除待ち |
+| クラウドワーカー | main へ push → GH Actions が EC2 の docker を更新 | **デプロイ=コンテナ再起動**。頻発させるとコールド再ログイン波→CAPTCHAの引き金になるためまとめる。docs/README等のみの変更はデプロイされない(paths filter) |
+| 予備(FB)ワーカー | 別repo `KIREIDOT_Salonboard_Fallback_Worker` に upstream merge → push | 本体修正後の**merge忘れに注意**(自動化はロードマップP3) |
+| 予約同期くん | タグ `v*` push → ビルド+Developer ID署名+公証 | 自動更新は署名要件あり(docs/参照) |
+| DBマイグレーション | `supabase/migrations/` に追加し Supabase MCP/CLI で適用 | 新テーブルは明示GRANT+`notify pgrst`必須 |
 
-### 4. device token を再発行する (紛失/漏洩時)
+### 運用の鉄則(過去障害からの学び)
 
-1. Admin の device 画面で対象 device の **「token再発行」** ボタンを押す
-2. 旧 token は即座に無効化される (DB 内の `device_token_hash` を上書き)
-3. 新 token を控えて、店舗 PC の `.env.local` を更新 → アプリ再起動
+1. **throttle/CAPTCHAが出たら止めて待つ**。ログイン試行の追加・大量re-queue・冷却の手動解除はすべて悪化要因
+2. **「実行中0+待機N」≠ワーカー停止**。claim→即defer の反復は外から見えない。15分以上・複数アカウント跨ぎの完全無活動で初めて停止を疑う
+3. 失敗ジョブの再投入は**原因修正後に**。データ起因(文字数超過等)は再実行しても失敗する
+4. 詳細な失敗診断は EC2 の `docker logs sb-worker-cloud` と `~/.kireidot/salonboard-debug/` のcapture
 
-### 5. device を完全に廃止する (PC 入れ替え時)
+## 5. 関連リポジトリ
 
-1. 「revoke」を押す → status=revoked、device_token_hash=NULL
-2. 旧 token は二度と通らない
-3. 再利用したい場合は「再発行して再有効化」ボタン (revoke 中の device に表示) で `status=active` + 新 token を発行
-
-### 仕組み (概要)
-
-- token は **平文では DB に保存しない**。`HMAC-SHA256(token, SALONBOARD_DEVICE_SECRET)` の hash だけが `salonboard_sync_devices.device_token_hash` に保存される
-- credentials 取得は `POST /api/salonboard/device/credentials` 経由で、Admin が以下を全部検証してから返す:
-  - device の status=active, revoked_at IS NULL
-  - device が shop に紐付き、`salonboard_sync_device_shops.enabled = true`
-  - `salonboard_credentials.enabled = true`, `blocked_until` が過去
-  - `salonboard_consents.revoked_at IS NULL` (有効な同意あり)
-- credentials が満たされない場合は **何が原因か** が個別エラーコードで返る (`credentials_not_set` / `credentials_disabled` / `blocked` / `consent_missing` / `shop_not_allowed`)
-
----
-
-## 複数店舗の worker セットアップ（マルチテナント運用）
-
-worker は **店舗ごとの Mac（推奨: 専用 Mac mini）に同一の `予約同期くん.app` を入れ、その店舗の実回線で動かす**構成です。なぜ各店舗の実回線が必要か・全体フローは `docs/multitenant-worker-flow.html`（PDF 同梱）を参照。
-
-> **重要:** SalonBoard は Akamai のボット対策で **データセンター IP（AWS / さくら / カゴヤ等）からのアクセスを遮断**します。クラウドに worker を置く完全集約は不可。各店舗の実回線（住宅/事業者 IP）からの実 Chrome アクセスだけが通るため、**手足（worker）は各店舗の Mac に置く**のが必須です（頭脳=Admin/Supabase はクラウド）。
-
-### 推奨構成
-
-- **店舗ごとに専用 Mac mini**（常駐・スリープ無効・有線推奨）。業務用 PC との同居は事故の元（スリープ/終了/アカウント競合）。
-- **店舗ごとに 1 デバイストークン**（`/admin/salonboard/devices` で発行し、その店舗に紐付け）。1 店舗 = 1 デバイス = 1 回線 が Akamai 的に最も自然。
-
-### キッティング手順（新規店舗の追加）
-
-1. **Admin**: 組織・店舗 + SalonBoard 認証情報を登録（`/admin/salonboard`）
-2. **Admin**: `/admin/salonboard/devices` でデバイストークンを発行 → その店舗に紐付け
-3. **店舗 Mac**: 下記スクリプトを 1 回流す（インストール + 設定 + 常時稼働化 + 起動）
-
-```bash
-scripts/setup-store-worker.sh \
-  --token  <Admin で発行したデバイストークン> \
-  --api    https://admin.kireidot.jp \
-  --worker 銀座本店-mac-01 \
-  --dmg    https://github.com/Nolan-inc/KIREIDOT_Salonboard_Worker/releases/latest/download/salonboard-sync-mac-arm64.dmg
-```
-
-スクリプトは `~/Library/Application Support/予約同期くん/salonboard-device.json` にデバイス設定を書き込み（手動で「設定」画面に入力する代わり）、`pmset` でスリープを無効化してアプリを起動します。完了後、アプリ上部のバナーが「表示なし（正常）」になれば稼働中。
-
-> 手動でやる場合は README の「SalonBoard Device 設定手順」のとおり、アプリの **設定** 画面で API URL + トークンを入力。
->
-> ⚠️ スクリプトは初回検証前のドラフト扱い。実機 1 台で「設定ファイルのみで worker がポーリングを開始するか」を確認してから横展開すること。
+| repo | 役割 |
+|---|---|
+| KireidotAdimn | 管理画面・callback/claim API・予約台帳 |
+| Kireidot_SuperAdmin | 同期監視ダッシュボード・一括取込UI |
+| KIREIDOT_Salonboard_Fallback_Worker | 予備Cloudワーカー(本repoがupstream) |
