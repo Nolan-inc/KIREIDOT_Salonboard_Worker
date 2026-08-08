@@ -203,3 +203,48 @@ ECRイメージ同梱の古い worker.cjs で動き、修正済みバグが再�
    (確認: `docker inspect <name> --format "{{len .Mounts}}"` が 1 であること)
 6. 受け皿(箱)の起動を確認してから **DB関数 `salonboard_job_lane` を切替**(逆順はジョブ飢餓)
 7. `/etc/cron.daily/sb-debug-cleanup` を設置(capture 7日ローテ)
+
+---
+
+## 9. 店舗シャード分割の使い方 (2026-08-09 実装・段階導入)
+
+Layer1(shard割当+claim拡張)は**実装済み・本番適用済み**。ただし shard を定義するまでは
+何も起きない (= 従来どおり全workerが全店舗を拾う) ため、安全に段階導入できる。
+
+### 現在の状態
+
+- `salonboard_worker_shards` = **0行**(未定義)→ 分割は無効。従来動作
+- 新店舗の連携開始時に `salonboard_assign_shard()` が呼ばれるが、shard未定義なら null を返すだけ
+
+### 有効化の手順(25〜30店舗を超えたら)
+
+```sql
+-- 1) shard を定義 (箱を建てる分だけ)
+insert into salonboard_worker_shards(shard_id, name, capacity)
+values (1,'shard-1',25), (2,'shard-2',25);
+
+-- 2) 既存アカウントを一括割当 (最少負荷へ自動分散)
+select public.salonboard_assign_shard(shop_id)
+from (select distinct on (public.salonboard_account_key(shop_id)) shop_id
+      from salonboard_credentials where enabled) x;
+
+-- 3) 充足状況の確認
+select * from salonboard_shard_load;
+```
+
+```bash
+# 4) 各箱に担当shardを設定 (ホット設定・再起動不要)
+bash scripts/set-worker-shard.sh i-xxxx sb-worker-cloud 1
+bash scripts/set-worker-shard.sh i-yyyy sb-worker-cloud-2 2
+```
+
+**⚠️ 順序の鉄則**: 「箱を全shard分立てる」→「shard定義+割当」→「各箱にshard設定」。
+逆順にすると、担当worker不在のshardに割り当てられた店舗のジョブが宙に浮く。
+
+### 設計上の要点
+
+- 分割単位は**店舗ではなくSBアカウント**(`group_account_id` または単独店の `shop_id`)。
+  同一アカウントは同時1セッションしか張れないため、アカウントを跨いで分けないと意味がない
+- **未割当アカウントは全workerが拾える**(移行期の安全弁)。割当漏れ=停止にはならない
+- 店舗の shard 移動は `salonboard_shard_assignments` の1行UPDATEのみ。次のclaimから反映(無停止)
+- 新店舗は認証情報登録トリガで自動割当 → **オンボード時のインフラ作業ゼロ**
