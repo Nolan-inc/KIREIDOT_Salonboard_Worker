@@ -274,3 +274,14 @@ module.exports = {
 - FBワーカー: [fallback-cloud-worker.md](fallback-cloud-worker.md)
 - シフト同期設計: [shift-parity-design.md](shift-parity-design.md)
 - クラウドスクレイピング基盤: [salonboard-cloud-scraping.md](salonboard-cloud-scraping.md)
+
+---
+
+## 9. 2026-08-09 に踏んだ罠 (再発防止メモ)
+
+| 罠 | 症状 | 対策 |
+|---|---|---|
+| **PostgRESTはRPCのオーバーロードを解決できない** | claimに引数を1つ足した(5→6引数)ところ旧版が残り、全ワーカーのジョブ取得が500で停止(14分) | シグネチャを変える migration には**旧版のDROPを必ず同梱**する。`select p.oid::regprocedure from pg_proc where proname='...'` で1つだけになったか確認 |
+| **新規箱でバンドルのbind-mount忘れ** | ECR同梱の古いworker.cjsで起動し、修正済みバグが再発 | `docker run` に `-v /opt/kireidot/worker.cjs:/app/worker.cjs:ro`。確認は `docker inspect <名前> --format "{{len .Mounts}}"` が1 |
+| **AL2023にcronが無い** | `/etc/cron.daily/` に置いた掃除スクリプトが一度も動かない | systemd timer を使う(`scripts/setup-debug-cleanup-timer.sh`)。`systemctl list-timers` で登録確認 |
+| **ログイン後プローブが別ジャンルのTOPを叩く** | hair店のログイン直後に `/KLP/top/` を踏み、SBのセッション失効ページで自分のセッションを破壊 | genre/グループでプローブ順を出し分け(hairは `groupTop→/CLP/bt/top/` のみ) |
