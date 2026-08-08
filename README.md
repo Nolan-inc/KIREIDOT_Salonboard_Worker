@@ -6,7 +6,9 @@ KIREIDOT と SalonBoard(ホットペッパービューティー管理画面)を*
 - **予約同期くん**(Electronデスクトップアプリ): 店舗PC(Mac Studio)で実Chromeセッションを保持し、クラウドが書けない状況(CAPTCHA等)の避難レーン+フォト/スタイル投稿を担当
 
 アーキテクチャ全体・信頼性メカニズム・改善ロードマップは **[docs/system-architecture.md](docs/system-architecture.md)** を参照。
-インフラ構成図(編集可能): **[docs/infra-architecture.drawio](docs/infra-architecture.drawio)**
+インフラ構成図: **[docs/infra-architecture.png](docs/infra-architecture.png)**(編集用: [docs/infra-architecture.drawio](docs/infra-architecture.drawio))
+
+![インフラ構成図](docs/infra-architecture.png)
 
 ---
 

@@ -69,44 +69,52 @@
         </mxCell>
 
         <!-- ===== Edges ===== -->
-        <mxCell id="e1" value="ジョブ生成 (トリガ/RPC)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="admin" target="db">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e2" value="一括enqueue" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="superadmin" target="db">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e3" value="claim / callback&#10;(HTTPS+worker token)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="ec2main" target="admin">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e4" value="claim / callback" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="ec2fb" target="admin">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e5" value="claim / callback / heartbeat" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="pc" target="admin">
+        <mxCell id="e1" value="ジョブ生成 (トリガ/RPC)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="admin" target="db">
           <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="140" y="250" /><mxPoint x="540" y="250" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e2" value="一括enqueue" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="superadmin" target="db">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="claim / callback&#10;(HTTPS+worker token)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ec2main" target="admin">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="claim / callback" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ec2fb" target="admin">
+          <mxGeometry x="-0.6" relative="1" as="geometry">
+            <Array as="points"><mxPoint x="525" y="285" /><mxPoint x="100" y="285" /></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" value="claim / callback / heartbeat" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="pc" target="admin">
+          <mxGeometry x="0.5" relative="1" as="geometry">
             <Array as="points"><mxPoint x="440" y="740" /><mxPoint x="440" y="180" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e6" value="Playwright" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="ec2main" target="proxy">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e6" value="Playwright" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ec2main" target="proxy">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="835" y="560" /></Array>
+          </mxGeometry>
         </mxCell>
         <mxCell id="e7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="ec2fb" target="proxy">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e8" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="proxy" target="sb">
+        <mxCell id="e8" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="proxy" target="sb">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e9" value="実Chrome (直回線)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="pc" target="sb">
+        <mxCell id="e9" value="実Chrome (直回線)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="pc" target="sb">
           <mxGeometry relative="1" as="geometry">
             <Array as="points"><mxPoint x="1170" y="760" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e10" value="予約通知メール&#10;(ingest+code@inbound.kireidot.jp)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;" edge="1" parent="1" source="sb" target="ef">
+        <mxCell id="e10" value="予約通知メール&#10;(ingest+code@inbound.kireidot.jp)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="sb" target="ef">
           <mxGeometry relative="1" as="geometry">
             <Array as="points"><mxPoint x="1170" y="130" /></Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e11" value="定期enqueue / self-heal" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;" edge="1" parent="1" source="cron" target="db">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="e11" value="定期enqueue / self-heal" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=11;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="cron" target="db">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="695" y="260" /><mxPoint x="600" y="260" /></Array>
+          </mxGeometry>
         </mxCell>
 
         <!-- ===== フォールバック注記 ===== -->
