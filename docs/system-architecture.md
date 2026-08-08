@@ -43,7 +43,7 @@ flowchart TB
     subgraph AWS["AWS EC2"]
         CLOUD[常時系 Cloud Worker<br/>i-0f1cc0aff1ac8dd2e<br/>docker: sb-worker-cloud<br/>executor=playwright_cloud<br/>c6i.2xlarge / 並行6]
         BULK[一括系 Bulk Worker<br/>docker: sb-worker-bulk<br/>lane=bulk (移行中)]
-        FB[予備 Fallback Worker<br/>i-01a0956edcd369475<br/>executor=fallback_cloud]
+        FB[予備 Fallback Worker<br/>i-09e54e0b55fb8ab34 (m6i.large)<br/>executor=fallback_cloud]
     end
 
     subgraph Local["店舗側"]
