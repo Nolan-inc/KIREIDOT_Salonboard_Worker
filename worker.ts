@@ -1021,6 +1021,13 @@ async function handleJob(job: Job): Promise<void> {
   const accountIsGroup =
     job.credentials.is_group_account ??
     !!(job.credentials.salon_id && String(job.credentials.salon_id).trim());
+  // ログイン後の管理TOPプローブをジャンル/グループで出し分けるヒント。
+  // 別ジャンルのTOPを叩くとSalonBoardがセッション失効ページを返すため必須。
+  const reloginHint = {
+    genre: (job as { genre?: string }).genre === "hair" ? "hair" : "esthetic",
+    isGroup: accountIsGroup,
+  };
+
   // グループ店舗は同じSalonBoardログインIDを共有する。店舗別profileだと店舗数分の
   // login POSTが発生するため、認証セッションと出口IPはアカウント単位で共有する。
   const sessionKey = sessionKeyFor(job.credentials.login_id, baseUrl);
@@ -1169,10 +1176,15 @@ async function handleJob(job: Job): Promise<void> {
         loginEndpoint,
         job.shop_id,
         job.credentials.login_id,
-        () => tryLogin(page, loginUrl, {
-          loginId: job.credentials.login_id,
-          password: job.credentials.password,
-        }),
+        () => tryLogin(
+          page,
+          loginUrl,
+          {
+            loginId: job.credentials.login_id,
+            password: job.credentials.password,
+          },
+          { genre: wAuthGenre, isGroup: accountIsGroup },
+        ),
       );
       };
       const isCredentialFailure = (reason: string) =>
@@ -1698,7 +1710,7 @@ async function handleJob(job: Job): Promise<void> {
           salonId: chSalonId,
           shopName: chShopName,
           isGroupAccount: accountIsGroup,
-          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
         });
         if (
           cr.status === "failed" &&
@@ -1869,7 +1881,7 @@ async function handleJob(job: Job): Promise<void> {
               genre,
               isGroupAccount: accountIsGroup,
               // 失効時の同一ジョブ内自己回復。
-              relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+              relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
             });
       await reportScraperResult(
         job,
@@ -1896,7 +1908,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId,
         shopName,
         isGroupAccount: accountIsGroup,
-        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
       });
       await reportScraperResult(job, "push_shifts", result, {}, page);
       return;
@@ -1914,7 +1926,7 @@ async function handleJob(job: Job): Promise<void> {
         shopName,
         isGroupAccount: accountIsGroup,
         businessHours: (job as { business_hours?: unknown }).business_hours ?? null,
-        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
       }) as { status?: string; shifts?: unknown[]; reason?: string; errorCode?: string; warnings?: string[] };
       if (result.status === "ok" && Array.isArray(result.shifts)) {
         // 警告 (出セルのスキップ理由等) は callback の result に残らないため summary に出す
@@ -2059,7 +2071,7 @@ async function handleJob(job: Job): Promise<void> {
         salonId: aSalonId,
         shopName: aShopName,
         isGroupAccount: accountIsGroup,
-        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+        relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
       });
       await reportScraperResult(job, "push_acceptance", result, {}, page);
       return;
@@ -2243,7 +2255,7 @@ async function handleJob(job: Job): Promise<void> {
           loginId: job.credentials.login_id,
           password: job.credentials.password,
           // 失効時の同一ジョブ内自己回復 (hair warmup 等で expired を踏んだら1回だけ再ログイン)。
-          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct"),
+          relogin: makeRelogin(page, baseUrl, job.credentials, job.shop_id, launch.proxy?.server ?? "direct", reloginHint),
           abortSignal: _fetchAc.signal,
           ...(targetDate
             ? { range: { fromStr: targetDate, toStr: targetDate } }
@@ -2361,6 +2373,7 @@ async function handleJob(job: Job): Promise<void> {
             job.credentials,
             job.shop_id,
             launch.proxy?.server ?? "direct",
+            reloginHint,
           ),
         });
         const patterns = (res?.patterns ?? []) as unknown[];
@@ -2465,6 +2478,7 @@ async function handleJob(job: Job): Promise<void> {
               job.credentials,
               job.shop_id,
               launch.proxy?.server ?? "direct",
+              reloginHint,
             ),
           });
           const rows = (res?.rows ?? []) as unknown[];
@@ -3506,6 +3520,8 @@ function makeRelogin(
   creds: { login_id: string; password: string },
   shopId: string,
   endpoint: string,
+  // ログイン後プローブの出し分けヒント (別ジャンルの管理TOPでセッションを壊さないため)。
+  hint?: { genre?: string | null; isGroup?: boolean },
 ): () => Promise<boolean> {
   return async () => {
     if (autoLoginDisabled()) {
@@ -3525,10 +3541,15 @@ function makeRelogin(
       // ここで再ログインできなければ scraper が SESSION_EXPIRED を返し、ジョブ全体を
       // 新しいCloudコンテキスト/出口で直ちに再実行する。
       const r = await withLoginPacing(endpoint, shopId, creds.login_id, () =>
-        tryLogin(page, new URL("/login/", baseUrl).toString(), {
-          loginId: creds.login_id,
-          password: creds.password,
-        }),
+        tryLogin(
+          page,
+          new URL("/login/", baseUrl).toString(),
+          {
+            loginId: creds.login_id,
+            password: creds.password,
+          },
+          hint,
+        ),
       );
       if (r.status === "ok") noteEndpointLoginSuccess(endpoint, creds.login_id);
       else if (
@@ -3600,7 +3621,12 @@ async function gotoResilient(
 async function tryLogin(
   page: Page,
   url: string,
-  c: { loginId: string; password: string }
+  c: { loginId: string; password: string },
+  // ログイン後の管理TOPプローブ順を決めるヒント。渡さない場合は従来順(エステ優先)。
+  // ★hair/グループ account に対してエステ用 /KLP/top/ を叩くと SalonBoard が
+  //   「ログインの有効期限が切れました」を返し、成立していたセッションを自分で壊す
+  //   (2026-08-09: 投稿箱=セッションが浅く毎回ログインするため多発)。
+  hint?: { genre?: string | null; isGroup?: boolean }
 ): Promise<{ status: "ok" } | { status: "failed"; reason?: string } | { status: "captcha" }> {
   try {
     // ログイン遷移は tunnel 瞬断で落ちやすいので再試行付きで開く。
@@ -3801,11 +3827,26 @@ async function tryLogin(
   // /CNC/groupTop/ を肯定確認する（従来はgroupTopしか見ず、心斎橋等を偽失敗にした）。
   if (/\/CNC\/login\/doLogin/i.test(page.url()) || !pageInfo?.hasMgmt) {
     try {
-      for (const [label, path] of [
-        ["esthetic top", "/KLP/top/"],
-        ["groupTop", "/CNC/groupTop/"],
-        ["hair top", "/CLP/bt/top/"],
-      ] as const) {
+      // ★プローブ順はジャンル/グループで出し分ける。別ジャンルの管理TOPを叩くと
+      //   SalonBoard がセッション失効ページを返し、成立済みのセッションを壊すため
+      //   「自分の系統だけを見る」ことが重要 (2026-08-09 ADER武生で実害)。
+      //     hair        : groupTop → hair top   (エステTOPは叩かない)
+      //     group(esthe): groupTop → esthetic top
+      //     esthetic単店: esthetic top → groupTop
+      //     ヒント無し  : 従来順 (後方互換)
+      const probeTargets: readonly (readonly [string, string])[] =
+        hint?.genre === "hair"
+          ? ([["groupTop", "/CNC/groupTop/"], ["hair top", "/CLP/bt/top/"]] as const)
+          : hint?.isGroup
+            ? ([["groupTop", "/CNC/groupTop/"], ["esthetic top", "/KLP/top/"]] as const)
+            : hint?.genre === "esthetic"
+              ? ([["esthetic top", "/KLP/top/"], ["groupTop", "/CNC/groupTop/"]] as const)
+              : ([
+                  ["esthetic top", "/KLP/top/"],
+                  ["groupTop", "/CNC/groupTop/"],
+                  ["hair top", "/CLP/bt/top/"],
+                ] as const);
+      for (const [label, path] of probeTargets) {
         await gotoResilient(
           page,
           new URL(path, url).toString(),
