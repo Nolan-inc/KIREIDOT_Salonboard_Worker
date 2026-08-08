@@ -25,6 +25,7 @@ BOXES=(
   "i-06a56736ddc6512f8:sb-worker-bulk"
   "i-0e77765c6ca7843eb:sb-worker-post"
   "i-09e54e0b55fb8ab34:sb-worker-fallback"
+  "i-0f13227ff67fd56d8:sb-worker-fallback"   # FB2 (2026-08-09 冗長化)
 )
 
 for BOX in "${BOXES[@]}"; do
