@@ -102,6 +102,8 @@ npm run once       # 1ジョブだけ処理して終了
 
 ## 4. デプロイ/運用
 
+詳細手順(ロールバック・緊急ホットパッチ・レーン設定)とインシデント対応Runbookは **[docs/operations.md](docs/operations.md)** を参照。以下は要約。
+
 | 対象 | 方法 | 注意 |
 |---|---|---|
 | クラウドワーカー | main へ push → GH Actions が EC2 の docker を更新 | **デプロイ=コンテナ再起動**。頻発させるとコールド再ログイン波→CAPTCHAの引き金になるためまとめる。docs/README等のみの変更はデプロイされない(paths filter) |
