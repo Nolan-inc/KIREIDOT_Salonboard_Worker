@@ -2,7 +2,7 @@
   "mcpServers": {
     "brightdata": {
       "type": "http",
-      "url": "https://mcp.brightdata.com/mcp?token=${BRIGHTDATA_TOKEN}"
+      "url": "https://mcp.brightdata.com/mcp"
     }
   }
 }
