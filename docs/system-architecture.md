@@ -7,6 +7,19 @@
 
 ---
 
+## 0. SLOと現状達成度(2026-08-01〜08-08実測)
+
+| SLO | 目標 | 実測 | 評価 |
+|---|---|---|---|
+| 書込ジョブ成功率(日次) | ≥99% | 8/2以降 99.0〜100%(8/1のみ93.7%) | ○ ただし8/7は事後修復込み |
+| 実顧客予約の3分以内反映 | 100% | **85.5%**(782/915件)・p50=1.3分・**p95=21.9分** | ✗ テールが課題 |
+| 処理量 | - | 約1,000〜1,500 job/日(うち予約系700〜900) | - |
+
+**結論: 中央値は健全(1.3分)。SLO未達の主因はCAPTCHA波発生時のテール**(30分バックオフ×連鎖)。
+ブラッシュアップの投資対効果は「テール潰し(§5-A)>失敗の事前排除(§5-B)>回帰防止(§5-D)」の順。
+
+---
+
 ## 1. 全体構成図
 
 ```mermaid
@@ -170,7 +183,91 @@ flowchart LR
 
 ---
 
-## 6. 関連資料
+## 5.5 重点3案の具体設計
+
+### 案① CAPTCHA避難レーン(A-1) — p95テールの根治
+
+SLO未達15%のほぼ全てがログインフラグ由来。PC(実Chrome常駐)はフラグ非感受・claim中央値2秒・平均処理10秒で、避難先として実証済み。ギャップは「affinity(PCが対象店舗にログインしているか)」のみ。
+
+| 選択肢 | 効果 | コスト/リスク |
+|---|---|---|
+| a. 既存Mac StudioにUnelimit系アカウントを追加ログイン | 最速(運用作業のみ)。全店舗にPC避難レーンが開通 | Mac Studio単一障害点は残る。同時セッション数増による拡張ブリッジ負荷は要観測 |
+| b. PC 2台目を追加しaffinity分担 | 単一障害点解消+容量倍増 | ハード調達+セットアップ。運用対象が2台に |
+| c. クラウド上に「実Chromeプロファイル箱」を建てPC相当に | ハード不要でスケール | SB/Akamaiに新環境として検知されるリスク。実質PCと同じものを作る作業 |
+
+**推奨: a を即実施 → 安定後に b で冗長化**。c は a/b で不足した場合のみ。
+実装済みの受け皿: 失敗時即PC移管(callback)+冷却中毎分PC reroute(cron)は affinity さえあれば全店で機能する。
+
+### 案② enqueue時バリデーション(B-5) — 「実行して失敗」の事前排除
+
+8/8時点の失敗在庫497件中、約26%(126件)は実行前に判定可能だった:
+
+| チェック | 件数実績 | 実装ポイント |
+|---|---|---|
+| クーポン名≤36字/内容≤90字 | 102 | menus/coupons保存時のserver action+`kireidot_menu_updated`トリガのenqueue前 |
+| 施術時間5分単位 | 7 | 同上 |
+| 担当スタッフのSB紐付け存在 | 7(実顧客2件被害) | 予約作成/変更のserver action+push_booking enqueue関数 |
+| フォト投稿のスタイリスト必須 | 9 | 投稿UI必須化+enqueue関数 |
+| 設備マッピング存在 | 3 | enqueue関数(警告のみでも可) |
+
+方式: **DB側のenqueue関数/トリガに検査を追加し、違反はジョブを作らず `salonboard_sync_alerts`(新設 or 既存ログ)に「要修正」として記録→Admin UIバッジ表示**。
+ジョブ化しないので成功率指標も汚れず、ユーザーは修正箇所を即座に知れる。工数目安: DB+Admin 1〜2日。
+
+### 案③ ジャンル差の一元管理(B-7) — Cnk決め打ち系バグの構造的撲滅
+
+これまでの同型バグ: reviews URL(7月)・push_staff genre(7月)・クーポンDTO(8月)・施術時間select(8月)。
+散在する hair/esthetic 分岐を1モジュールに集約する:
+
+```js
+// electron/sb-genre-map.cjs (新設イメージ)
+module.exports = {
+  esthetic: {
+    draftRoot: '/CNK/draft/', reserveRoot: '/KLP',
+    couponEditDto: null,          // 末尾一致で参照するため接頭辞は持たない
+    durationField: { kind: 'input', suffix: '.sejyutsuAimTime' },
+    reviewList: '/KLP/review/reviewList/',
+  },
+  hair: {
+    draftRoot: '/CNB/draft/', reserveRoot: '/CLP/bt',
+    durationField: { kind: 'select', suffix: '.sejyutsuAimTime' },
+    reviewList: '/CLP/bt/review/reviewList/',
+    groupTop: '/CNC/groupTop/',
+  },
+};
+```
+
+移行は「新規修正時にこのマップ参照へ書き換える」漸進方式(ビッグバン不要)。
+併せて `salonboard_code/` の実HTMLサンプルに対する**パーサ単体テスト**(node:test)をCIに追加し、セレクタ回帰をデプロイ前に検出する(D-11の第一歩)。
+
+---
+
+## 5.6 リトライポリシー表(現行の単一ソース・D-13)
+
+| 事象 | 1次対応 | 再試行 | 打切 |
+|---|---|---|---|
+| 書込の一時失敗 | 指数バックオフ | min(30分, 2^attempts分) | attempts=max→FB→PC→failed |
+| 書込のログインフラグ | アカウント冷却30分+予約系は即PC移管 | 冷却明けプローブ(30分毎) | フラグ減衰まで(実測3〜4h) |
+| fetchの一時失敗 | 5分後cloud再試行 | 5分間隔 | 作成から3hでcancel |
+| fetchのログインフラグ | 30分後cloud再試行 | 30分間隔 | 同上 |
+| データ起因(manual_required) | 即確定・自動retryなし | - | 手動修正待ち |
+| 予約開始+30分超過 | ELAPSEDガードでcancel | - | - |
+| read実行10分 | Chrome kill(安全弁) | ジョブ再試行に委ねる | - |
+| PC/FB移管先10分不応答 | TIMEOUT failed / cloud戻し | - | - |
+
+---
+
+## 7. ロードマップ(提案)
+
+| フェーズ | 期間目安 | 内容 | 効果 |
+|---|---|---|---|
+| P1: テール潰し | 今週 | A-1a(PCへUnelimitアカウント追加・運用作業)+CAPTCHA波アラート(C-10) | 3分SLO 85.5%→98%+ |
+| P2: 事前排除 | 来週 | B-5 enqueueバリデーション一式+メトリクス注記(C-9) | データ起因失敗ゼロ化・指標の信頼性 |
+| P3: 回帰防止 | 今月中 | B-7ジャンルマップ+パーサテストCI(D-11着手)+FB同期自動化(D-12)+debug DB保存(C-8) | 同型バグの再発防止・調査コスト減 |
+| P4: 構造 | 来月 | レーン分割完遂(A-3)+深夜バースト分散(A-4)+PC 2台目(A-1b)+scrapers分割本格化 | 冗長化・保守性 |
+
+---
+
+## 8. 関連資料
 
 - 書込信頼性設計: [write-reliability-design.md](write-reliability-design.md)
 - 書込IP/プロキシ構成: [salonboard-write-ip-architecture.md](salonboard-write-ip-architecture.md)
