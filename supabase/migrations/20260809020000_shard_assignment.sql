@@ -113,6 +113,11 @@ create trigger trg_salonboard_credentials_assign_shard
 after insert or update of group_account_id, enabled on public.salonboard_credentials
 for each row execute function public.salonboard_credentials_assign_shard();
 
+-- ⚠️【重要】PostgREST は同名関数のオーバーロードを解決できない。引数を増やすときは
+--    旧シグネチャを必ずDROPすること (残すと全claimが500になりワーカーが停止する。
+--    2026-08-09にこれで14分の同期停止を起こした → 20260809030000 で修正)。
+drop function if exists public.salonboard_claim_next_job(text, integer, integer, text, text);
+
 -- claim に p_shard を追加。shard条件は以下のいずれかを満たす行だけを対象にする:
 --   1. p_shard 未指定 (従来どおり全店舗)
 --   2. そのアカウントが p_shard に割当済み
