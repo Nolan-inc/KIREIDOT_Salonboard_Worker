@@ -145,10 +145,20 @@ async function runJob(job) {
       }),
     ]).finally(() => clearTimeout(messageTimer));
     if (res?.ok) {
+      // resultStatus と imageId はそのまま worker へ渡す。
+      // worker 側で「registered かつ imageId あり」のときだけ成功として扱い、
+      // imageId が無い場合は手動確認へ倒す (ここでは判定しない)。
+      const imageId = res.result?.value || null;
+      const resultStatus = res.result?.status || null;
+      if (resultStatus === "registered" && !imageId) {
+        console.warn("[KireiDot/bg] registered なのに imageId が空です", res.result);
+      }
       await complete(job.jobId, {
         status: "success",
-        imageId: res.result?.value || null,
-        resultStatus: res.result?.status || null,
+        imageId,
+        // deleteKey(styleId L...): SalonBoard 側から自動削除するのに必須。
+        deleteKey: res.result?.deleteKey || null,
+        resultStatus,
         reason: res.result?.reason || null,
         diag: res.diag || null,
       });

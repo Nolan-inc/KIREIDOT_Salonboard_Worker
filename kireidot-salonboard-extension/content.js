@@ -69,8 +69,17 @@ async function runUpload(job) {
   //   何らかの理由でジョブが再実行されても、ここで成功を返して終わり、
   //   再度 styleEdit を開いて再登録することを防ぐ。
   if (isRegisterDonePage()) {
-    console.log("[KireiDot] 既に登録完了画面 → 二重投稿せず成功で終了");
-    return { status: "registered", value: null };
+    // ★このジョブが投稿したという保証は無い(前ジョブの完了画面が残っているだけの
+    //   可能性がある)。二重投稿は避けたいので登録はしないが、"registered" は
+    //   返さない — 実IDの裏付けが無いまま成功にすると、SalonBoardに何も無いのに
+    //   KIREIDOT側が「投稿済み」になり、再試行もされず永久に取り残されるため。
+    //   結果不明として手動確認に倒す。
+    console.log("[KireiDot] 登録完了画面を検出 → 二重投稿を避けて結果不明で終了");
+    return {
+      status: "register_result_unknown",
+      reason: "開始時点で登録完了画面が表示されていました。前回の投稿が残っている可能性があるため、二重投稿を避けて中断しました。SalonBoardの掲載一覧を確認してください。",
+      value: null,
+    };
   }
 
   const url = location.href;
@@ -232,15 +241,19 @@ async function runUpload(job) {
   await sleep(400);
 
   // 5) 「登録する」(input.jscImageUploaderModalSubmitButton) をクリック。
+  //    ★クリック前の FRONT_IMG_ID を控える (Playwright版 scrapers.cjs と同じ)。
+  //      タブ再利用などで前回の画像IDが残っていると、待たずにその値を
+  //      「今回の結果」として拾ってしまい、別スタイルのIDが混入するため。
+  const beforeImgId = readFrontImgId();
   const submit = await waitForSelector(
     "input.jscImageUploaderModalSubmitButton[type='button'], input.jscImageUploaderModalSubmitButton, .jscImageUploaderModalSubmitButton",
     15000
   );
   realClick(submit);
-  console.log("[KireiDot] clicked 登録する");
+  console.log("[KireiDot] clicked 登録する", { beforeImgId: beforeImgId || "(empty)" });
 
-  // 6) 結果を待つ (FRONT_IMG_ID 反映 or 失敗ダイアログ)。
-  const uploadResult = await waitForUploadResult(45000);
+  // 6) 結果を待つ (FRONT_IMG_ID が *変化* するか 失敗ダイアログ)。
+  const uploadResult = await waitForUploadResult(45000, beforeImgId);
 
   // --- (G) 必須項目を入力してスタイル登録 (style payload があれば) ---
   const sp = job.style || null;
@@ -256,27 +269,44 @@ async function runUpload(job) {
         "a:has(img[alt='登録'])",
       ]);
       if (reg) {
-        console.log("[KireiDot] 登録(doRegister)クリック");
+        // ★登録クリック前に画像ID(B...)を確定させる。
+        //   完了画面には FRONT_IMG_ID も #FRONT_IMG_ID_ID も存在しないため、
+        //   登録後に読もうとすると必ず null になる (これが実IDが取れない主因)。
+        //   Playwright版 scrapers.cjs も uploaded.imageId を持ち回っている。
+        const finalId = uploadResult.value || readFrontImgId() || extractRegisteredId();
+        console.log("[KireiDot] 登録(doRegister)クリック", { imageId: finalId || "(none)" });
         realClick(reg.closest("a") || reg);
         // 登録後: 完了画面 or styleList or エラー文言を待つ。
         const ok = await waitForRegisterResult(30000);
         if (ok === "error") {
           return { status: "uploaded_not_registered", reason: getValidationError(), value: uploadResult.value };
         }
-        // 登録成功時の external_id (画像ID B... / 完了画面の登録NID)。アップロード時に
-        // 取れた値を優先し、無ければ完了画面のフッター等から拾う。
-        const finalId = uploadResult.value || extractRegisteredId();
         if (ok === "ok") {
-          return { status: "registered", value: finalId };
+          // ★画像IDが取れていない状態を registered で返さない。
+          //   worker 側が「投稿できた裏付け無し」として扱えるようにする
+          //   (成功にすると SB に無いのに投稿済みとして固定されてしまう)。
+          if (!finalId) {
+            return {
+              status: "register_result_unknown",
+              reason: "登録は完了しましたが画像IDを取得できませんでした。SalonBoardの掲載一覧をご確認ください。",
+              value: null,
+            };
+          }
+          // deleteKey(styleId L...) を回収してから返す。
+          const deleteKey = await fetchStyleIdForImage(finalId);
+          return { status: "registered", value: finalId, deleteKey };
         }
         if (ok === "timeout") {
           // 完了画面もエラーも確認できなかった。完了画面に居れば成功、そうでなければ
           // 「結果不明」として manualRequired 相当に倒す(再投稿で二重登録しないため
           //  registered は返さない)。
-          if (isRegisterDonePage()) return { status: "registered", value: finalId };
+          if (isRegisterDonePage()) {
+            const deleteKey = await fetchStyleIdForImage(finalId);
+            return { status: "registered", value: finalId, deleteKey };
+          }
           return { status: "register_result_unknown", reason: "登録ボタンは押しましたが完了画面を確認できませんでした。SalonBoardの掲載一覧で重複が無いか確認してください。", value: finalId };
         }
-        return { status: "registered", value: finalId };
+        return { status: "registered", value: finalId, deleteKey: await fetchStyleIdForImage(finalId) };
       }
       return { status: "uploaded_no_register_btn", value: uploadResult.value };
     }
@@ -348,6 +378,61 @@ async function waitForRegisterResult(timeoutMs) {
   return "timeout";
 }
 
+// 今登録したスタイルの styleId(L...) を回収する。
+//
+// ★これが無いと Admin 側の「削除」で SalonBoard 上の投稿を自動削除できない。
+//   styleList の削除は delStyle(event,'L...') を呼ぶため L... が必須で、
+//   画像ID(B...) では削除対象を指せない (Playwright版 scrapers.cjs と同じ考え方)。
+//
+// content script は location を変えると破棄されてしまうため、ページ遷移せず
+// fetch でスタイル一覧HTMLを取得し、同じ行に画像ID(B...)を持つ行の styleId を読む。
+// 画像IDが無い/見つからない場合は null を返す (誤った行を消すより手動削除が安全)。
+async function fetchStyleIdForImage(imageId) {
+  const imgId = String(imageId || "").trim();
+  if (!imgId) return null;
+  // ★登録直後は一覧にまだ反映されていないことがある(コミット待ち)。
+  //   グループ店舗でサロン未選択だと200のユーザエラーHTMLが返り、
+  //   styleId hidden が0件になる。どちらも「もう一度試せば取れる」ので
+  //   間隔を空けて数回リトライする (Playwright版は実ナビゲーション+networkidleで
+  //   自然に待てていたが、fetch は待たないため明示的に補う)。
+  const ATTEMPTS = 4;
+  for (let i = 0; i < ATTEMPTS; i++) {
+    if (i > 0) await sleep(1500);
+    try {
+      const res = await fetch(location.origin + "/CNB/draft/styleList/", {
+        credentials: "include",
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const hidden = Array.from(doc.querySelectorAll('input[name*="].styleId"]'));
+      if (hidden.length === 0) {
+        // 一覧が取れていない(ユーザエラー/サロン未選択の可能性) → リトライ。
+        console.warn("[KireiDot] styleList に styleId がありません (retry " + (i + 1) + "/" + ATTEMPTS + ")");
+        continue;
+      }
+      for (const el of hidden) {
+        const sid = String(el.value || "").trim();
+        if (!/^L\d+$/i.test(sid)) continue;
+        const scope = el.closest("tr") || el.parentElement;
+        if (!scope) continue;
+        const scopeHtml = (scope.closest("tbody") || scope).innerHTML || "";
+        if (scopeHtml.includes(imgId)) {
+          console.log("[KireiDot] styleId 回収", sid, "for image", imgId);
+          return sid;
+        }
+      }
+      // 一覧は取れたが該当行が無い = まだ反映前 → リトライ。
+      console.warn("[KireiDot] 該当行が見つかりません (retry " + (i + 1) + "/" + ATTEMPTS + ", image=" + imgId + ")");
+    } catch (e) {
+      // 回収失敗は投稿成功を妨げない (削除が手動になるだけ)。
+      console.warn("[KireiDot] styleId 回収に失敗", e?.message || e);
+    }
+  }
+  console.warn("[KireiDot] styleId を回収できませんでした (image=" + imgId + ")");
+  return null;
+}
+
 // 登録完了画面/フォームから external_id (画像ID B... / 登録NID C...) を拾う。
 function extractRegisteredId() {
   // 1) フォームの hidden / span (登録前から残っていることがある)。
@@ -365,12 +450,17 @@ function extractRegisteredId() {
   return null;
 }
 
-// 登録完了画面かどうか (確定文言で判定)。
+// 登録完了画面かどうか (確定文言のみで判定)。
+//
+// ★以前は「反映申請」「スタイル掲載情報一覧画面へ」も完了とみなしていたが、
+//   この2つは styleList など通常画面にも出る SalonBoard 共通の文言で、
+//   連続投稿時に前ジョブの残り画面を「完了済み」と誤検知していた。
+//   その結果 runUpload 冒頭のガードが即 registered を返し、アップロードも
+//   登録もしないまま成功扱いになる事故が起きていた(実IDが常に null になる)。
+//   完了画面の確定文言だけに絞る。
 function isRegisterDonePage() {
   const t = (document.body?.innerText || "").replace(/\s+/g, "");
-  return /登録が完了しました/.test(t) ||
-    /反映する場合は.*反映申請/.test(t) ||
-    /スタイル掲載情報一覧画面へ/.test(t);
+  return /登録が完了しました/.test(t);
 }
 
 function getValidationError() {
@@ -759,7 +849,20 @@ async function waitForPreview(timeoutMs) {
 // ----------------------------------------------------------------------
 // 結果待ち: FRONT_IMG_ID 反映 or 失敗ダイアログ検出
 // ----------------------------------------------------------------------
-async function waitForUploadResult(timeoutMs) {
+// FRONT_IMG_ID を hidden 優先・span フォールバックで読む (Playwright版と同じ順序)。
+function readFrontImgId() {
+  const frontImg = document.querySelector("input[name='FRONT_IMG_ID'], #FRONT_IMG_ID");
+  const hidden = frontImg && frontImg.value ? String(frontImg.value).trim() : "";
+  if (hidden) return hidden;
+  const span = document.getElementById("FRONT_IMG_ID_ID");
+  const spanVal = span ? (span.textContent || "").trim() : "";
+  return /^B\d{4,}$/.test(spanVal) ? spanVal : "";
+}
+
+// ★prevImgId を渡すと「値が変化するまで」待つ。
+//   前回ジョブの画像IDが残ったタブでも、今回アップロードした画像IDだけを返す。
+async function waitForUploadResult(timeoutMs, prevImgId) {
+  const prev = String(prevImgId || "").trim();
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const bodyText = document.body.innerText || "";
@@ -767,15 +870,9 @@ async function waitForUploadResult(timeoutMs) {
       throw new Error("SalonBoard側でアップロード失敗ダイアログを検出しました");
     }
 
-    const frontImg = document.querySelector("input[name='FRONT_IMG_ID'], #FRONT_IMG_ID");
-    const span = document.getElementById("FRONT_IMG_ID_ID");
-    const spanVal = span ? (span.textContent || "").trim() : "";
-    if ((frontImg && frontImg.value) || /^B\d{4,}$/.test(spanVal)) {
-      return {
-        status: "uploaded",
-        field: "FRONT_IMG_ID",
-        value: (frontImg && frontImg.value) || spanVal,
-      };
+    const cur = readFrontImgId();
+    if (cur && cur !== prev) {
+      return { status: "uploaded", field: "FRONT_IMG_ID", value: cur };
     }
     await sleep(500);
   }

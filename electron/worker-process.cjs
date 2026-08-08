@@ -536,8 +536,31 @@ async function runStyleJobViaExtension({ payload, creds, shopName, enablePost, t
     if (j.status === 'done') {
       const r = j.result || {};
       const rs = r.resultStatus || 'uploaded';
-      if (rs === 'registered') return { handled: true, status: 'ok', externalId: r.imageId || null };
+      // deleteKey(styleId L...) は SalonBoard 側から自動削除するのに必須。
+      // 拡張が回収できなかった場合は null (その場合は手動削除になる)。
+      // ★成功の条件: resultStatus=registered **かつ** 実ID(画像ID B...)が取れていること。
+      //   実IDが無い registered は「登録できたはずだが裏付けが無い」状態で、実際には
+      //   SalonBoardに何も投稿されていないケースが大半だった(本番72件中71件)。
+      //   ID無しを成功にすると callback が posted_at を立ててしまい、再試行もされず
+      //   「KIREIDOTは投稿済み・SalonBoardには無い」で固定されるため、成功にしない。
+      if (rs === 'registered') {
+        const imageId = r.imageId ? String(r.imageId).trim() : '';
+        if (imageId) {
+          return { handled: true, status: 'ok', externalId: imageId, deleteKey: r.deleteKey || null };
+        }
+        return {
+          handled: true, status: 'failed', errorCode: 'REGISTER_RESULT_UNVERIFIED', manualRequired: true,
+          reason: 'SalonBoardへの登録を確認できませんでした (投稿IDが取得できていません)。SalonBoardの掲載一覧を確認し、投稿されていなければ再実行してください。',
+        };
+      }
       if (rs === 'filled_not_registered') return { handled: true, status: 'confirm_only' };
+      // 結果不明: 二重投稿を避けるため成功にはせず、手動確認へ倒す。
+      if (rs === 'register_result_unknown') {
+        return {
+          handled: true, status: 'failed', errorCode: 'REGISTER_RESULT_UNKNOWN', manualRequired: true,
+          reason: r.reason || '登録結果を確認できませんでした。SalonBoardの掲載一覧を確認してください。',
+        };
+      }
       // uploaded_not_registered(バリデーションエラー) / uploaded_no_register_btn 等。
       return {
         handled: true, status: 'failed', errorCode: 'VALIDATION_ERROR', manualRequired: true,
@@ -1663,6 +1686,9 @@ function subscribeToPushJobs() {
 // (Admin callback / DBトリガー salonboard_force_cloud_failure_fallback と対応)。
 const PC_CLAIMABLE_PUSH_JOB_TYPES = [
   'push_photo_gallery',
+  // delete_photo_gallery もPC専用。ここに無いと Realtime の INSERT を取り逃した場合に
+  // 誰も拾わず queued のまま残る (保険ポーリングの対象外になってしまう)。
+  'delete_photo_gallery',
   'push_booking',
   'cancel_booking',
   'push_shifts',
@@ -4019,6 +4045,9 @@ async function runPushJobs({ showBrowser, quiet } = {}) {
             job_id: job.id, job_type: 'push_photo_gallery', status: 'succeeded',
             content_post_id: null,
             external_id: ext.externalId ?? null,
+            // deleteKey(styleId L...) が無いとAdmin側の削除でSB上の投稿を消せない。
+            // Playwright経路は渡していたが拡張経路で欠落していたので合わせる。
+            delete_key: ext.deleteKey ?? null,
             summary: 'push_photo_gallery 投稿完了 (Chrome拡張)',
           });
           emit('log', { level: 'info', msg: `[${tag}] ✅ スタイル投稿完了 — Chrome拡張(普段使いChrome)${ext.externalId ? ` (id=${ext.externalId})` : ''}`, at: new Date().toISOString() });
