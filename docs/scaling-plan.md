@@ -186,3 +186,20 @@ Fargateはタスク再配置でプロファイルが消え、全店再ログイ�
 - [ ] arm64(t4g/c7g)でのworkerビルド・ステルス指紋の動作検証
 - [ ] ピーク時のChromeコンテキスト実RAM実測(現測定はアイドル時)
 - [ ] Supabase接続数/コネクションプール上限の確認(8箱同時claim時)
+
+---
+
+## 8. 新規ワーカー箱の追加手順(2026-08-08 post箱の実施記録)
+
+新レーンの箱を足すときの手順。**バンドルのbind-mount忘れに注意**(下記5を怠ると
+ECRイメージ同梱の古い worker.cjs で動き、修正済みバグが再発する。8/8に実際に踏んだ)。
+
+1. `aws ec2 run-instances` — AMI/subnet/SG/IAMは既存箱に合わせる。t3.medium(unlimited)+gp3 50GB
+2. `/opt/kireidot/worker.env` を既存箱から複製し `WORKER_ID` / `WORKER_CAPABILITIES`(lane_xxx)/
+   `SB_PROXY_POOL` を差し替え(600権限)
+3. `.github/workflows/deploy-worker.yml` に箱を追加してpush → 全箱へ同一バンドル配布
+4. Admin `jobs/route.ts` の lane マッピングに新レーンを追加(PR)
+5. **`docker run` に `-v /opt/kireidot/worker.cjs:/app/worker.cjs:ro` を必ず付ける**
+   (確認: `docker inspect <name> --format "{{len .Mounts}}"` が 1 であること)
+6. 受け皿(箱)の起動を確認してから **DB関数 `salonboard_job_lane` を切替**(逆順はジョブ飢餓)
+7. `/etc/cron.daily/sb-debug-cleanup` を設置(capture 7日ローテ)
