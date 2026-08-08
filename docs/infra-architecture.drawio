@@ -34,7 +34,7 @@
         <mxCell id="aws" value="AWS EC2 — 4箱・同一バンドル (役割はレーン申告で決定)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FFF4E0;strokeColor=#D79B00;" vertex="1" parent="1">
           <mxGeometry x="40" y="320" width="600" height="330" as="geometry" />
         </mxCell>
-        <mxCell id="ec2main" value="メインEC2 (c6i.xlarge)&#10;docker: sb-worker-cloud&#10;常時系 lane_realtime / 並行6&#10;予約書込3分SLA担当" style="rounded=1;whiteSpace=wrap;html=1;fontStyle=0;fillColor=#FFFBF2;strokeColor=#D79B00;" vertex="1" parent="aws">
+        <mxCell id="ec2main" value="メインEC2 (c6i.xlarge)&#10;docker: sb-worker-cloud&#10;常時系 lane_realtime / 並行8&#10;予約書込3分SLA担当" style="rounded=1;whiteSpace=wrap;html=1;fontStyle=0;fillColor=#FFFBF2;strokeColor=#D79B00;" vertex="1" parent="aws">
           <mxGeometry x="15" y="40" width="275" height="105" as="geometry" />
         </mxCell>
         <mxCell id="ec2bulk" value="一括EC2 (m6i.large)&#10;docker: sb-worker-bulk&#10;lane_bulk&#10;設定系fetch / 一括取込" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="aws">

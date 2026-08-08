@@ -10,18 +10,21 @@
 
 | 系 | 実体 | 補足 |
 |---|---|---|
-| メインworker | EC2 `i-0f1cc0aff1ac8dd2e`(c6i.xlarge)/ docker `sb-worker-cloud` | 常時系レーン(lane_realtime)。予約書込SLA担当。並行6 |
+| メインworker | EC2 `i-0f1cc0aff1ac8dd2e`(c6i.xlarge)/ docker `sb-worker-cloud` | 常時系レーン(lane_realtime)。予約書込SLA担当。並行8(実測) |
 | 一括worker | EC2 `i-06a56736ddc6512f8`(m6i.large)/ docker `sb-worker-bulk` | 一括系レーン(lane_bulk)。設定系fetch/一括取込。WORKER_ID=`cloud-bulk-1` |
 | 投稿worker | EC2 `i-0e77765c6ca7843eb`(t3.medium)/ docker `sb-worker-post` | 投稿系レーン(lane_post、2026-08-08新設)。ブログ/スタイル/フォト/クーポン/メニューの反映専任 |
 | 予備(FB)worker | EC2 `i-09e54e0b55fb8ab34`(t3.medium)/ docker `sb-worker-fallback`。コードは別repo `KIREIDOT_Salonboard_Fallback_Worker` | executor=`fallback_cloud`。Cloud失敗書込を1回だけ再試行 |
-
-※インスタンスサイズは2026-08-08に右サイジング済み(常時系 c6i.2xlarge→c6i.xlarge、FB m6i.large→t3.medium)。実測で制約はCPU/メモリではなく外部要因(SBアカウント直列・IP・ペーシング)と確定しているため。詳細は [scaling-plan.md](scaling-plan.md)。
+| 予備(FB2)worker | EC2 `i-0f13227ff67fd56d8`(t3.medium)/ docker `sb-worker-fallback` | 2026-08-09にFB冗長化で新設。WORKER_ID=`fallback-2` |
 | 店舗PC | Mac Studioの予約同期くん(Electron) | worker_id=`electron-worker`。CAPTCHA避難レーン(要ログイン設定=affinity) |
 | バンドル置き場 | `s3://kireidot-sb-worker-debug-972293797066/deploy/<commit SHA>/worker.cjs` | イミュータブル。ロールバックの起点 |
 | ワーカー本体(箱上) | `/opt/kireidot/worker.cjs`(コンテナに read-only bind-mount) | 差替→`docker restart`で反映 |
 | ホット設定 | コンテナ内 `/home/pwuser/.kireidot/`(`worker_capabilities`・`max_concurrency`・`anthropic_api_key`) | 読込はプロセス起動時のみ→変更後は restart 必要 |
 | デバッグcapture | コンテナ内 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。7日ローテのお掃除は systemd timer で全4箱稼働中([§5](#5-デバッグcaptureのお掃除systemd-timer)) |
 | 通知 | Slack `#kireidot-info` | 成功/失敗の4分類通知+予約明細 |
+
+※インスタンスサイズは2026-08-08に右サイジング済み(常時系 c6i.2xlarge→c6i.xlarge、FB m6i.large→t3.medium)。実測で制約はCPU/メモリではなく外部要因(SBアカウント直列・IP・ペーシング)と確定しているため。詳細は [scaling-plan.md](scaling-plan.md)。
+
+**箱の状態をまとめて点検するには `bash scripts/check-worker-boxes.sh`**(読み取り専用。ワーカー生存 / ディスク内訳 / タイマー登録 / 死んだcron検出)。
 
 ---
 
@@ -90,7 +93,8 @@ git fetch upstream && git merge upstream/main && git push  # ほぼfast-forward
 ### 1.7 レーン/並行度のホット変更
 
 - レーン申告: `bash scripts/set-worker-lane.sh <instance-id> <container> <capabilities>`(例: `playwright_cloud,lane_realtime`)。コンテナ内 `worker_capabilities` ファイルを書いてrestartする
-- 並行度: コンテナ内 `/home/pwuser/.kireidot/max_concurrency`(メイン箱は6)。変更後restart必要
+- 並行度: コンテナ内 `/home/pwuser/.kireidot/max_concurrency`(**メイン箱は8**)。変更後restart必要
+- **⚠️ WORKER_ID は env が空でもホットファイル `/home/pwuser/.kireidot/worker_id` で解決される**(`worker.ts:192` の `env || file || "local-dev"`)。`docker inspect` の env だけを見て「WORKER_ID未設定=local-dev化」と誤診しないこと。実効値は `docker logs` の最新 `[boot]` 行か、DBの `select locked_by from salonboard_sync_jobs where locked_at > now()-interval '1 hour'` で確認する
 - 一括箱の新規構築/再構築: `bash scripts/bootstrap-bulk-worker.sh`(冪等。シークレットはEC2ロールのParameter Store読取で組み立てられ、手元に現れない)
 - **⚠️ プロキシプール(20 IP)は両箱で完全一致させること。** 店舗→IPのsticky割当はプールサイズ/順序依存のFNV-1a hashのため、揃わないと同一店舗が別出口IPになりセッションが壊れる
 
@@ -239,3 +243,34 @@ capture は**書込失敗が多い箱ほど溜まる**。2026-08-08にメイン�
 メイン箱の内訳: bookings 851MB / change 460MB / schedule 152MB / cancel 138MB / menu 107MB。
 
 ディスク逼迫は **Chrome起動失敗**という分かりにくい形で現れる。原因不明の起動失敗時は `df -h` を確認すること。
+
+### ⚠️ 未対処: ディスクの主消費者は capture ではなく Chromeプロファイル
+
+2026-08-09の実測で、**掃除タイマーがカバーしているのは全体の一部**だと判明した。メイン箱のコンテナ書込レイヤ13.6GBの内訳:
+
+| 内訳 | サイズ | 掃除タイマーの対象 |
+|---|---|---|
+| Chromeプロファイル `salonboard-chrome-profile/` | **12GB** | ❌ 対象外 |
+| capture `salonboard-debug/` | 1.8GB | ✅ 対象 |
+
+12GBの中身(1プロファイル561MBの例):
+
+| 内訳 | サイズ | 性質 |
+|---|---|---|
+| `BrowserMetrics/` | 369MB | Chromeのテレメトリ。**セッションと無関係** |
+| `Default/`(Cookies・Local Storage含む) | 143MB | この中の**57MBだけが守るべきセッション本体** |
+| `optimization_guide_model_store/` | 49MB | ChromeのMLモデル。不要 |
+
+全プロファイル合計でキャッシュ系が**約7.7GB**、対して守るべき Cookies + Local Storage は**合計57MBのみ**。
+
+さらにプロファイルは**34個**あり、`account-<hash>` 形式(現行)のほかに UUID形式(旧shop単位)や `.bak-20260703` が残骸として残っている。worker が使うのは `account-` 形式のみ(`worker.ts:3254` の `profileKey`)。
+
+**⚠️ プロファイル本体を消してはいけない。** Akamaiの `_abck` 信頼を蓄積しており、消すと全店コールドログイン→CAPTCHA/throttleの波になる。
+
+**対処の選択肢(未実施・要判断)**:
+
+1. `BrowserMetrics/` と `optimization_guide_model_store/` の定期削除 — セッションに無関係で効果が最大。ただし**Chrome起動中のファイルを掴んでいる可能性**があるため、削除タイミングの検討が要る
+2. 使われていない旧プロファイル(`account-` 以外)の削除 — 低リスクだが要棚卸し
+3. Chrome起動フラグでメトリクス生成自体を抑止 — 最も根本的
+
+現状ディスクは38%で逼迫していないため緊急ではないが、**掃除タイマーだけでは頭打ちになる**点は認識しておくこと。
