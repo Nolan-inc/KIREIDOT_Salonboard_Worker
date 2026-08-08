@@ -5,10 +5,23 @@ KIREIDOT と SalonBoard(ホットペッパービューティー管理画面)を*
 - **クラウドワーカー**(`worker.ts` + `electron/scrapers.cjs`): EC2上のDockerで常時稼働。予約書込・各種取込のメイン実行体
 - **予約同期くん**(Electronデスクトップアプリ): 店舗PC(Mac Studio)で実Chromeセッションを保持し、クラウドが書けない状況(CAPTCHA等)の避難レーン+フォト/スタイル投稿を担当
 
-アーキテクチャ全体・信頼性メカニズム・改善ロードマップは **[docs/system-architecture.md](docs/system-architecture.md)** を参照。
-インフラ構成図: **[docs/infra-architecture.png](docs/infra-architecture.png)**(編集用: [docs/infra-architecture.drawio](docs/infra-architecture.drawio))
-
 ![インフラ構成図](docs/infra-architecture.png)
+
+### ドキュメント索引
+
+| 目的 | ドキュメント |
+|---|---|
+| 全体構成・信頼性メカニズム・改善ロードマップ | [docs/system-architecture.md](docs/system-architecture.md) |
+| インフラ構成図(編集用) | [docs/infra-architecture.drawio](docs/infra-architecture.drawio) |
+| **デプロイ手順・障害対応Runbook** | [docs/operations.md](docs/operations.md) |
+| **新店舗の連携開始手順** | [docs/shop-onboarding.md](docs/shop-onboarding.md) |
+| **SalonBoard固有仕様・地雷集** | [docs/salonboard-quirks.md](docs/salonboard-quirks.md) |
+| **監視・通知・cron一覧** | [docs/monitoring.md](docs/monitoring.md) |
+| 書込信頼性の設計 | [docs/write-reliability-design.md](docs/write-reliability-design.md) |
+| シフト整合性の設計 | [docs/shift-parity-design.md](docs/shift-parity-design.md) |
+| 予備Cloudワーカー | [docs/fallback-cloud-worker.md](docs/fallback-cloud-worker.md) |
+| スケール構想 | [docs/scaling-plan.md](docs/scaling-plan.md) |
+| 歴史的資料(現行仕様ではない) | [docs/archive/](docs/archive/) |
 
 ---
 

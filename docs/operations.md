@@ -2,34 +2,41 @@
 
 対象読者: 本システムの運用・障害対応を行う人。設計背景は [system-architecture.md](system-architecture.md)、書込信頼性の仕組みは [write-reliability-design.md](write-reliability-design.md) を参照。
 
+関連: [shop-onboarding.md](shop-onboarding.md)(新店舗追加)/ [salonboard-quirks.md](salonboard-quirks.md)(SB固有仕様)/ [monitoring.md](monitoring.md)(監視・通知)
+
 ---
 
 ## 0. 対象システム早見表
 
 | 系 | 実体 | 補足 |
 |---|---|---|
-| メインworker | EC2 `i-0f1cc0aff1ac8dd2e` / docker `sb-worker-cloud` | 常時系レーン(lane_realtime)。予約書込SLA担当 |
-| 一括worker | EC2 `i-06a56736ddc6512f8` / docker `sb-worker-bulk` | 一括系レーン(lane_bulk)。設定系fetch/一括取込。WORKER_ID=`cloud-bulk-1` |
-| 予備(FB)worker | 別repo `KIREIDOT_Salonboard_Fallback_Worker` のEC2 / docker `sb-worker-fallback` | executor=`fallback_cloud`。Cloud失敗書込を1回だけ再試行 |
+| メインworker | EC2 `i-0f1cc0aff1ac8dd2e`(c6i.xlarge)/ docker `sb-worker-cloud` | 常時系レーン(lane_realtime)。予約書込SLA担当。並行6 |
+| 一括worker | EC2 `i-06a56736ddc6512f8`(m6i.large)/ docker `sb-worker-bulk` | 一括系レーン(lane_bulk)。設定系fetch/一括取込。WORKER_ID=`cloud-bulk-1` |
+| 投稿worker | EC2 `i-0e77765c6ca7843eb`(t3.medium)/ docker `sb-worker-post` | 投稿系レーン(lane_post、2026-08-08新設)。ブログ/スタイル/フォト/クーポン/メニューの反映専任 |
+| 予備(FB)worker | EC2 `i-09e54e0b55fb8ab34`(t3.medium)/ docker `sb-worker-fallback`。コードは別repo `KIREIDOT_Salonboard_Fallback_Worker` | executor=`fallback_cloud`。Cloud失敗書込を1回だけ再試行 |
+
+※インスタンスサイズは2026-08-08に右サイジング済み(常時系 c6i.2xlarge→c6i.xlarge、FB m6i.large→t3.medium)。実測で制約はCPU/メモリではなく外部要因(SBアカウント直列・IP・ペーシング)と確定しているため。詳細は [scaling-plan.md](scaling-plan.md)。
 | 店舗PC | Mac Studioの予約同期くん(Electron) | worker_id=`electron-worker`。CAPTCHA避難レーン(要ログイン設定=affinity) |
 | バンドル置き場 | `s3://kireidot-sb-worker-debug-972293797066/deploy/<commit SHA>/worker.cjs` | イミュータブル。ロールバックの起点 |
 | ワーカー本体(箱上) | `/opt/kireidot/worker.cjs`(コンテナに read-only bind-mount) | 差替→`docker restart`で反映 |
 | ホット設定 | コンテナ内 `/home/pwuser/.kireidot/`(`worker_capabilities`・`max_concurrency`・`anthropic_api_key`) | 読込はプロセス起動時のみ→変更後は restart 必要 |
-| デバッグcapture | 箱上 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML |
+| デバッグcapture | 箱上 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。**7日ローテのお掃除cronを全4箱に設置済み**(2026-08-08。放置してディスク91%まで到達した実績あり) |
 | 通知 | Slack `#kireidot-info` | 成功/失敗の4分類通知+予約明細 |
 
 ---
 
 ## 1. デプロイフロー
 
-### 1.1 通常デプロイ(クラウドworker 2箱)
+### 1.1 通常デプロイ(クラウドworker 3箱)
 
 **mainへのpushだけで完結する。** `.github/workflows/deploy-worker.yml` が以下を自動実行する:
 
 1. type-check → esbuildで `worker.ts` を `worker.cjs` にバンドル(playwright external)
 2. S3へ **コミットSHA付きイミュータブルパス** でアップロード
 3. SSM経由でメイン箱: presign URLからDL → `docker stop -t 40`(SIGTERM猶予40秒でセッションflush)→ `/opt/kireidot/worker.cjs` 差替 → `docker start`
-4. 成功後、同一バンドルを一括箱にも配布(片方失敗=ワークフロー赤で両箱のバージョン乖離に気付ける)
+4. 成功後、同一バンドルを**一括箱 → 投稿箱**の順に配布(どれか失敗=ワークフロー赤で箱間のバージョン乖離に気付ける)
+
+3箱とも**同一バンドル**で、役割の違いはレーン申告(`worker_capabilities`)だけで決まる。
 
 注意:
 
@@ -55,7 +62,7 @@ GH Actionsを経由せず本番の `/opt/kireidot/worker.cjs` を直接差し替
 
 - SSMコマンド文字列に**丸括弧を含めると壊れる**(エスケープ事故)。`jq`/`python`でJSON組み立てする
 - **ホットパッチ後は同じ修正を必ずcommit+pushする。** 次の通常デプロイでバンドルが再生成されるため、gitに無い修正は消える
-- 差替はメイン箱だけでなく一括箱にも必要か毎回確認(scraper修正は通常両方)
+- 差替はメイン箱だけでなく**一括箱・投稿箱にも必要か毎回確認**(scraper修正は通常3箱すべて)
 
 ### 1.4 予備(FB)ワーカー
 
@@ -122,9 +129,9 @@ git fetch upstream && git merge upstream/main && git push  # ほぼfast-forward
 
 claim→即defer(cooldown中など)の反復は外からは無活動に見える。**待機件数だけで停止と判断しない。**
 
-- 正常系の待機(queued)は0。非0の3分類: ①cooldownバックログ(待てば流れる) ②再試行不能ジョブ(容量超過・予定重複・SB予約ID無し等=データ起因) ③ゾンビ(24hガードで刈られる)
+- 正常系の待機(queued)は0。非0の4分類: ①cooldownバックログ(待てば流れる) ②再試行不能ジョブ(容量超過・予定重複・SB予約ID無し等=データ起因) ③ゾンビ(24hガードで刈られる) ④**`sync_features` でOFFにした機能の残存ジョブ**(claim時フィルタのみでcancelされないため永久に待機表示。滞留ではない)
 - 停止を疑う条件: **15分以上・複数アカウント跨ぎで完全無活動**(claimイベントすら無い)の場合のみ。そのときはじめて `docker logs` → 必要なら restart
-- 滞留の自動回収は `salonboard_reap_stale_queued_writes` がmaintenance cron(*/3)で稼働済み。手で掃除しない
+- 滞留の自動回収は `salonboard_reap_stale_queued_writes` がmaintenance cron(*/3)で稼働済み。手で掃除しない([monitoring.md §2](monitoring.md) にmaintenanceの全内容)
 
 ### 2.3 書込ジョブが永久待機/流れない
 
