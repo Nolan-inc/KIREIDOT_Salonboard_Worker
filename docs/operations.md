@@ -88,6 +88,21 @@ git fetch upstream && git merge upstream/main && git push  # ほぼfast-forward
 
 - migrationは `supabase/migrations/` に追加し Supabase MCP/CLI で適用
 - **罠: `apply_migration` の CREATE TABLE は postgres にしか権限が付かない。** service_role経由が黙ってpermission deniedになるため、新テーブルには明示 `GRANT` + `NOTIFY pgrst, 'reload schema'` が必須(2026-08-02 heartbeats実障害)
+- **🔴 罠: PostgRESTで「関数に引数を足して後方互換」は成立しない。** 既存関数に引数を追加した新バージョンを作り、旧シグネチャを残すと**オーバーロードが2つ並存**し、PostgRESTがどちらを呼ぶか決められず全リクエストが500になる:
+  ```
+  500 {"error":"Could not choose the best candidate function between: ..."}
+  ```
+  `DEFAULT NULL` を付けても解決しない(引数名でのマッチが両方に当たるため)。**関数のシグネチャを変えるmigrationでは、必ず同じmigration内で旧シグネチャを `DROP FUNCTION` すること。**
+
+  **2026-08-09 実障害**: `20260809020000_shard_assignment.sql` が `salonboard_claim_next_job` に `p_shard` を追加した際、旧5引数版を落とさなかったため**全ワーカーがclaim不可となり同期が約24分停止**(15:49〜16:13 UTC)。復旧は旧シグネチャのDROP + ワーカー再起動。
+  ```sql
+  DROP FUNCTION public.salonboard_claim_next_job(text,integer,integer,text,text);
+  ```
+  **検知方法**: Vercel Observability の `/api/salonboard/jobs` でError Rateがスパイクし、ワーカーログに `[poll] fetch error: jobs fetch failed: 500` が全箱で並ぶ。関数の重複は次で確認できる:
+  ```sql
+  select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+  where n.nspname='public' and p.proname='<関数名>';
+  ```
 - **Edge Functionのデプロイは必ず `git pull` 後のrepo mainから。** デプロイ前に `get_edge_function` で現行版に他人の変更が無いか確認(2026-07-25 v19上書き事故: 別セッションの変更を7時間退行させた)
 
 ### 1.7 レーン/並行度のホット変更
