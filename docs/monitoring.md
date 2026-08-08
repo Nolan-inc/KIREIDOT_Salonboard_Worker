@@ -125,7 +125,14 @@ KD由来(`source='kireidot'`)で confirmed/pending、`external_booking_id` が�
 
 無効化: `SALONBOARD_DEBUG_CAPTURE=0`(既定は有効)。
 
-**ディスク**: captureは放置すると溜まります(2026-08-08に常時系のディスク使用率が91%に到達)。現在は**7日ローテのお掃除cronを全4箱に設置済み**(対処後38%)。ディスク逼迫はChrome起動失敗という分かりにくい形で現れるため、原因不明の起動失敗時は `df -h` を確認してください。
+**⚠️ ディスク**: captureは放置すると溜まります(2026-08-08に常時系のディスク使用率が91%に到達)。7日ローテのお掃除スクリプトが `/etc/cron.daily/sb-debug-cleanup` に設置されていますが、**AL2023にcronデーモンが無いため実行されていません**([operations.md §5](operations.md#5-未解決-デバッグcaptureのお掃除が動いていない))。当面は手動確認が必要です。
+
+```
+aws ssm send-command --instance-ids i-0f1cc0aff1ac8dd2e --document-name AWS-RunShellScript \
+  --parameters 'commands=["df -h /","docker exec sb-worker-cloud du -sh /home/pwuser/.kireidot/salonboard-debug"]'
+```
+
+ディスク逼迫はChrome起動失敗という分かりにくい形で現れるため、原因不明の起動失敗時は `df -h` を確認してください。
 
 **参照方法**: SSM経由で `ls -lt ~/.kireidot/salonboard-debug/push_booking/ | head` して、該当ジョブIDのディレクトリを見ます。
 

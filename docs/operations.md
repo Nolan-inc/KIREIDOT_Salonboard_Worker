@@ -20,7 +20,7 @@
 | バンドル置き場 | `s3://kireidot-sb-worker-debug-972293797066/deploy/<commit SHA>/worker.cjs` | イミュータブル。ロールバックの起点 |
 | ワーカー本体(箱上) | `/opt/kireidot/worker.cjs`(コンテナに read-only bind-mount) | 差替→`docker restart`で反映 |
 | ホット設定 | コンテナ内 `/home/pwuser/.kireidot/`(`worker_capabilities`・`max_concurrency`・`anthropic_api_key`) | 読込はプロセス起動時のみ→変更後は restart 必要 |
-| デバッグcapture | 箱上 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。**7日ローテのお掃除cronを全4箱に設置済み**(2026-08-08。放置してディスク91%まで到達した実績あり) |
+| デバッグcapture | コンテナ内 `~/.kireidot/salonboard-debug/` | 失敗時スクショ/HTML。**⚠️7日ローテのお掃除スクリプトは全4箱に設置済みだが未稼働**(AL2023にcronデーモンが無い → [§5](#5-未解決-デバッグcaptureのお掃除が動いていない)) |
 | 通知 | Slack `#kireidot-info` | 成功/失敗の4分類通知+予約明細 |
 
 ---
@@ -186,3 +186,48 @@ claim→即defer(cooldown中など)の反復は外からは無活動に見える
 - [ ] scraper修正の場合: 予約同期くん(デスクトップ)のリリースも必要か判断したか
 - [ ] ホットパッチした場合: 同内容をcommit+pushしたか
 - [ ] デプロイ後30分の `#kireidot-info` で失敗傾向が出ていないか(デプロイ起因のコールドログイン波)
+
+---
+
+## 5. 未解決: デバッグcaptureのお掃除が動いていない
+
+**状態(2026-08-09 実測)**: `/etc/cron.daily/sb-debug-cleanup` は全4箱に設置済みだが、**一度も実行されていない**。
+
+**原因**: 箱のOSが **Amazon Linux 2023** で、`cronie` / `cronie-anacron` が**インストールされていない**。`/etc/cron.daily/` は単なるディレクトリで、それを回す仕組み(crond + anacron の run-parts)が存在しない。`systemctl list-unit-files | grep cron` の結果もゼロ件。
+
+```
+package cronie is not installed
+package cronie-anacron is not installed
+NO CRON UNIT FILES
+```
+
+**現在の実害**: まだ無い。2026-08-08に手動で古いcaptureを削除した直後のため、7日超のディレクトリは0件。ただし**放置すれば再び溜まり続ける**。
+
+| 箱 | ディスク使用率 | capture量 | 増加ペース |
+|---|---|---|---|
+| メイン(50GB) | 39% | 1.8GB / 6,710ディレクトリ(8/1〜) | **約225MB/日** |
+| 予備FB(20GB) | 29% | 76MB(8/3〜) | 約15MB/日 |
+| 一括(30GB) | 20% | 4KB | ほぼゼロ |
+| 投稿(50GB) | 11% | 0 | ゼロ(新設) |
+
+メイン箱の内訳: bookings 851MB / change 460MB / schedule 152MB / cancel 138MB / menu 107MB。**書込失敗が多い箱ほど溜まる**構造。
+
+**推奨する直し方(未実施)**: cronieを入れるより、AL2023ネイティブの systemd timer にするのが確実。全4箱に設置し、`scripts/` に冪等スクリプトとして置いてリポジトリ管理下にする。
+
+```ini
+# /etc/systemd/system/sb-debug-cleanup.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'docker exec <container> sh -c "find /home/pwuser/.kireidot/salonboard-debug -mindepth 2 -maxdepth 2 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null" || true'
+
+# /etc/systemd/system/sb-debug-cleanup.timer
+[Timer]
+OnCalendar=daily
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl enable --now sb-debug-cleanup.timer` で有効化し、`systemctl list-timers | grep sb-debug` で登録を確認する。
+
+**⚠️ 同じ罠が他にもある可能性**: 「箱上に `/etc/cron.*` を置いた」系の運用はすべて動いていない。箱で定期実行を仕込むときは **systemd timer を使い、`systemctl list-timers` で登録を確認する**こと。
