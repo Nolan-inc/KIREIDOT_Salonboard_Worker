@@ -69,7 +69,7 @@ flowchart TB
 |---|---|---|
 | 常時系 Cloud Worker | 予約書込(create/update/cancel)・予約取込・シフト反映などSLA対象 | main push で GH Actions 自動デプロイ(paths: worker.ts / scrapers.cjs / worker-process.cjs 等のみ) |
 | 一括系 Bulk Worker | 設定系fetch(menu/coupon/staff/reviews…)・一括取込 | 2026-08-08 レーン分割移行中(claim p_lane・`salonboard_job_lane()`でfetch系=bulk) |
-| Fallback Worker | Cloud書込失敗の1回だけ再試行(Cloud→FB→PC連鎖) | 本体repoをupstreamとして手動merge運用 |
+| Fallback Worker ×2 | Cloud書込失敗の1回だけ再試行(Cloud→FB→PC連鎖) | 2026-08-09に冗長化(単一障害点解消)。tag Role=fallback の全台へCI配布 |
 | 予約同期くん(PC) | 実Chrome常駐セッションでの書込。CAPTCHA非感受 | **affinityガード: 自店舗ログイン済みの店舗のみclaim可**(現在ADER系等。Unelimit系は未設定) |
 | Decodo Proxy | 書込=static ISP(店舗→IP sticky)。住宅IPは/login/拒否のため読み専用 | IP評判がCAPTCHA発生に直結 |
 

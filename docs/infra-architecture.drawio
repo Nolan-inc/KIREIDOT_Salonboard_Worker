@@ -31,7 +31,7 @@
         </mxCell>
 
         <!-- ===== AWS ===== -->
-        <mxCell id="aws" value="AWS EC2 — 4箱・同一バンドル (役割はレーン申告で決定)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FFF4E0;strokeColor=#D79B00;" vertex="1" parent="1">
+        <mxCell id="aws" value="AWS EC2 — 5箱・同一バンドル (役割はレーン申告で決定)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#FFF4E0;strokeColor=#D79B00;" vertex="1" parent="1">
           <mxGeometry x="40" y="320" width="600" height="330" as="geometry" />
         </mxCell>
         <mxCell id="ec2main" value="メインEC2 (c6i.xlarge)&#10;docker: sb-worker-cloud&#10;常時系 lane_realtime / 並行8&#10;予約書込3分SLA担当" style="rounded=1;whiteSpace=wrap;html=1;fontStyle=0;fillColor=#FFFBF2;strokeColor=#D79B00;" vertex="1" parent="aws">
@@ -43,7 +43,7 @@
         <mxCell id="ec2post" value="投稿EC2 (t3.medium・8/8新設)&#10;docker: sb-worker-post&#10;lane_post&#10;ブログ/スタイル/フォト/クーポン反映" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="aws">
           <mxGeometry x="15" y="160" width="275" height="105" as="geometry" />
         </mxCell>
-        <mxCell id="ec2fb" value="予備EC2 (t3.medium)&#10;docker: sb-worker-fallback&#10;executor=fallback_cloud&#10;Cloud失敗書込を1回だけ再試行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="aws">
+        <mxCell id="ec2fb" value="予備EC2 ×2 (t3.medium・2026-08-09 冗長化)&#10;docker: sb-worker-fallback&#10;executor=fallback_cloud&#10;Cloud失敗書込を1回だけ再試行&#10;※単一障害点解消・tag Role=fallbackへ一括配布" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D79B00;" vertex="1" parent="aws">
           <mxGeometry x="305" y="160" width="275" height="105" as="geometry" />
         </mxCell>
         <mxCell id="ec2note" value="セッション: アカウント単位のuserDataDirを永続 (SIGTERM flushでデプロイ跨ぎ維持)&#10;同一SBアカウントは同時1セッションのみ → claimはgroup_account_id単位で排他" style="text;html=1;align=left;verticalAlign=top;fontSize=10;fontColor=#8A6D3B;" vertex="1" parent="aws">
@@ -59,7 +59,7 @@
         </mxCell>
 
         <!-- ===== Proxy ===== -->
-        <mxCell id="proxy" value="Decodo Proxy&#10;static ISP ×20 (書込・店舗sticky)&#10;residential (読み専用・loginは拒否)&#10;※_abckは発行時IPに紐づく→sticky必須" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEBEC;strokeColor=#C0504D;" vertex="1" parent="1">
+        <mxCell id="proxy" value="Decodo Proxy&#10;static ISP ×50 (書込・店舗sticky)&#10;residential (読み専用・loginは拒否)&#10;※_abckは発行時IPに紐づく→sticky必須" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEBEC;strokeColor=#C0504D;" vertex="1" parent="1">
           <mxGeometry x="720" y="400" width="230" height="130" as="geometry" />
         </mxCell>
 
